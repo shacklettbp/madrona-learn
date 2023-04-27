@@ -1,5 +1,5 @@
 from setuptools import setup
 
 setup(
-    name="madrona_train",
+    name="madrona_learn",
 )
