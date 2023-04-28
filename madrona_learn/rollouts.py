@@ -3,15 +3,25 @@ import torch
 class RolloutBuffer:
     def __init__(self,
                  dev,
-                 actions_shape,
+                 num_agents,
+                 action_shape,
                  actions_type,
-                 rewards_shape,
                  steps_per_update):
-        self.actions_store = torch.zeros((steps_per_update, *actions_shape),
+        self.actions = torch.zeros(
+            (steps_per_update, num_agents, *action_shape),
             dtype=actions_type, device=dev)
-        self.rewards_store = torch.zeros((steps_per_update, *rewards_shape),
+        self.rewards = torch.zeros(
+            (steps_per_update, num_agents, 1),
+            dtype=torch.float16, device=dev)
+        self.dones = torch.zeros(
+                (steps_per_update, num_agents, 1),
+            dtype=torch.float16, device=dev)
+        self.values = torch.zeros(
+            (steps_per_update, num_agents, 1),
             dtype=torch.float16, device=dev)
 
-    def save(self, slot, actions, rewards):
-        self.actions_store[slot].copy_(actions)
-        self.rewards_store[slot].copy_(rewards)
+    def save(self, slot, step_actions, step_rewards, step_dones, step_values):
+        self.actions[slot].copy_(step_actions)
+        self.rewards[slot].copy_(step_rewards)
+        self.rewards[slot].copy_(step_dones)
+        self.values[slot].copy_(step_values)

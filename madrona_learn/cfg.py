@@ -1,10 +1,13 @@
 from dataclasses import dataclass
+from typing import Callable
 
-@dataclass(frozen=True, kw_only=True)
+import torch
+
+@dataclass(frozen=True)
 class TrainConfig:
-    num_epochs: int
-    lr: float
+    num_updates: int
     steps_per_update: int
+    lr: float
     gamma: float
 
     def __repr__(self):
@@ -14,3 +17,10 @@ class TrainConfig:
             rep += f"\n  {k}: {v}" 
 
         return rep
+
+@dataclass(frozen=True)
+class SimConfig:
+    step: Callable
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    dones: torch.Tensor
