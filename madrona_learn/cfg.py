@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, List
 
 import torch
 
@@ -21,6 +21,8 @@ class TrainConfig:
 @dataclass(frozen=True)
 class SimConfig:
     step: Callable
+    process_obs: Callable
+    obs: List[torch.Tensor]
     actions: torch.Tensor
-    rewards: torch.Tensor
     dones: torch.Tensor
+    rewards: torch.Tensor
