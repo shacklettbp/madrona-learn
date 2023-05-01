@@ -3,32 +3,16 @@ from torch import optim
 from torch.func import vmap
 from time import time
 
-from .cfg import TrainConfig
+from .cfg import TrainConfig, SimData
 from .rollouts import RolloutManager
 
-def ppo_train(sim, cfg, policy, dev):
-    num_agents = sim.actions.shape[0]
-
-    policy = policy.to(dev)
-
-    optimizer = optim.Adam(policy.parameters(), lr=cfg.lr)
-
-    if dev.type == 'cuda':
-        scaler = torch.cuda.amp.GradScaler()
-
-    rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma)
-
-    values = torch.zeros((num_agents, 1),
-                         dtype=torch.float16, device=dev)
-
-    if dev.type == 'cuda':
-        def policy_infer_fn(actions_out, *obs):
-            with torch.cuda.amp.autocast(dtype=torch.float16):
-                policy.infer(actions_out, *obs)
-    else:
-        def policy_infer_fn(actions_out, *obs):
-            policy.infer(actions_out, *obs)
-
+def _update_loop(cfg : TrainConfig,
+                 sim : SimData,
+                 rollouts : RolloutManager,
+                 policy,
+                 policy_infer_fn,
+                 optimizer,
+                 scaler):
     for update_idx in range(cfg.num_updates):
         update_start_time = time()
 
@@ -47,7 +31,36 @@ def ppo_train(sim, cfg, policy, dev):
 def train(sim, cfg, policy, dev):
     print(cfg)
 
-    #train_compiled = torch.compile(ppo_train, dynamic=False)
-    train_compiled = ppo_train
+    num_agents = sim.actions.shape[0]
 
-    train_compiled(sim, cfg, policy, dev)
+    policy = policy.to(dev)
+
+    optimizer = optim.Adam(policy.parameters(), lr=cfg.lr)
+
+    if dev.type == 'cuda':
+        scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
+
+    rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma)
+
+    if dev.type == 'cuda':
+        def policy_infer_fn(actions_out, *obs):
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                policy.infer(actions_out, *obs)
+    else:
+        def policy_infer_fn(actions_out, *obs):
+            policy.infer(actions_out, *obs)
+
+
+    update_loop = torch.compile(_update_loop, dynamic=False)
+    #update_loop = _update_loop
+
+    update_loop(
+        cfg=cfg,
+        sim=sim,
+        rollouts=rollouts,
+        policy=policy,
+        policy_infer_fn=policy_infer_fn,
+        optimizer=optimizer,
+        scaler=scaler)

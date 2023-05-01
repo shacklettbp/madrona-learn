@@ -19,7 +19,7 @@ class TrainConfig:
         return rep
 
 @dataclass(frozen=True)
-class SimConfig:
+class SimData:
     step: Callable
     obs: List[torch.Tensor]
     actions: torch.Tensor

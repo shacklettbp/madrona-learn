@@ -32,19 +32,22 @@ class RolloutManager:
     def collect(self, sim, policy_infer_fn):
         step_total = 0
         for slot in range(0, self.steps_per_update):
+            self.dones[slot].copy_(sim.dones, non_blocking=True)
+            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
+
+            cur_obs_buffers = [obs[slot] for obs in self.obs]
+
+            for obs_idx, step_obs in enumerate(sim.obs):
+                cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
+
+            policy_infer_fn(self.actions[slot], *cur_obs_buffers)
+
+            sim.actions.copy_(self.actions[slot], non_blocking=True)
+
             step_start_time = time()
             sim.step()
             step_total += time() - step_start_time
 
-            self.actions[slot].copy_(sim.actions, non_blocking=True)
-            self.dones[slot].copy_(sim.dones, non_blocking=True)
-            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
-
-            for obs_idx, step_obs in enumerate(sim.obs):
-                self.obs[obs_idx][slot].copy_(step_obs, non_blocking=True)
-
-            policy_infer_fn(self.actions[slot],
-                            *[obs[slot] for obs in self.obs])
 
         #self._compute_returns()
 
