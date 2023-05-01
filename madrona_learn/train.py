@@ -14,7 +14,7 @@ def ppo_train(sim, cfg, policy, dev):
     optimizer = optim.Adam(policy.parameters(), lr=cfg.lr)
 
     if dev.type == 'cuda':
-        scaler = amp.GradScaler()
+        scaler = torch.cuda.amp.GradScaler()
 
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma)
 
@@ -22,12 +22,12 @@ def ppo_train(sim, cfg, policy, dev):
                          dtype=torch.float16, device=dev)
 
     if dev.type == 'cuda':
-        def policy_act_fn(actions_out, *obs):
+        def policy_infer_fn(actions_out, *obs):
             with torch.cuda.amp.autocast(dtype=torch.float16):
-                policy.act(actions_out, *obs)
+                policy.infer(actions_out, *obs)
     else:
-        def policy_act_fn(actions_out, *obs):
-            policy.act(actions_out, *obs)
+        def policy_infer_fn(actions_out, *obs):
+            policy.infer(actions_out, *obs)
 
     for update_idx in range(cfg.num_updates):
         update_start_time = time()
@@ -36,14 +36,13 @@ def ppo_train(sim, cfg, policy, dev):
             print(f'Update: {update_idx}')
 
         with torch.no_grad():
-            rollouts.collect(sim, policy_act_fn)
+            rollouts.collect(sim, policy_infer_fn)
 
         optimizer.zero_grad()
 
         update_end_time = time()
 
-        print(update_end_time - update_start_time,
-              step_total)
+        print(update_end_time - update_start_time)
 
 def train(sim, cfg, policy, dev):
     print(cfg)

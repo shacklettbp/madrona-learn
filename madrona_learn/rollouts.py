@@ -29,23 +29,24 @@ class RolloutManager:
         self.steps_per_update = steps_per_update
         self.gamma = gamma
 
-    def collect(self, sim, policy_act_fn):
+    def collect(self, sim, policy_infer_fn):
         step_total = 0
         for slot in range(0, self.steps_per_update):
             step_start_time = time()
             sim.step()
             step_total += time() - step_start_time
 
-            policy_act_fn(sim.actions, *sim.obs)
-
-            self.actions[slot].copy_(sim.actions)
-            self.dones[slot].copy_(sim.dones)
-            self.rewards[slot].copy_(sim.rewards)
+            self.actions[slot].copy_(sim.actions, non_blocking=True)
+            self.dones[slot].copy_(sim.dones, non_blocking=True)
+            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
 
             for obs_idx, step_obs in enumerate(sim.obs):
-                self.obs[obs_idx][slot].copy_(step_obs)
+                self.obs[obs_idx][slot].copy_(step_obs, non_blocking=True)
 
-        self._compute_returns()
+            policy_infer_fn(self.actions[slot],
+                            *[obs[slot] for obs in self.obs])
+
+        #self._compute_returns()
 
     def _compute_returns(self):
         discounted_sum = self.values[-1]
