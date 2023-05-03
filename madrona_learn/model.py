@@ -27,6 +27,19 @@ class SmallMLP(nn.Module):
     def forward(self, in_features):
         return self.net(in_features)
 
+class LSTMRecurrentPolicy(nn.Module):
+    def __init__(self, in_channels, num_hidden, num_layers=1):
+        super().__init__()
+
+        self.lstm = nn.LSTM(
+            input_size=in_channels,
+            hidden_size=num_hidden
+            num_layers=num_layers,
+            batch_first=True)
+
+    def forward(self, in_features, hidden_state):
+        return self.lstm(
+
 class SharedActorCritic(nn.Module):
     class DefaultDiscreteActor(nn.Module):
         def __init__(self, in_channels, actions_num_buckets):
@@ -72,25 +85,23 @@ class SharedActorCritic(nn.Module):
         def forward(self, in_features):
             return self.net(in_features)
 
-    def __init__(self, process_obs_fn, core, actor, critic):
+    def __init__(self, process_obs_fn, backbone, rnn, actor, critic):
         super().__init__()
 
         self.process_obs = process_obs_fn
-        self.core = core
+        self.backbone = backbone 
+        self.rnn = rnn
         self.actor = actor
         self.critic = critic
 
-    def _common(self, *obs):
+    def _common(self, *obs, rnn_cur_hidden):
         processed_obs = self.process_obs(*obs)
-        return self.core(processed_obs)
+        features = self.backbone(processed_obs)
 
-    def forward(self, *obs):
-        features = self._common(*obs)
-        actions = self.actor(features)
-        values = self.critic(features)
+        return self.rnn(features, rnn_cur_hidden)
 
-        return actions, values
-
-    def infer(self, actions_out, *obs):
-        features = self._common(*obs)
+    def infer(self, actions_out, rnn_cur_hidden, *obs):
+        features, rnn_next_hidden = self._common(*obs, rnn_cur_hidden)
         self.actor.infer(features, actions_out=actions_out)
+
+        return rnn_next_hidden
