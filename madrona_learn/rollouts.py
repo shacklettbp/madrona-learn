@@ -2,10 +2,14 @@ import torch
 from time import time
 
 class RolloutManager:
-    def __init__(self, dev, sim, steps_per_update, gamma):
+    def __init__(self, dev, sim, steps_per_update, gamma, rnn_hidden_shape=None):
         self.actions = torch.zeros(
             (steps_per_update, *sim.actions.shape),
             dtype=sim.actions.dtype, device=dev)
+
+        self.log_probs = torch.zeros(
+            (steps_per_update, *sim.actions.shape),
+            dtype=torch.float16, device=dev)
 
         self.dones = torch.zeros(
             (steps_per_update, *sim.dones.shape),
@@ -15,9 +19,8 @@ class RolloutManager:
             (steps_per_update, *sim.rewards.shape),
             dtype=torch.float16, device=dev)
 
-        self.returns = torch.zeros(
-            (steps_per_update, *sim.rewards.shape),
-            dtype=torch.float16, device=dev)
+        self.values = torch.zeros_like(self.rewards)
+        self.returns = torch.zeros_like(self.values)
 
         self.obs = []
 
@@ -25,22 +28,49 @@ class RolloutManager:
             self.obs.append(torch.zeros((steps_per_update, *obs_tensor.shape),
                                         dtype=obs_tensor.dtype, device=dev))
 
-
         self.steps_per_update = steps_per_update
         self.gamma = gamma
 
+        if rnn_hidden_shape != None:
+            hidden_batch_shape = (*rnn_hidden_shape[0:2], sim.actions.shape[0],
+                                  rnn_hidden_shape[2])
+
+            self.rnn_hidden_start = torch.zeros(
+                hidden_batch_shape, dtype=torch.float16, device=dev)
+            self.rnn_hidden_end = torch.zeros_like(self.rnn_hidden_start)
+            self.rnn_hidden_alt = torch.zeros_like(self.rnn_hidden_start)
+        else:
+            self.rnn_hidden_start = None
+            self.rnn_hidden_end = None
+            self.rnn_hidden_alt = None
+
+
     def collect(self, sim, policy_infer_fn):
         step_total = 0
-        for slot in range(0, self.steps_per_update):
-            self.dones[slot].copy_(sim.dones, non_blocking=True)
-            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
 
+        recurrent_policy = self.rnn_hidden_start != None
+
+        if recurrent_policy:
+            self.rnn_hidden_start.copy_(self.rnn_hidden_end)
+            rnn_hidden_cur_in = self.rnn_hidden_end
+            rnn_hidden_cur_out = self.rnn_hidden_alt
+
+        for slot in range(0, self.steps_per_update):
             cur_obs_buffers = [obs[slot] for obs in self.obs]
 
             for obs_idx, step_obs in enumerate(sim.obs):
                 cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
-            policy_infer_fn(self.actions[slot], *cur_obs_buffers)
+            if recurrent_policy:
+                policy_infer_fn(self.actions[slot], self.log_probs[slot],
+                                self.values[slot], rnn_hidden_cur_out,
+                                rnn_hidden_cur_in, *cur_obs_buffers)
+
+                rnn_hidden_cur_in, rnn_hidden_cur_out = \
+                    rnn_hidden_cur_out, rnn_hidden_cur_in
+            else:
+                policy_infer_fn(self.actions[slot], self.log_probs[slot],
+                                self.values[slot], *cur_obs_buffers)
 
             sim.actions.copy_(self.actions[slot], non_blocking=True)
 
@@ -48,14 +78,20 @@ class RolloutManager:
             sim.step()
             step_total += time() - step_start_time
 
+            self.dones[slot].copy_(sim.dones, non_blocking=True)
+            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
 
-        #self._compute_returns()
+        if recurrent_policy:
+            self.rnn_hidden_end = rnn_hidden_cur_out
+            self.rnn_hidden_alt = rnn_hidden_cur_in
+
+        self._compute_returns()
 
     def _compute_returns(self):
         discounted_sum = self.values[-1]
 
         for i in reversed(range(self.steps_per_update)):
-            discounted_sum = rewards[i] + \
-                self.gamma * (1.0 - dones[i].half()) * discounted_sum
+            discounted_sum = self.rewards[i] + \
+                self.gamma * (1.0 - self.dones[i].half()) * discounted_sum
 
             self.returns[i] = discounted_sum

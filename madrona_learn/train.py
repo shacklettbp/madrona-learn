@@ -42,25 +42,25 @@ def train(sim, cfg, policy, dev):
     else:
         scaler = None
 
-    rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma)
+    rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
+                              policy.rnn_hidden_shape)
 
     if dev.type == 'cuda':
-        def policy_infer_fn(actions_out, *obs):
+        def policy_infer_wrapper(*args, **kwargs):
             with torch.cuda.amp.autocast(dtype=torch.float16):
-                policy.infer(actions_out, *obs)
+                policy.rollout_infer(*args, **kwargs)
     else:
-        def policy_infer_fn(actions_out, *obs):
-            policy.infer(actions_out, *obs)
+        def policy_infer_wrapper(*args, **kwargs):
+            policy.rollout_infer(*args, **kwargs)
 
-
-    update_loop = torch.compile(_update_loop, dynamic=False)
-    #update_loop = _update_loop
+    #update_loop = torch.compile(_update_loop, dynamic=False)
+    update_loop = _update_loop
 
     update_loop(
         cfg=cfg,
         sim=sim,
         rollouts=rollouts,
         policy=policy,
-        policy_infer_fn=policy_infer_fn,
+        policy_infer_fn=policy_infer_wrapper,
         optimizer=optimizer,
         scaler=scaler)
