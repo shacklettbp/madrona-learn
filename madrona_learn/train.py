@@ -1,7 +1,9 @@
 import torch
+import torch._dynamo
 from torch import optim
 from torch.func import vmap
 from time import time
+from os import environ as env_vars
 
 from .cfg import TrainConfig, SimData
 from .rollouts import RolloutManager
@@ -67,8 +69,15 @@ def train(sim, cfg, policy, dev):
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
                               policy.rnn_hidden_shape)
 
-    #update_loop = torch.compile(_update_loop, dynamic=False)
-    update_loop = _update_loop
+    if 'MADRONA_TRAIN_NO_TORCH_COMPILE' in env_vars and \
+            env_vars['MADRONA_TRAIN_NO_TORCH_COMPILE'] == '1':
+        update_loop = _update_loop
+    else:
+        if 'MADRONA_TRAIN_TORCH_COMPILE_DEBUG' in env_vars and \
+                env_vars['MADRONA_TRAIN_TORCH_COMPILE_DEBUG'] == '1':
+            torch._dynamo.config.verbose=True
+
+        update_loop = torch.compile(_update_loop, dynamic=False)
 
     update_loop(
         cfg=cfg,

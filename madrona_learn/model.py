@@ -157,7 +157,7 @@ class RecurrentActorCritic(ActorCritic):
 
     def rollout_infer_values(self, values_out, rnn_hidden_in, *obs):
         features = self.backbone(*obs)
-        rnn_out, rnn_next_hidden = self.rnn.infer(features, rnn_hidden_in)
+        rnn_out, _ = self.rnn.infer(features, rnn_hidden_in)
         self.critic.infer(rnn_out, values_out=values_out)
 
     def train(self, rnn_hidden_starts, dones, rollout_actions, *obs):

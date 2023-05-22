@@ -23,8 +23,13 @@ class RolloutManager:
             dtype=torch.float16, device=dev)
 
         self.values = torch.zeros(
-            (steps_per_update + 1, *sim.rewards.shape),
+            (steps_per_update, *sim.rewards.shape),
             dtype=torch.float16, device=dev)
+
+        # FIXME: seems like this could be combined into self.values by
+        # making self.values one longer, but that breaks torch.compile
+        self.bootstrap_values = torch.zeros(
+            sim.rewards.shape, dtype=torch.float16, device=dev)
 
         self.returns = torch.zeros_like(self.rewards)
 
@@ -90,8 +95,6 @@ class RolloutManager:
             self.dones[slot].copy_(sim.dones, non_blocking=True)
             self.rewards[slot].copy_(sim.rewards, non_blocking=True)
 
-        final_values = self.values[self.steps_per_update]
-
         if self.need_obs_copy:
             final_obs = [obs[self.steps_per_update] for obs in self.obs]
             for obs_idx, step_obs in enumerate(sim.obs):
@@ -105,15 +108,15 @@ class RolloutManager:
             self.rnn_hidden_end = rnn_hidden_cur_in
             self.rnn_hidden_alt = rnn_hidden_cur_out
 
-            policy_infer_values_fn(final_values, self.rnn_hidden_end,
+            policy_infer_values_fn(self.bootstrap_values, self.rnn_hidden_end,
                                    *final_obs)
         else:
-            policy_infer_values_fn(final_values, *final_obs)
+            policy_infer_values_fn(self.bootstrap_values, *final_obs)
 
-        self._compute_returns(final_values)
+        self._compute_returns()
 
-    def _compute_returns(self, final_values):
-        discounted_sum = final_values
+    def _compute_returns(self):
+        discounted_sum = self.bootstrap_values
 
         for i in reversed(range(self.steps_per_update)):
             discounted_sum = self.rewards[i] + \
