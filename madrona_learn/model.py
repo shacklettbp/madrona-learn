@@ -111,6 +111,10 @@ class ActorCritic(nn.Module):
                                  log_probs_out=log_probs_out)
         self.critic.infer(features, values_out=values_out)
 
+    def rollout_infer_values(self, values_out, *obs):
+        features = self.backbone(*obs)
+        self.critic.infer(features, values_out=values_out)
+
     def _train_backbone(self, *obs):
         obs_flattened = _flatten_obs_sequence(obs)
         return self.backbone(*obs_flattened)
@@ -150,6 +154,11 @@ class RecurrentActorCritic(ActorCritic):
 
         # FIXME, actual in place:
         rnn_hidden_out[...] = rnn_next_hidden
+
+    def rollout_infer_values(self, values_out, rnn_hidden_in, *obs):
+        features = self.backbone(*obs)
+        rnn_out, rnn_next_hidden = self.rnn.infer(features, rnn_hidden_in)
+        self.critic.infer(rnn_out, values_out=values_out)
 
     def train(self, rnn_hidden_starts, dones, rollout_actions, *obs):
         features = self._train_backbone(*obs)

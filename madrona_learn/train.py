@@ -10,7 +10,8 @@ def _update_loop(cfg : TrainConfig,
                  sim : SimData,
                  rollouts : RolloutManager,
                  policy,
-                 policy_infer_fn,
+                 policy_rollout_infer,
+                 policy_rollout_infer_values,
                  optimizer,
                  scaler):
     for update_idx in range(cfg.num_updates):
@@ -20,7 +21,8 @@ def _update_loop(cfg : TrainConfig,
             print(f'Update: {update_idx}')
 
         with torch.no_grad():
-            rollouts.collect(sim, policy_infer_fn)
+            rollouts.collect(sim, policy_rollout_infer,
+                             policy_rollout_infer_values)
 
         optimizer.zero_grad()
 
@@ -42,16 +44,28 @@ def train(sim, cfg, policy, dev):
     else:
         scaler = None
 
+    if dev.type == 'cuda':
+        def autocast_wrapper(fn):
+            def autocast_wrapped_fn(*args, **kwargs):
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    return fn(*args, **kwargs)
+
+            return autocast_wrapped_fn
+    else:
+        def autocast_wrapper(fn):
+            return fn
+
+    def policy_rollout_infer(*args, **kwargs):
+        return policy.rollout_infer(*args, **kwargs)
+
+    def policy_rollout_infer_values(*args, **kwargs):
+        return policy.rollout_infer_values(*args, **kwargs)
+
+    policy_rollout_infer = autocast_wrapper(policy_rollout_infer)
+    policy_rollout_infer_values = autocast_wrapper(policy_rollout_infer_values)
+
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
                               policy.rnn_hidden_shape)
-
-    if dev.type == 'cuda':
-        def policy_infer_wrapper(*args, **kwargs):
-            with torch.cuda.amp.autocast(dtype=torch.float16):
-                policy.rollout_infer(*args, **kwargs)
-    else:
-        def policy_infer_wrapper(*args, **kwargs):
-            policy.rollout_infer(*args, **kwargs)
 
     #update_loop = torch.compile(_update_loop, dynamic=False)
     update_loop = _update_loop
@@ -61,6 +75,7 @@ def train(sim, cfg, policy, dev):
         sim=sim,
         rollouts=rollouts,
         policy=policy,
-        policy_infer_fn=policy_infer_wrapper,
+        policy_rollout_infer=policy_rollout_infer,
+        policy_rollout_infer_values=policy_rollout_infer_values,
         optimizer=optimizer,
         scaler=scaler)
