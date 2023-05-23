@@ -1,6 +1,16 @@
 import torch
 from time import time
 
+@dataclass(frozen = True)
+class RolloutMiniBatch:
+    obs: List[torch.Tensor]
+    actions: torch.Tensor
+    log_probs: torch.Tensor
+    dones: torch.Tensor
+    rewards: torch.Tensor
+    values: torch.Tensor
+    advantages: torch.Tensor
+
 class RolloutManager:
     def __init__(self, dev, sim, steps_per_update, gamma,
                  gae_lambda, rnn_hidden_shape):
@@ -119,7 +129,7 @@ class RolloutManager:
         self._compute_advantages()
 
     def _compute_advantages(self):
-        advantage_estimate = 0.0
+        next_advantage = 0.0
         next_values = self.bootstrap_values
         for i in reversed(range(self.steps_per_update)):
             next_valid = (1.0 - self.dones[i].half())
@@ -129,8 +139,28 @@ class RolloutManager:
                 self.gamma * next_valid * next_values - self.values[i])
 
             # A_t = sum (gamma * lambda)^(l - 1) * delta_l (EQ 16 GAE)
-            advantage_estimate = (td_err +
-                self.gamma * self.gae_lambda * next_valid * advantage_estimate)
+            #     = delta_t + gamma * lambda * A_t+1
+            self.advantages[i] = (td_err +
+                self.gamma * self.gae_lambda * next_valid * next_advantage)
+
+            next_advantage = self.advantages[i]
             next_values = self.values[i]
 
-            self.advantages[i] = advantage_estimate
+    def gather_minibatch(inds):
+        obs_slice = [obs[:, inds, ...] for obs in self.obs]
+        
+        actions_slice = self.actions[:, inds, ...]
+        log_probs_slice = self.log_probs[:, inds, ...]
+        dones_slice = self.dones[:, inds, ...]
+        rewards_slice = self.rewards[:, inds, ...]
+        values_slice = self.values[:, inds, ...]
+        advantages_slice = self.advantages[:, inds, ...]
+        
+        return RolloutMiniBatch(
+            obs=obs_slice,
+            actions=actions_slice,
+            log_probs=log_probs_slice,
+            dones=dones_slice,
+            rewards=rewards_slice,
+            values=values_slice,
+            advantages=advantages_slice)

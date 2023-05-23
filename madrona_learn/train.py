@@ -17,6 +17,12 @@ def _update_loop(cfg : TrainConfig,
                  optimizer,
                  scaler,
                  scheduler):
+    num_agents = rollouts.actions.shape[1]
+
+    ppo_cfg = cfg.ppo_cfg
+
+    assert(num_agents % cfg.num_mini_batches == 0)
+
     for update_idx in range(cfg.num_updates):
         update_start_time = time()
 
@@ -27,15 +33,20 @@ def _update_loop(cfg : TrainConfig,
             rollouts.collect(sim, policy_rollout_infer,
                              policy_rollout_infer_values)
 
-        #loss = torch.zeros(5)
+        for epoch in ppo_cfg.num_epochs:
+            for inds in torch.randperm(num_agents).chunk(cfg.num_mini_batches):
+                mb = rollouts.gather_minibatch(inds)
 
-        #if scaler is None:
-        #    loss.backward()
-        #    optimizer.step()
-        #else:
-        #    scaler.scale(loss).backward()
-        #    scaler.step(optimizer)
-        #    scaler.update()
+
+        loss = torch.zeros(5)
+
+        if scaler is None:
+            loss.backward()
+            optimizer.step()
+        else:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         optimizer.zero_grad()
 
