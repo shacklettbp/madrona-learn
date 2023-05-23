@@ -3,7 +3,7 @@ from time import time
 
 class RolloutManager:
     def __init__(self, dev, sim, steps_per_update, gamma,
-                 rnn_hidden_shape=None):
+                 gae_lambda, rnn_hidden_shape):
         self.need_obs_copy = dev != sim.obs[0].device
 
         self.actions = torch.zeros(
@@ -31,22 +31,25 @@ class RolloutManager:
         self.bootstrap_values = torch.zeros(
             sim.rewards.shape, dtype=torch.float16, device=dev)
 
-        self.returns = torch.zeros_like(self.rewards)
+        self.advantages = torch.zeros_like(self.rewards)
 
         self.obs = []
 
-        obs_buffer_seq_len = steps_per_update
-
-        if self.need_obs_copy:
-            obs_buffer_seq_len += 1
-
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
-                (obs_buffer_seq_len, *obs_tensor.shape),
+                (steps_per_update, *obs_tensor.shape),
                 dtype=obs_tensor.dtype, device=dev))
+
+        if self.need_obs_copy:
+            self.final_obs = []
+
+            for obs_tensor in sim.obs:
+                self.final_obs.append(torch.zeros(
+                    obs_tensor.shape, dtype=obs_tensor.dtype, device=dev))
 
         self.steps_per_update = steps_per_update
         self.gamma = gamma
+        self.gae_lambda = gae_lambda
 
         if rnn_hidden_shape != None:
             self.recurrent_policy = True
@@ -96,7 +99,7 @@ class RolloutManager:
             self.rewards[slot].copy_(sim.rewards, non_blocking=True)
 
         if self.need_obs_copy:
-            final_obs = [obs[self.steps_per_update] for obs in self.obs]
+            final_obs = self.final_obs
             for obs_idx, step_obs in enumerate(sim.obs):
                 final_obs[obs_idx].copy_(step_obs, non_blocking=True)
         else:
@@ -108,18 +111,26 @@ class RolloutManager:
             self.rnn_hidden_end = rnn_hidden_cur_in
             self.rnn_hidden_alt = rnn_hidden_cur_out
 
-            policy_infer_values_fn(self.bootstrap_values, self.rnn_hidden_end,
-                                   *final_obs)
+            policy_infer_values_fn(self.bootstrap_values,
+                                   self.rnn_hidden_end, *final_obs)
         else:
             policy_infer_values_fn(self.bootstrap_values, *final_obs)
 
-        self._compute_returns()
+        self._compute_advantages()
 
-    def _compute_returns(self):
-        discounted_sum = self.bootstrap_values
-
+    def _compute_advantages(self):
+        advantage_estimate = 0.0
+        next_values = self.bootstrap_values
         for i in reversed(range(self.steps_per_update)):
-            discounted_sum = self.rewards[i] + \
-                self.gamma * (1.0 - self.dones[i].half()) * discounted_sum
+            next_valid = (1.0 - self.dones[i].half())
 
-            self.returns[i] = discounted_sum
+            # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+            td_err = (self.rewards[i] + 
+                self.gamma * next_valid * next_values - self.values[i])
+
+            # A_t = sum (gamma * lambda)^(l - 1) * delta_l (EQ 16 GAE)
+            advantage_estimate = (td_err +
+                self.gamma * self.gae_lambda * next_valid * advantage_estimate)
+            next_values = self.values[i]
+
+            self.advantages[i] = advantage_estimate

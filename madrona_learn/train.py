@@ -15,7 +15,8 @@ def _update_loop(cfg : TrainConfig,
                  policy_rollout_infer,
                  policy_rollout_infer_values,
                  optimizer,
-                 scaler):
+                 scaler,
+                 scheduler):
     for update_idx in range(cfg.num_updates):
         update_start_time = time()
 
@@ -25,6 +26,16 @@ def _update_loop(cfg : TrainConfig,
         with torch.no_grad():
             rollouts.collect(sim, policy_rollout_infer,
                              policy_rollout_infer_values)
+
+        #loss = torch.zeros(5)
+
+        #if scaler is None:
+        #    loss.backward()
+        #    optimizer.step()
+        #else:
+        #    scaler.scale(loss).backward()
+        #    scaler.step(optimizer)
+        #    scaler.update()
 
         optimizer.zero_grad()
 
@@ -67,7 +78,7 @@ def train(sim, cfg, policy, dev):
     policy_rollout_infer_values = autocast_wrapper(policy_rollout_infer_values)
 
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
-                              policy.rnn_hidden_shape)
+                              cfg.gae_lambda, policy.rnn_hidden_shape)
 
     if 'MADRONA_TRAIN_NO_TORCH_COMPILE' in env_vars and \
             env_vars['MADRONA_TRAIN_NO_TORCH_COMPILE'] == '1':
@@ -87,4 +98,5 @@ def train(sim, cfg, policy, dev):
         policy_rollout_infer=policy_rollout_infer,
         policy_rollout_infer_values=policy_rollout_infer_values,
         optimizer=optimizer,
-        scaler=scaler)
+        scaler=scaler,
+        scheduler=None)

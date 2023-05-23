@@ -9,6 +9,7 @@ class TrainConfig:
     steps_per_update: int
     lr: float
     gamma: float
+    gae_lambda: float
 
     def __repr__(self):
         rep = "TrainConfig:"
