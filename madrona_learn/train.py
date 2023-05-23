@@ -50,11 +50,16 @@ def _ppo_update(cfg : TrainConfig,
         cfg.ppo.entropy_coef * torch.mean(entropies)
     )
 
+    print(loss)
+
     if scaler is None:
         loss.backward()
+        nn.utils.clip_grad_norm_(policy.parameters(), cfg.ppo.max_grad_norm)
         optimizer.step()
     else:
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(policy.parameters(), cfg.ppo.max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 

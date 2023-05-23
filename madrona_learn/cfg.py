@@ -26,7 +26,12 @@ class TrainConfig:
         rep = "TrainConfig:"
 
         for k, v in self.__dict__.items():
-            rep += f"\n  {k}: {v}" 
+            if k == 'ppo':
+                rep += f"\n  ppo:"
+                for ppo_k, ppo_v in self.ppo.__dict__.items():
+                    rep += f"\n    {ppo_k}: {ppo_v}"
+            else:
+                rep += f"\n  {k}: {v}" 
 
         return rep
 
