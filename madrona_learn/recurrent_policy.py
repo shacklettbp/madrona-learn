@@ -15,8 +15,6 @@ class LSTMRecurrentPolicy(nn.Module):
         self.num_layers = num_layers
         self.hidden_shape = (2, self.num_layers, num_hidden)
 
-        self.eval_sequence = LSTMRecurrentPolicy.eval_sequence_slow
-
     def infer(self, in_features, cur_hidden):
         in_features = in_features.view(1, *in_features.shape)
 
@@ -27,19 +25,30 @@ class LSTMRecurrentPolicy(nn.Module):
 
         return out.view(*out.shape[1:]), new_hidden
 
+    def _get_lstm_params(self, layer_idx):
+        weight_ih = getattr(self.lstm, f'weight_ih_l{layer_idx}')
+        bias_ih = getattr(self.lstm, f'bias_ih_l{layer_idx}')
+
+        weight_hh = getattr(self.lstm, f'weight_hh_l{layer_idx}')
+        bias_hh = getattr(self.lstm, f'bias_hh_l{layer_idx}')
+
+        return weight_ih, bias_ih, weight_hh, bias_hh
+
     def lstm_iter_slow(self, layer_idx, in_features, cur_hidden, breaks):
-        ifgo = \
-            torch.mm(self.lstm.weight_ih_l[layer_idx],
-                     in_features) + \
-            self.lstm.bias_ih_l[0] + \
-            torch.mm(self.lstm.weight_hh_l[layer_idx],
-                     cur_hidden[0, :, :]) + \
-            self.lstm.bias_hh_l[0]
+        weight_ih, bias_ih, weight_hh, bias_hh = self._get_lstm_params(
+                layer_idx)
 
-        c = F.sigmoid(ifgo[:, 4:8]) * cur_hidden[1, :, :] + \
-                F.sigmoid(ifgo[:, 0:4]) * F.tanh(ifgo[:, 8:12])
+        ifgo = (
+            F.linear(in_features, weight_ih, bias_ih) +
+            F.linear(cur_hidden[0, :, :], weight_hh, bias_hh)
+        )
 
-        o = ifgo[:, 12:16]
+        hs = self.hidden_shape[-1] # hidden feature size
+
+        c = (F.sigmoid(ifgo[:, hs:2*hs]) * cur_hidden[1, :, :] +
+            F.sigmoid(ifgo[:, 0:hs]) * F.tanh(ifgo[:, 2*hs:3*hs]))
+
+        o = ifgo[:, 3*hs:4*hs]
 
         h = o * F.tanh(c)
 
@@ -65,17 +74,20 @@ class LSTMRecurrentPolicy(nn.Module):
             cur_features = in_sequences[i]
             cur_breaks = sequence_breaks[i]
 
+            new_hiddens = []
             for layer_idx in range(self.num_layers):
                 cur_features, new_hidden = self.lstm_iter_slow(
                     layer_idx, cur_features, cur_hidden[:, layer_idx, :, :],
                     sequence_breaks[i])
 
-                cur_hidden[:, layer_idx, :, :] = new_hidden
-
+                new_hiddens.append(new_hidden)
                 out_sequences.append(cur_features)
 
+            cur_hidden = torch.stack(new_hiddens, dim=1)
+
             cur_hidden = torch.where(
-                cur_breaks, zero_hidden,
-                cur_hidden_states)
+                cur_breaks.bool(), zero_hidden, cur_hidden)
 
         return torch.stack(out_sequences, dim=0)
+
+    eval_sequence = eval_sequence_slow

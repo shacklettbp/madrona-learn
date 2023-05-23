@@ -35,7 +35,9 @@ class SmallMLPBackbone(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, *in_obs):
-        processed_obs = self.process_obs(*in_obs)
+        with torch.no_grad():
+            processed_obs = self.process_obs(*in_obs)
+
         return self.net(processed_obs)
 
 class ActorCritic(nn.Module):
@@ -80,7 +82,7 @@ class ActorCritic(nn.Module):
             log_probs = []
             entropies = []
             for i, dist in enumerate(dists):
-                log_prob.append(dist.log_prob(rollout_actions[:, i]))
+                log_probs.append(dist.log_prob(rollout_actions[:, i]))
                 entropies.append(dist.entropy())
 
             return torch.stack(log_probs, dim=1), torch.stack(entropies, dim=1)
@@ -125,7 +127,7 @@ class ActorCritic(nn.Module):
                                                  *rollout_actions.shape[2:])
 
         log_probs, entropies = self.actor.train(flattened_actions, in_features)
-        values = self.critic.train(features)
+        values = self.critic.train(in_features)
 
         log_probs = log_probs.view(T, N, *log_probs.shape[1:])
         entropies = entropies.view(T, N, *entropies.shape[1:])

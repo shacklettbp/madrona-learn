@@ -5,11 +5,13 @@ import torch
 
 @dataclass(frozen=True)
 class PPOConfig:
-    num_epochs: int
     num_mini_batches: int
+    clip_coef: float
     value_loss_coef: float
     entropy_coef: float
     max_grad_norm: float
+    num_epochs: int = 1
+    clip_value_loss: bool = False
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -17,8 +19,8 @@ class TrainConfig:
     steps_per_update: int
     lr: float
     gamma: float
-    gae_lambda: float
-    ppo_cfg: PPOConfig
+    ppo: PPOConfig
+    gae_lambda: float = 1.0
 
     def __repr__(self):
         rep = "TrainConfig:"

@@ -1,5 +1,7 @@
 import torch
 from time import time
+from dataclasses import dataclass
+from typing import List, Optional
 
 @dataclass(frozen = True)
 class RolloutMiniBatch:
@@ -10,6 +12,7 @@ class RolloutMiniBatch:
     rewards: torch.Tensor
     values: torch.Tensor
     advantages: torch.Tensor
+    rnn_hidden_starts: Optional[torch.Tensor]
 
 class RolloutManager:
     def __init__(self, dev, sim, steps_per_update, gamma,
@@ -146,7 +149,7 @@ class RolloutManager:
             next_advantage = self.advantages[i]
             next_values = self.values[i]
 
-    def gather_minibatch(inds):
+    def gather_minibatch(self, inds):
         obs_slice = [obs[:, inds, ...] for obs in self.obs]
         
         actions_slice = self.actions[:, inds, ...]
@@ -155,6 +158,11 @@ class RolloutManager:
         rewards_slice = self.rewards[:, inds, ...]
         values_slice = self.values[:, inds, ...]
         advantages_slice = self.advantages[:, inds, ...]
+
+        if self.recurrent_policy:
+            rnn_hidden_starts_slice = self.rnn_hidden_start[:, :, inds, ...]
+        else:
+            rnn_hidden_starts_slice = None
         
         return RolloutMiniBatch(
             obs=obs_slice,
@@ -163,4 +171,6 @@ class RolloutManager:
             dones=dones_slice,
             rewards=rewards_slice,
             values=values_slice,
-            advantages=advantages_slice)
+            advantages=advantages_slice,
+            rnn_hidden_starts=rnn_hidden_starts_slice,
+        )
