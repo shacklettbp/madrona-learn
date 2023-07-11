@@ -8,7 +8,7 @@ from time import time
 from os import environ as env_vars
 from typing import Callable
 
-from .cfg import TrainConfig, SimData
+from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, RolloutMiniBatch
 
 def _ppo_update(cfg : TrainConfig,
@@ -66,7 +66,7 @@ def _ppo_update(cfg : TrainConfig,
     optimizer.zero_grad()
 
 def _update_loop(cfg : TrainConfig,
-                 sim : SimData,
+                 sim : SimInterface,
                  rollouts : RolloutManager,
                  policy : nn.Module,
                  policy_train_fwd_fn : Callable,
@@ -141,12 +141,12 @@ def train(sim, cfg, policy, dev):
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
                               cfg.gae_lambda, policy.rnn_hidden_shape)
 
-    if 'MADRONA_TRAIN_NO_TORCH_COMPILE' in env_vars and \
-            env_vars['MADRONA_TRAIN_NO_TORCH_COMPILE'] == '1':
+    if 'MADRONA_LEARN_NO_TORCH_COMPILE' in env_vars and \
+            env_vars['MADRONA_LEARN_NO_TORCH_COMPILE'] == '1':
         update_loop = _update_loop
     else:
-        if 'MADRONA_TRAIN_TORCH_COMPILE_DEBUG' in env_vars and \
-                env_vars['MADRONA_TRAIN_TORCH_COMPILE_DEBUG'] == '1':
+        if 'MADRONA_LEARN_TORCH_COMPILE_DEBUG' in env_vars and \
+                env_vars['MADRONA_LEARN_TORCH_COMPILE_DEBUG'] == '1':
             torch._dynamo.config.verbose=True
 
         update_loop = torch.compile(_update_loop, dynamic=False)
