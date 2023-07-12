@@ -7,22 +7,29 @@ from torch.func import vmap
 from time import time
 from os import environ as env_vars
 from typing import Callable
+from dataclasses import dataclass
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, RolloutMiniBatch
 
+@dataclass(frozen = True)
+class PolicyInterface:
+    actor_critic: nn.Module
+    train_fwd: Callable
+    rollout_infer: Callable
+    rollout_infer_values: Callable
+
 def _ppo_update(cfg : TrainConfig,
-                policy : nn.Module,
-                policy_train_fwd_fn : Callable,
+                policy : PolicyInterface,
                 mb : RolloutMiniBatch,
                 optimizer,
                 scaler):
 
     if mb.rnn_hidden_starts is not None:
-        new_log_probs, entropies, new_values = policy_train_fwd_fn(
+        new_log_probs, entropies, new_values = policy.train_fwd(
             mb.rnn_hidden_starts, mb.dones, mb.actions, *mb.obs)
     else:
-        new_log_probs, entropies, new_values = policy_train_fwd_fn(
+        new_log_probs, entropies, new_values = policy.train_fwd(
             mb.actions, *mb.obs)
 
     ratio = torch.exp(new_log_probs - mb.log_probs)
@@ -54,12 +61,12 @@ def _ppo_update(cfg : TrainConfig,
 
     if scaler is None:
         loss.backward()
-        nn.utils.clip_grad_norm_(policy.parameters(), cfg.ppo.max_grad_norm)
+        nn.utils.clip_grad_norm_(policy.actor_critic.parameters(), cfg.ppo.max_grad_norm)
         optimizer.step()
     else:
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(policy.parameters(), cfg.ppo.max_grad_norm)
+        nn.utils.clip_grad_norm_(policy.actor_critic.parameters(), cfg.ppo.max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 
@@ -68,10 +75,7 @@ def _ppo_update(cfg : TrainConfig,
 def _update_loop(cfg : TrainConfig,
                  sim : SimInterface,
                  rollouts : RolloutManager,
-                 policy : nn.Module,
-                 policy_train_fwd_fn : Callable,
-                 policy_rollout_infer_fn : Callable,
-                 policy_rollout_infer_values_fn : Callable,
+                 policy : PolicyInterface,
                  optimizer,
                  scaler,
                  scheduler):
@@ -86,35 +90,36 @@ def _update_loop(cfg : TrainConfig,
             print(f'Update: {update_idx}')
 
         with torch.no_grad():
-            rollouts.collect(sim, policy_rollout_infer_fn,
-                             policy_rollout_infer_values_fn)
+            rollouts.collect(sim, policy.rollout_infer,
+                             policy.rollout_infer_values)
 
         for epoch in range(cfg.ppo.num_epochs):
             for inds in torch.randperm(num_agents).chunk(
                     cfg.ppo.num_mini_batches):
                 mb = rollouts.gather_minibatch(inds)
-                _ppo_update(cfg, policy, policy_train_fwd_fn, mb,
-                            optimizer, scaler)
+                _ppo_update(cfg, policy, mb, optimizer, scaler)
 
         update_end_time = time()
 
         print(update_end_time - update_start_time)
 
-def train(sim, cfg, policy, dev):
+def train(sim, cfg, actor_critic, dev):
     print(cfg)
 
     num_agents = sim.actions.shape[0]
 
-    policy = policy.to(dev)
+    actor_critic = actor_critic.to(dev)
 
-    optimizer = optim.Adam(policy.parameters(), lr=cfg.lr)
+    optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
 
-    if dev.type == 'cuda':
+    enable_mixed_precision = dev.type == 'cuda' and cfg.mixed_precision
+
+    if enable_mixed_precision:
         scaler = torch.cuda.amp.GradScaler()
     else:
         scaler = None
 
-    if dev.type == 'cuda':
+    if enable_mixed_precision:
         def autocast_wrapper(fn):
             def autocast_wrapped_fn(*args, **kwargs):
                 with torch.cuda.amp.autocast(dtype=torch.float16):
@@ -125,21 +130,28 @@ def train(sim, cfg, policy, dev):
         def autocast_wrapper(fn):
             return fn
 
+    def policy_train_fwd(*args, **kwargs):
+        return actor_critic.train(*args, **kwargs)
+
     def policy_rollout_infer(*args, **kwargs):
-        return policy.rollout_infer(*args, **kwargs)
+        return actor_critic.rollout_infer(*args, **kwargs)
 
     def policy_rollout_infer_values(*args, **kwargs):
-        return policy.rollout_infer_values(*args, **kwargs)
+        return actor_critic.rollout_infer_values(*args, **kwargs)
 
-    def policy_train_fwd(*args, **kwargs):
-        return policy.train(*args, **kwargs)
-
+    policy_train_fwd = autocast_wrapper(policy_train_fwd)
     policy_rollout_infer = autocast_wrapper(policy_rollout_infer)
     policy_rollout_infer_values = autocast_wrapper(policy_rollout_infer_values)
-    policy_train_fwd = autocast_wrapper(policy_train_fwd)
+
+    policy_interface = PolicyInterface(
+        actor_critic = actor_critic,
+        train_fwd = policy_train_fwd,
+        rollout_infer = policy_rollout_infer,
+        rollout_infer_values = policy_rollout_infer_values,
+    )
 
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
-                              cfg.gae_lambda, policy.rnn_hidden_shape)
+                              cfg.gae_lambda, actor_critic.rnn_hidden_shape)
 
     if 'MADRONA_LEARN_NO_TORCH_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_NO_TORCH_COMPILE'] == '1':
@@ -155,10 +167,7 @@ def train(sim, cfg, policy, dev):
         cfg=cfg,
         sim=sim,
         rollouts=rollouts,
-        policy=policy,
-        policy_rollout_infer_fn=policy_rollout_infer,
-        policy_rollout_infer_values_fn=policy_rollout_infer_values,
-        policy_train_fwd_fn=policy_train_fwd,
+        policy=policy_interface,
         optimizer=optimizer,
         scaler=scaler,
         scheduler=None)
