@@ -33,12 +33,11 @@ def _ppo_update(cfg : TrainConfig,
             mb.actions, *mb.obs)
 
     ratio = torch.exp(new_log_probs - mb.log_probs)
-
     surr1 = mb.advantages * ratio
     surr2 = mb.advantages * (
         torch.clamp(ratio, 1.0 - cfg.ppo.clip_coef, 1.0 + cfg.ppo.clip_coef))
 
-    action_loss = -torch.min(surr1, surr2)
+    action_obj = torch.min(surr1, surr2)
 
     returns = mb.advantages + mb.values
 
@@ -51,18 +50,18 @@ def _ppo_update(cfg : TrainConfig,
 
     value_loss = 0.5 * F.mse_loss(new_values, returns, reduction='none')
 
-    action_loss = torch.mean(action_loss)
+    action_obj = torch.mean(action_obj)
     value_loss = torch.mean(value_loss)
     entropies = torch.mean(entropies)
 
     loss = (
-        action_loss +
-        cfg.ppo.value_loss_coef * value_loss +
-        cfg.ppo.entropy_coef * entropies
+        - action_obj # Maximize the action objective function
+        + cfg.ppo.value_loss_coef * value_loss
+        - cfg.ppo.entropy_coef * entropies # Maximize entropy
     )
 
     with torch.no_grad():
-        print(f"    Loss: {loss.cpu().float().item()} {action_loss.cpu().float().item()} {value_loss.cpu().float().item()}")
+        print(f"    Loss: {loss.cpu().float().item()} {-action_obj.cpu().float().item()} {value_loss.cpu().float().item()} {-entropies.cpu().float().item()}")
 
     if scaler is None:
         loss.backward()
