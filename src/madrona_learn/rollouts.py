@@ -16,8 +16,9 @@ class RolloutMiniBatch:
 
 class RolloutManager:
     def __init__(self, dev, sim, steps_per_update, gamma,
-                 gae_lambda, rnn_hidden_shape):
+                 gae_lambda, float_compute_type, rnn_hidden_shape):
         self.need_obs_copy = dev != sim.obs[0].device
+        self.float_compute_type = float_compute_type
 
         self.actions = torch.zeros(
             (steps_per_update, *sim.actions.shape),
@@ -71,7 +72,7 @@ class RolloutManager:
                 sim.actions.shape[0], rnn_hidden_shape[2])
 
             self.rnn_hidden_start = torch.zeros(
-                hidden_batch_shape, dtype=torch.float16, device=dev)
+                hidden_batch_shape, dtype=float_compute_type, device=dev)
             self.rnn_hidden_end = torch.zeros_like(self.rnn_hidden_start)
             self.rnn_hidden_alt = torch.zeros_like(self.rnn_hidden_start)
         else:
@@ -135,7 +136,7 @@ class RolloutManager:
         next_advantage = 0.0
         next_values = self.bootstrap_values
         for i in reversed(range(self.steps_per_update)):
-            next_valid = (1.0 - self.dones[i].half())
+            next_valid = (1.0 - self.dones[i].to(dtype=self.float_compute_type))
 
             # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
             td_err = (self.rewards[i] + 
@@ -153,11 +154,11 @@ class RolloutManager:
         obs_slice = [obs[:, inds, ...] for obs in self.obs]
         
         actions_slice = self.actions[:, inds, ...]
-        log_probs_slice = self.log_probs[:, inds, ...]
+        log_probs_slice = self.log_probs[:, inds, ...].to(dtype=self.float_compute_type)
         dones_slice = self.dones[:, inds, ...]
-        rewards_slice = self.rewards[:, inds, ...]
-        values_slice = self.values[:, inds, ...]
-        advantages_slice = self.advantages[:, inds, ...]
+        rewards_slice = self.rewards[:, inds, ...].to(dtype=self.float_compute_type)
+        values_slice = self.values[:, inds, ...].to(dtype=self.float_compute_type)
+        advantages_slice = self.advantages[:, inds, ...].to(dtype=self.float_compute_type)
 
         if self.recurrent_policy:
             rnn_hidden_starts_slice = self.rnn_hidden_start[:, :, inds, ...]

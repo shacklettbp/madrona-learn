@@ -150,18 +150,23 @@ def train(sim, cfg, actor_critic, dev):
         rollout_infer_values = policy_rollout_infer_values,
     )
 
+    compute_dtype = torch.float16 if enable_mixed_precision else torch.float32
     rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
-                              cfg.gae_lambda, actor_critic.rnn_hidden_shape)
+        cfg.gae_lambda, compute_dtype, actor_critic.rnn_hidden_shape)
 
-    if 'MADRONA_LEARN_NO_TORCH_COMPILE' in env_vars and \
-            env_vars['MADRONA_LEARN_NO_TORCH_COMPILE'] == '1':
-        update_loop = _update_loop
-    else:
-        if 'MADRONA_LEARN_TORCH_COMPILE_DEBUG' in env_vars and \
-                env_vars['MADRONA_LEARN_TORCH_COMPILE_DEBUG'] == '1':
+    if 'MADRONA_LEARN_COMPILE' in env_vars and \
+            env_vars['MADRONA_LEARN_COMPILE'] == '1':
+        if 'MADRONA_LEARN_COMPILE_DEBUG' in env_vars and \
+                env_vars['MADRONA_LEARN_COMPILE_DEBUG'] == '1':
             torch._dynamo.config.verbose=True
 
+        if 'MADRONA_LEARN_COMPILE_CXX' in env_vars:
+            from torch._inductor import config as inductor_cfg
+            inductor_cfg.cpp.cxx = env_vars['MADRONA_LEARN_COMPILE_CXX']
+
         update_loop = torch.compile(_update_loop, dynamic=False)
+    else:
+        update_loop = _update_loop
 
     update_loop(
         cfg=cfg,
