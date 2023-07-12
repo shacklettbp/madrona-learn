@@ -47,7 +47,7 @@ def _ppo_update(cfg : TrainConfig,
             low = mb.values - cfg.ppo.clip_coef
             high = mb.values + cfg.ppo.clip_coef
 
-        new_values = torch.clamp(low, high)
+        new_values = torch.clamp(new_values, low, high)
 
     value_loss = 0.5 * F.mse_loss(new_values, returns, reduction='none')
 
