@@ -181,3 +181,5 @@ def train(sim, cfg, actor_critic, dev):
         optimizer=optimizer,
         scaler=scaler,
         scheduler=None)
+
+    return actor_critic.cpu()

@@ -15,7 +15,7 @@ class DiscreteActionDistributions:
             cur_bucket_offset += num_buckets
 
     def best(self, out):
-        actions = [dist.probs.argmax(dim=-1, keepdim=True) for dist in self.dists]
+        actions = [dist.probs.argmax(dim=-1) for dist in self.dists]
         torch.stack(actions, dim=1, out=out)
 
     def sample(self, actions_out, log_probs_out):
