@@ -21,6 +21,7 @@ class TrainConfig:
     gamma: float
     ppo: PPOConfig
     gae_lambda: float = 1.0
+    normalize_advantages: bool = True
     mixed_precision : bool = False
 
     def __repr__(self):

@@ -19,6 +19,18 @@ class PolicyInterface:
     rollout_infer: Callable
     rollout_infer_values: Callable
 
+def _compute_action_scores(cfg, advantages):
+    with torch.no_grad():
+        if not cfg.normalize_advantages:
+            return advantages
+        else:
+            var, mean = torch.var_mean(advantages)
+
+            action_scores = advantages - mean
+            action_scores.mul_(torch.rsqrt(var + 1e-5))
+
+            return action_scores
+
 def _ppo_update(cfg : TrainConfig,
                 policy : PolicyInterface,
                 mb : RolloutMiniBatch,
@@ -32,9 +44,11 @@ def _ppo_update(cfg : TrainConfig,
         new_log_probs, entropies, new_values = policy.train_fwd(
             mb.actions, *mb.obs)
 
+    action_scores = _compute_action_scores(cfg, mb.advantages)
+
     ratio = torch.exp(new_log_probs - mb.log_probs)
-    surr1 = mb.advantages * ratio
-    surr2 = mb.advantages * (
+    surr1 = action_scores * ratio
+    surr2 = action_scores * (
         torch.clamp(ratio, 1.0 - cfg.ppo.clip_coef, 1.0 + cfg.ppo.clip_coef))
 
     action_obj = torch.min(surr1, surr2)
