@@ -51,13 +51,18 @@ def _ppo_update(cfg : TrainConfig,
 
     value_loss = 0.5 * F.mse_loss(new_values, returns, reduction='none')
 
+    action_loss = torch.mean(action_loss)
+    value_loss = torch.mean(value_loss)
+    entropies = torch.mean(entropies)
+
     loss = (
-        torch.mean(action_loss) +
-        cfg.ppo.value_loss_coef * torch.mean(value_loss) +
-        cfg.ppo.entropy_coef * torch.mean(entropies)
+        action_loss +
+        cfg.ppo.value_loss_coef * value_loss +
+        cfg.ppo.entropy_coef * entropies
     )
 
-    print(loss)
+    with torch.no_grad():
+        print(f"    Loss: {loss.cpu().float().item()} {action_loss.cpu().float().item()} {value_loss.cpu().float().item()}")
 
     if scaler is None:
         loss.backward()
@@ -101,7 +106,7 @@ def _update_loop(cfg : TrainConfig,
 
         update_end_time = time()
 
-        print(update_end_time - update_start_time)
+        print(f"    Time: {update_end_time - update_start_time}\n")
 
 def train(sim, cfg, actor_critic, dev):
     print(cfg)
