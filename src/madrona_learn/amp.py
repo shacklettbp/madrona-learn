@@ -49,7 +49,7 @@ class AMPInfo:
             finally:
                 pass
         else:
-            with torch.autocast(self.device_type, dtype=torch.float32, enabled=False):
+            with torch.autocast(self.device_type, enabled=False):
                 try:
                     yield
                 finally:

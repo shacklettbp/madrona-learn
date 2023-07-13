@@ -12,6 +12,7 @@ class PPOConfig:
     max_grad_norm: float
     num_epochs: int = 1
     clip_value_loss: bool = False
+    adaptive_entropy: bool = True
 
 @dataclass(frozen=True)
 class TrainConfig:

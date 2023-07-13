@@ -28,25 +28,30 @@ class RolloutManager:
         ):
         self.need_obs_copy = dev != sim.obs[0].device
 
+        if dev.type == 'cuda':
+            float_storage_type = torch.float16
+        else:
+            float_storage_type = torch.bfloat16
+
         self.actions = torch.zeros(
             (steps_per_update, *sim.actions.shape),
             dtype=sim.actions.dtype, device=dev)
 
         self.log_probs = torch.zeros(
             (steps_per_update, *sim.actions.shape),
-            dtype=torch.float16, device=dev)
+            dtype=float_storage_type, device=dev)
 
         self.dones = torch.zeros(
             (steps_per_update, *sim.dones.shape),
-            dtype=torch.uint8, device=dev)
+            dtype=float_storage_type, device=dev)
 
         self.rewards = torch.zeros(
             (steps_per_update, *sim.rewards.shape),
-            dtype=torch.float16, device=dev)
+            dtype=float_storage_type, device=dev)
 
         self.values = torch.zeros(
             (steps_per_update, *sim.rewards.shape),
-            dtype=torch.float16, device=dev)
+            dtype=float_storage_type, device=dev)
 
         # FIXME: seems like this could be combined into self.values by
         # making self.values one longer, but that breaks torch.compile
