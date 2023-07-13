@@ -53,6 +53,10 @@ class ActorCritic(nn.Module):
         self.critic = critic
         self.rnn_hidden_shape = None
 
+    def eval_infer(self, actions_out, *obs):
+        features = self.backbone(*obs)
+        self.actor.infer(features, actions_out=actions_out)
+
     def rollout_infer(self, actions_out, log_probs_out, values_out, *obs):
         features = self.backbone(*obs)
         self.actor.rollout_infer(features, actions_out=actions_out,
