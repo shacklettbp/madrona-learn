@@ -2,6 +2,9 @@ import torch
 from time import time
 from dataclasses import dataclass
 from typing import List, Optional
+from .amp import AMPInfo
+from .cfg import SimInterface
+from .actor_critic import ActorCritic
 
 @dataclass(frozen = True)
 class Rollouts:
@@ -15,8 +18,14 @@ class Rollouts:
     rnn_hidden_starts: Optional[torch.Tensor]
 
 class RolloutManager:
-    def __init__(self, dev, sim, steps_per_update,
-                 float_compute_type, rnn_hidden_shape):
+    def __init__(
+            self,
+            dev : torch.device,
+            sim : SimInterface,
+            steps_per_update : int,
+            amp : AMPInfo,
+            rnn_hidden_shape : Optional[torch.Size],
+        ):
         self.need_obs_copy = dev != sim.obs[0].device
 
         self.actions = torch.zeros(
@@ -42,7 +51,7 @@ class RolloutManager:
         # FIXME: seems like this could be combined into self.values by
         # making self.values one longer, but that breaks torch.compile
         self.bootstrap_values = torch.zeros(
-            sim.rewards.shape, dtype=float_compute_type, device=dev)
+            sim.rewards.shape, dtype=amp.compute_dtype, device=dev)
 
         self.obs = []
 
@@ -67,13 +76,18 @@ class RolloutManager:
                 sim.actions.shape[0], rnn_hidden_shape[2])
 
             self.rnn_hidden_start = torch.zeros(
-                hidden_batch_shape, dtype=float_compute_type, device=dev)
+                hidden_batch_shape, dtype=amp.compute_dtype, device=dev)
             self.rnn_hidden_end = torch.zeros_like(self.rnn_hidden_start)
             self.rnn_hidden_alt = torch.zeros_like(self.rnn_hidden_start)
         else:
             self.recurrent_policy = False
 
-    def collect(self, sim, policy_infer_fn, policy_infer_values_fn):
+    def collect(
+            self,
+            amp : AMPInfo,
+            sim : SimInterface,
+            actor_critic : ActorCritic,
+        ):
         step_total = 0
 
         if self.recurrent_policy:
@@ -87,16 +101,19 @@ class RolloutManager:
             for obs_idx, step_obs in enumerate(sim.obs):
                 cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
-            if self.recurrent_policy:
-                policy_infer_fn(self.actions[slot], self.log_probs[slot],
-                                self.values[slot], rnn_hidden_cur_out,
-                                rnn_hidden_cur_in, *cur_obs_buffers)
+            with amp.enable():
+                if self.recurrent_policy:
+                    actor_critic.rollout_infer(
+                        self.actions[slot], self.log_probs[slot],
+                        self.values[slot], rnn_hidden_cur_out,
+                        rnn_hidden_cur_in, *cur_obs_buffers)
 
-                rnn_hidden_cur_in, rnn_hidden_cur_out = \
-                    rnn_hidden_cur_out, rnn_hidden_cur_in
-            else:
-                policy_infer_fn(self.actions[slot], self.log_probs[slot],
-                                self.values[slot], *cur_obs_buffers)
+                    rnn_hidden_cur_in, rnn_hidden_cur_out = \
+                        rnn_hidden_cur_out, rnn_hidden_cur_in
+                else:
+                    actor_critic.rollout_infer(
+                        self.actions[slot], self.log_probs[slot],
+                        self.values[slot], *cur_obs_buffers)
 
             sim.actions.copy_(self.actions[slot], non_blocking=True)
 
@@ -114,16 +131,18 @@ class RolloutManager:
         else:
             final_obs = sim.obs
 
-        if self.recurrent_policy:
-            # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
-            # iter so rnn_hidden_cur_in is the final output
-            self.rnn_hidden_end = rnn_hidden_cur_in
-            self.rnn_hidden_alt = rnn_hidden_cur_out
+        with amp.enable():
+            if self.recurrent_policy:
+                # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
+                # iter so rnn_hidden_cur_in is the final output
+                self.rnn_hidden_end = rnn_hidden_cur_in
+                self.rnn_hidden_alt = rnn_hidden_cur_out
 
-            policy_infer_values_fn(self.bootstrap_values,
-                                   self.rnn_hidden_end, *final_obs)
-        else:
-            policy_infer_values_fn(self.bootstrap_values, *final_obs)
+                actor_critic.rollout_infer_values(
+                    self.bootstrap_values, self.rnn_hidden_end, *final_obs)
+            else:
+                actor_critic.rollout_infer_values(
+                    self.bootstrap_values, *final_obs)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers for
