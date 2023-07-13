@@ -8,9 +8,10 @@ from time import time
 from os import environ as env_vars
 from typing import Callable
 from dataclasses import dataclass
+from typing import List, Optional
 
 from .cfg import TrainConfig, SimInterface
-from .rollouts import RolloutManager, RolloutMiniBatch
+from .rollouts import RolloutManager, Rollouts
 
 @dataclass(frozen = True)
 class PolicyInterface:
@@ -18,6 +19,73 @@ class PolicyInterface:
     train_fwd: Callable
     rollout_infer: Callable
     rollout_infer_values: Callable
+
+@dataclass(frozen = True)
+class MiniBatch:
+    obs: List[torch.Tensor]
+    actions: torch.Tensor
+    log_probs: torch.Tensor
+    dones: torch.Tensor
+    rewards: torch.Tensor
+    values: torch.Tensor
+    advantages: torch.Tensor
+    rnn_hidden_starts: Optional[torch.Tensor]
+
+def _gather_minibatch(rollouts : Rollouts,
+                      advantages : torch.Tensor,
+                      inds : torch.Tensor,
+                      float_compute_type : torch.dtype):
+    obs_slice = [obs[:, inds, ...] for obs in rollouts.obs]
+    
+    actions_slice = rollouts.actions[:, inds, ...]
+    log_probs_slice = rollouts.log_probs[:, inds, ...].to(dtype=float_compute_type)
+    dones_slice = rollouts.dones[:, inds, ...]
+    rewards_slice = rollouts.rewards[:, inds, ...].to(dtype=float_compute_type)
+    values_slice = rollouts.values[:, inds, ...].to(dtype=float_compute_type)
+    advantages_slice = advantages[:, inds, ...].to(dtype=float_compute_type)
+
+    if rollouts.rnn_hidden_starts != None:
+        rnn_hidden_starts_slice = rollouts.rnn_hidden_starts[:, :, inds, ...]
+    else:
+        rnn_hidden_starts_slice = None
+    
+    return MiniBatch(
+        obs=obs_slice,
+        actions=actions_slice,
+        log_probs=log_probs_slice,
+        dones=dones_slice,
+        rewards=rewards_slice,
+        values=values_slice,
+        advantages=advantages_slice,
+        rnn_hidden_starts=rnn_hidden_starts_slice,
+    )
+
+def _compute_advantages(cfg : TrainConfig,
+                        advantages_out : torch.Tensor,
+                        rollouts : Rollouts,
+                        float_compute_type : torch.dtype):
+    next_advantage = 0.0
+    next_values = rollouts.bootstrap_values
+    for i in reversed(range(cfg.steps_per_update)):
+        cur_dones = rollouts.dones[i].to(dtype=float_compute_type)
+        cur_rewards = rollouts.rewards[i].to(dtype=float_compute_type)
+        cur_values = rollouts.values[i].to(dtype=float_compute_type)
+
+        next_valid = 1.0 - cur_dones
+
+        # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+        td_err = (cur_rewards + 
+            cfg.gamma * next_valid * next_values - cur_values)
+
+        # A_t = sum (gamma * lambda)^(l - 1) * delta_l (EQ 16 GAE)
+        #     = delta_t + gamma * lambda * A_t+1
+        cur_advantage = (td_err +
+            cfg.gamma * cfg.gae_lambda * next_valid * next_advantage)
+
+        advantages_out[i] = cur_advantage
+
+        next_advantage = cur_advantage
+        next_values = cur_values
 
 def _compute_action_scores(cfg, advantages):
     with torch.no_grad():
@@ -33,10 +101,9 @@ def _compute_action_scores(cfg, advantages):
 
 def _ppo_update(cfg : TrainConfig,
                 policy : PolicyInterface,
-                mb : RolloutMiniBatch,
+                mb : MiniBatch,
                 optimizer,
                 scaler):
-
     if mb.rnn_hidden_starts is not None:
         new_log_probs, entropies, new_values = policy.train_fwd(
             mb.rnn_hidden_starts, mb.dones, mb.actions, *mb.obs)
@@ -91,15 +158,17 @@ def _ppo_update(cfg : TrainConfig,
     optimizer.zero_grad()
 
 def _update_loop(cfg : TrainConfig,
+                 num_agents: int,
+                 float_compute_type: torch.dtype,
                  sim : SimInterface,
-                 rollouts : RolloutManager,
+                 rollout_mgr : RolloutManager,
                  policy : PolicyInterface,
                  optimizer,
                  scaler,
                  scheduler):
-    num_agents = rollouts.actions.shape[1]
-
     assert(num_agents % cfg.ppo.num_mini_batches == 0)
+
+    advantages = torch.zeros_like(rollout_mgr.rewards)
 
     for update_idx in range(cfg.num_updates):
         update_start_time = time()
@@ -108,13 +177,19 @@ def _update_loop(cfg : TrainConfig,
             print(f'Update: {update_idx}')
 
         with torch.no_grad():
-            rollouts.collect(sim, policy.rollout_infer,
-                             policy.rollout_infer_values)
+            rollouts = rollout_mgr.collect(sim, policy.rollout_infer,
+                policy.rollout_infer_values)
+
+            # Engstrom et al suggest recomputing advantages after every epoch
+            # but that's pretty annoying for a recurrent policy since values
+            # need to be recomputed. https://arxiv.org/abs/2005.12729
+            _compute_advantages(cfg, advantages, rollouts, float_compute_type)
 
         for epoch in range(cfg.ppo.num_epochs):
             for inds in torch.randperm(num_agents).chunk(
                     cfg.ppo.num_mini_batches):
-                mb = rollouts.gather_minibatch(inds)
+                mb = _gather_minibatch(rollouts, advantages, inds,
+                                       float_compute_type)
                 _ppo_update(cfg, policy, mb, optimizer, scaler)
 
         update_end_time = time()
@@ -169,8 +244,8 @@ def train(sim, cfg, actor_critic, dev):
     )
 
     compute_dtype = torch.float16 if enable_mixed_precision else torch.float32
-    rollouts = RolloutManager(dev, sim, cfg.steps_per_update, cfg.gamma,
-        cfg.gae_lambda, compute_dtype, actor_critic.rnn_hidden_shape)
+    rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
+        compute_dtype, actor_critic.rnn_hidden_shape)
 
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':
@@ -188,8 +263,10 @@ def train(sim, cfg, actor_critic, dev):
 
     update_loop(
         cfg=cfg,
+        num_agents=num_agents,
+        float_compute_type=compute_dtype,
         sim=sim,
-        rollouts=rollouts,
+        rollout_mgr=rollout_mgr,
         policy=policy_interface,
         optimizer=optimizer,
         scaler=scaler,

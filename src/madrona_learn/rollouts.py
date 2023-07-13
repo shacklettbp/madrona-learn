@@ -4,21 +4,20 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 @dataclass(frozen = True)
-class RolloutMiniBatch:
+class Rollouts:
     obs: List[torch.Tensor]
     actions: torch.Tensor
     log_probs: torch.Tensor
     dones: torch.Tensor
     rewards: torch.Tensor
     values: torch.Tensor
-    advantages: torch.Tensor
+    bootstrap_values: torch.Tensor
     rnn_hidden_starts: Optional[torch.Tensor]
 
 class RolloutManager:
-    def __init__(self, dev, sim, steps_per_update, gamma,
-                 gae_lambda, float_compute_type, rnn_hidden_shape):
+    def __init__(self, dev, sim, steps_per_update,
+                 float_compute_type, rnn_hidden_shape):
         self.need_obs_copy = dev != sim.obs[0].device
-        self.float_compute_type = float_compute_type
 
         self.actions = torch.zeros(
             (steps_per_update, *sim.actions.shape),
@@ -43,9 +42,7 @@ class RolloutManager:
         # FIXME: seems like this could be combined into self.values by
         # making self.values one longer, but that breaks torch.compile
         self.bootstrap_values = torch.zeros(
-            sim.rewards.shape, dtype=torch.float16, device=dev)
-
-        self.advantages = torch.zeros_like(self.rewards)
+            sim.rewards.shape, dtype=float_compute_type, device=dev)
 
         self.obs = []
 
@@ -62,8 +59,6 @@ class RolloutManager:
                     obs_tensor.shape, dtype=obs_tensor.dtype, device=dev))
 
         self.steps_per_update = steps_per_update
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
 
         if rnn_hidden_shape != None:
             self.recurrent_policy = True
@@ -130,48 +125,18 @@ class RolloutManager:
         else:
             policy_infer_values_fn(self.bootstrap_values, *final_obs)
 
-        self._compute_advantages()
+        # Right now this just returns the rollout manager's pointers,
+        # but in the future could return only one set of buffers for
+        # double buffering etc
 
-    def _compute_advantages(self):
-        next_advantage = 0.0
-        next_values = self.bootstrap_values
-        for i in reversed(range(self.steps_per_update)):
-            next_valid = (1.0 - self.dones[i].to(dtype=self.float_compute_type))
-
-            # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-            td_err = (self.rewards[i] + 
-                self.gamma * next_valid * next_values - self.values[i])
-
-            # A_t = sum (gamma * lambda)^(l - 1) * delta_l (EQ 16 GAE)
-            #     = delta_t + gamma * lambda * A_t+1
-            self.advantages[i] = (td_err +
-                self.gamma * self.gae_lambda * next_valid * next_advantage)
-
-            next_advantage = self.advantages[i]
-            next_values = self.values[i]
-
-    def gather_minibatch(self, inds):
-        obs_slice = [obs[:, inds, ...] for obs in self.obs]
-        
-        actions_slice = self.actions[:, inds, ...]
-        log_probs_slice = self.log_probs[:, inds, ...].to(dtype=self.float_compute_type)
-        dones_slice = self.dones[:, inds, ...]
-        rewards_slice = self.rewards[:, inds, ...].to(dtype=self.float_compute_type)
-        values_slice = self.values[:, inds, ...].to(dtype=self.float_compute_type)
-        advantages_slice = self.advantages[:, inds, ...].to(dtype=self.float_compute_type)
-
-        if self.recurrent_policy:
-            rnn_hidden_starts_slice = self.rnn_hidden_start[:, :, inds, ...]
-        else:
-            rnn_hidden_starts_slice = None
-        
-        return RolloutMiniBatch(
-            obs=obs_slice,
-            actions=actions_slice,
-            log_probs=log_probs_slice,
-            dones=dones_slice,
-            rewards=rewards_slice,
-            values=values_slice,
-            advantages=advantages_slice,
-            rnn_hidden_starts=rnn_hidden_starts_slice,
+        return Rollouts(
+            obs = self.obs,
+            actions = self.actions,
+            log_probs = self.log_probs,
+            dones = self.dones,
+            rewards = self.rewards,
+            values = self.values,
+            bootstrap_values = self.bootstrap_values,
+            rnn_hidden_starts =
+                self.rnn_hidden_start if self.recurrent_policy else None,
         )
