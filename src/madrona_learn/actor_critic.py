@@ -8,42 +8,25 @@ def _flatten_obs_sequence(obs):
 
 class ActorCritic(nn.Module):
     class DiscreteActor(nn.Module):
-        def __init__(self, net, actions_num_buckets):
+        def __init__(self, actions_num_buckets, impl):
             super().__init__()
     
-            self.net = net
             self.actions_num_buckets = actions_num_buckets
-    
-        def eval_infer(self, actions_out, features_in):
-            logits = self.net(features_in)
-    
-            dists = DiscreteActionDistributions(self.actions_num_buckets, logits=logits)
-            dists.best(out=actions_out)
-    
-        def rollout_infer(self, actions_out, log_probs_out, features_in):
-            logits = self.net(features_in)
-    
-            dists = DiscreteActionDistributions(self.actions_num_buckets, logits=logits)
-            dists.sample(actions_out, log_probs_out)
-    
-        def train(self, rollout_actions, features_in):
-            logits = self.net(features_in)
-            dists = DiscreteActionDistributions(self.actions_num_buckets, logits=logits)
-    
-            log_probs, entropies = dists.action_stats(rollout_actions)
-            return log_probs, entropies
-    
-    class Critic(nn.Module):
-        def __init__(self, net):
-            super().__init__()
-            self.net = net
-    
-        def forward_inplace(self, values_out, features_in):
-            val_tmp = self.net(features_in)
-            values_out[...] = val_tmp
+            self.impl = impl
 
         def forward(self, features_in):
-            return self.net(features_in)
+            logits = self.impl(features_in)
+    
+            return DiscreteActionDistributions(
+                    self.actions_num_buckets, logits=logits)
+
+    class Critic(nn.Module):
+        def __init__(self, impl):
+            super().__init__()
+            self.impl = impl 
+    
+        def forward(self, features_in):
+            return self.impl(features_in)
 
     def __init__(self, backbone, actor, critic):
         super().__init__()
@@ -53,20 +36,30 @@ class ActorCritic(nn.Module):
         self.critic = critic
         self.rnn_hidden_shape = None
 
+    # Direct call intended for debugging only, should use below
+    # specialized functions
+    def forward(self, *obs):
+        features = self.backbone(*obs)
+
+        action_dists = self.actor(features)
+        values = self.critic(features)
+
+        return action_dists, values
+
     def eval_infer(self, actions_out, *obs):
         features = self.backbone(*obs)
-        self.actor.eval_infer(actions_out=actions_out, features_in=features)
+        action_dists = self.actor(features)
+        action_dists.best(out=actions_out)
 
     def rollout_infer(self, actions_out, log_probs_out, values_out, *obs):
-        features = self.backbone(*obs)
-        self.actor.rollout_infer(actions_out=actions_out,
-                                 log_probs_out=log_probs_out,
-                                 features_in=features)
-        self.critic.forward_inplace(values_out=values_out, features_in=features)
+        action_dists, values = self(*obs)
+
+        action_dists.sample(actions_out, log_probs_out)
+        values_out[...] = values
 
     def rollout_infer_values(self, values_out, *obs):
         features = self.backbone(*obs)
-        self.critic.forward_inplace(values_out=values_out, features_in=features)
+        values_out[...] = self.critic(features)
 
     def _train_backbone(self, *obs):
         obs_flattened = _flatten_obs_sequence(obs)
@@ -77,7 +70,9 @@ class ActorCritic(nn.Module):
         flattened_actions = rollout_actions.view(T * N,
                                                  *rollout_actions.shape[2:])
 
-        log_probs, entropies = self.actor.train(flattened_actions, features_in)
+        action_dists = self.actor(features_in)
+
+        log_probs, entropies = action_dists.action_stats(flattened_actions)
         values = self.critic(features_in)
 
         log_probs = log_probs.view(T, N, *log_probs.shape[1:])
@@ -97,24 +92,30 @@ class RecurrentActorCritic(ActorCritic):
         self.rnn = rnn
         self.rnn_hidden_shape = self.rnn.hidden_shape
 
+    # Only call directly for debugging
+    def forward(self, *obs):
+        features = self.backbone(*obs)
+        rnn_out, rnn_new_hidden = self.rnn.infer(features, rnn_hidden_in)
+
+        action_dists = self.actor(rnn_out)
+        values = self.critic(rnn_out)
+
+        return action_dists, values, rnn_new_hidden
+
     def rollout_infer(self, actions_out, log_probs_out, values_out,
                       rnn_hidden_out, rnn_hidden_in, *obs):
-        features = self.backbone(*obs)
-        rnn_out, rnn_next_hidden = self.rnn.infer(features, rnn_hidden_in)
-        self.actor.rollout_infer(actions_out=actions_out,
-                                 log_probs_out=log_probs_out,
-                                 features_in=rnn_out)
-        self.critic.infer(values_out=values_out,
-                          features_in=rnn_out)
+        action_dists, values, rnn_new_hidden = self(*obs)
+
+        action_dists.sample(actions_out, log_probs_out)
 
         # FIXME, actual in place:
-        rnn_hidden_out[...] = rnn_next_hidden
+        values_out[...] = values
+        rnn_hidden_out[...] = rnn_new_hidden
 
     def rollout_infer_values(self, values_out, rnn_hidden_in, *obs):
         features = self.backbone(*obs)
         rnn_out, _ = self.rnn.infer(features, rnn_hidden_in)
-        self.critic.infer(values_out=values_out,
-                          features_in=rnn_out)
+        values_out[...] = self.critic(rnn_out)
 
     def train(self, rnn_hidden_starts, dones, rollout_actions, *obs):
         features = self._train_backbone(*obs)

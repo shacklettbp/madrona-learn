@@ -28,11 +28,11 @@ class SmallMLPBackbone(nn.Module):
         return self.net(processed_obs)
 
 class LinearLayerDiscreteActor(ActorCritic.DiscreteActor):
-    def __init__(self, in_channels, actions_num_buckets):
+    def __init__(self, actions_num_buckets, in_channels):
         total_action_dim = sum(actions_num_buckets)
-        net = nn.Linear(in_channels, total_action_dim, bias=False)
+        impl = nn.Linear(in_channels, total_action_dim, bias=False)
 
-        super().__init__(net, actions_num_buckets)
+        super().__init__(actions_num_buckets, impl)
 
 class LinearLayerCritic(ActorCritic.Critic):
     def __init__(self, in_channels):
