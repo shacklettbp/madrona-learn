@@ -33,3 +33,6 @@ class DiscreteActionDistributions:
             entropies.append(dist.entropy())
 
         return torch.stack(log_probs, dim=1), torch.stack(entropies, dim=1)
+
+    def probs(self):
+        return [dist.probs for dist in self.dists]
