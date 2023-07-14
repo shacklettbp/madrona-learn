@@ -177,7 +177,7 @@ def _update_loop(cfg : TrainConfig,
         update_start_time = time()
 
         if update_idx % 1 == 0:
-            print(f'Update: {update_idx}')
+            print(f'\nUpdate: {update_idx}')
 
         with torch.no_grad():
             rollouts = rollout_mgr.collect(amp, sim, actor_critic)
@@ -195,7 +195,7 @@ def _update_loop(cfg : TrainConfig,
 
         update_end_time = time()
 
-        print(f"    Time: {update_end_time - update_start_time}\n")
+        print(f"    Time: {update_end_time - update_start_time}")
 
 def train(sim, cfg, actor_critic, dev):
     print(cfg)
