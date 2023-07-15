@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .action import DiscreteActionDistributions
-from .rnn import LSTM
-from .actor_critic import ActorCritic
+from .actor_critic import ActorCritic, DiscreteActor, Critic
 
 class MLP(nn.Module):
     def __init__(self, input_dim, num_channels, num_layers):
@@ -30,7 +29,7 @@ class MLP(nn.Module):
     def forward(self, inputs):
         return self.net(inputs)
 
-class LinearLayerDiscreteActor(ActorCritic.DiscreteActor):
+class LinearLayerDiscreteActor(DiscreteActor):
     def __init__(self, actions_num_buckets, in_channels):
         total_action_dim = sum(actions_num_buckets)
         impl = nn.Linear(in_channels, total_action_dim)
@@ -40,7 +39,7 @@ class LinearLayerDiscreteActor(ActorCritic.DiscreteActor):
         nn.init.orthogonal_(self.impl.weight, gain=0.01)
         nn.init.constant_(self.impl.bias, 0)
 
-class LinearLayerCritic(ActorCritic.Critic):
+class LinearLayerCritic(Critic):
     def __init__(self, in_channels):
         super().__init__(nn.Linear(in_channels, 1))
 

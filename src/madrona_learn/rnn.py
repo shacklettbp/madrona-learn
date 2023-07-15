@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class LSTM(nn.Module):
+class LSTMEncoder(nn.Module):
     def __init__(self, in_channels, num_hidden, num_layers=1):
         super().__init__()
 
@@ -97,4 +97,4 @@ class LSTM(nn.Module):
 
         return torch.stack(out_sequences, dim=0)
 
-    fwd_sequence = eval_sequence_slow
+    fwd_sequence = fwd_sequence_slow

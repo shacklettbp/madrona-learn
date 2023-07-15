@@ -24,13 +24,13 @@ class MiniBatch:
     rewards: torch.Tensor
     values: torch.Tensor
     advantages: torch.Tensor
-    rnn_hidden_starts: Optional[torch.Tensor]
+    rnn_start_states: tuple[torch.Tensor, ...]
 
 def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
                       inds : torch.Tensor,
                       amp : AMPInfo):
-    obs_slice = [obs[:, inds, ...] for obs in rollouts.obs]
+    obs_slice = tuple(obs[:, inds, ...] for obs in rollouts.obs)
     
     actions_slice = rollouts.actions[:, inds, ...]
     log_probs_slice = rollouts.log_probs[:, inds, ...].to(dtype=amp.compute_dtype)
@@ -39,10 +39,7 @@ def _gather_minibatch(rollouts : Rollouts,
     values_slice = rollouts.values[:, inds, ...].to(dtype=amp.compute_dtype)
     advantages_slice = advantages[:, inds, ...].to(dtype=amp.compute_dtype)
 
-    if rollouts.rnn_hidden_starts != None:
-        rnn_hidden_starts_slice = rollouts.rnn_hidden_starts[:, :, inds, ...]
-    else:
-        rnn_hidden_starts_slice = None
+    rnn_starts_slice = tuple(state[:, :, inds, ...] for state in rollouts.rnn_start_states)
     
     return MiniBatch(
         obs=obs_slice,
@@ -52,7 +49,7 @@ def _gather_minibatch(rollouts : Rollouts,
         rewards=rewards_slice,
         values=values_slice,
         advantages=advantages_slice,
-        rnn_hidden_starts=rnn_hidden_starts_slice,
+        rnn_start_states=rnn_starts_slice,
     )
 
 def _compute_advantages(cfg : TrainConfig,
@@ -106,7 +103,7 @@ def _ppo_update(cfg : TrainConfig,
                 optimizer : torch.optim.Optimizer):
     with amp.enable():
         new_log_probs, entropies, new_values = actor_critic.train(
-            mb.rnn_hidden_starts, mb.dones, mb.actions, *mb.obs)
+            mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
             action_scores = _compute_action_scores(cfg, amp, mb.advantages)

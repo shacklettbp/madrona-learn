@@ -8,7 +8,7 @@ class Backbone(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def _flatten_obs_sequence(obs):
+    def _flatten_obs_sequence(self, obs):
         return [o.view(-1, *o.shape[2:]) for o in obs]
 
     def forward(self, rnn_states_in, *obs_in):
@@ -133,7 +133,7 @@ class BackboneEncoder(nn.Module):
 
     # *inputs come in pre-flattened
     def fwd_sequence(self, rnn_start_states, dones, *flattened_inputs):
-        return self.net(*inputs)
+        return self.net(*flattened_inputs)
 
 class RecurrentBackboneEncoder(nn.Module):
     def __init__(self, net, rnn):
@@ -195,15 +195,15 @@ class BackboneShared(Backbone):
 
     def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
         return self._rollout_common(
-            self, rnn_states_out, rnn_states_in, *obs_in)
+            rnn_states_out, rnn_states_in, *obs_in)
 
     def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
         return self._rollout_common(
-            self, rnn_states_out, rnn_states_in, *obs_in)
+            rnn_states_out, rnn_states_in, *obs_in)
 
     def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
         features = self._rollout_common(
-            self, rnn_states_out, rnn_states_in, *obs_in)
+            rnn_states_out, rnn_states_in, *obs_in)
 
         return features, features
 

@@ -15,7 +15,7 @@ class Rollouts:
     rewards: torch.Tensor
     values: torch.Tensor
     bootstrap_values: torch.Tensor
-    rnn_hidden_starts: tuple[torch.Tensor, ...]
+    rnn_start_states: tuple[torch.Tensor, ...]
 
 class RolloutManager:
     def __init__(
@@ -119,8 +119,8 @@ class RolloutManager:
             with amp.enable():
                 actor_critic.rollout_infer(
                     self.actions[slot], self.log_probs[slot],
-                    self.values[slot], rnn_hidden_cur_out,
-                    rnn_hidden_cur_in, *cur_obs_buffers)
+                    self.values[slot], rnn_states_cur_out,
+                    rnn_states_cur_in, *cur_obs_buffers)
 
             rnn_states_cur_in, rnn_states_cur_out = \
                 rnn_states_cur_out, rnn_states_cur_in
@@ -148,7 +148,7 @@ class RolloutManager:
             self.rnn_alt_states = rnn_states_cur_out
 
             actor_critic.critic_infer(
-                self.bootstrap_values, None, self.rnn_hidden_end, *final_obs)
+                self.bootstrap_values, None, self.rnn_end_states, *final_obs)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers from a
@@ -162,6 +162,5 @@ class RolloutManager:
             rewards = self.rewards,
             values = self.values,
             bootstrap_values = self.bootstrap_values,
-            rnn_hidden_starts =
-                self.rnn_hidden_start if self.recurrent_policy else None,
+            rnn_start_states = self.rnn_start_states,
         )
