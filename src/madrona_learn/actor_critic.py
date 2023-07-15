@@ -217,204 +217,65 @@ class BackboneShared(Backbone):
 
         return features, features
 
+
 class BackboneSeparate(Backbone):
     def __init__(self, process_obs, actor_encoder, critic_encoder):
         self.process_obs = process_obs
         self.actor_encoder = actor_encoder
         self.critic_encoder = critic_encoder
-        self.recurrent_cfg = 
-
-
-class BackboneSeparate(Backbone):
-    def __init__(self, common_process_obs, actor_backbone, critic_backbone):
-        super().__init__()
-        self.common_process_obs = common_process_obs
-        self.actor_backbone = actor_backbone
-        self.critic_backbone = critic_backbone
-        self.recurrent_cfg = RecurrentStateConfig([])
+        self.recurrent_cfg = RecurrentStateConfig(
+            [actor_encoder.rnn_state_shape, critic_encoder.rnn_state_shape])
 
     def forward(self, rnn_states, *obs_in):
         with torch.no_grad():
-            processed_obs = self.common_process_obs(*obs_in)
-
-        actor_features = self.actor_backbone(processed_obs)
-        critic_features = self.critic_backbone(processed_obs)
-        return actor_features, critic_features, ()
-
-    def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
-        with torch.no_grad():
-            processed_obs = self.common_process_obs(*obs_in)
-
-        return self.actor_backbone(processed_obs)
-
-    def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
-        with torch.no_grad():
-            processed_obs = self.common_process_obs(*obs_in)
-
-        return self.critic_backbone(processed_obs)
-
-    def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
-        actor_features, critic_features, _ = self(rnn_states_in, *obs_in)
-        return actor_features, critic_features
-
-    def fwd_sequence(self, rnn_start_states, dones, *obs_in):
-        flattened_obs = self._flatten_obs_sequence(obs_in)
-
-        with torch.no_grad():
-            processed_obs = self.common_process_obs(*flattened_obs)
-
-        actor_features = self.actor_backbone(processed_obs)
-        critic_features = self.critic_backbone(processed_obs)
-
-        return actor_features, critic_features
-
-
-class RecurrentBackboneShared(Backbone):
-    def __init__(self, process_obs, encoder, rnn):
-        super().__init__()
-
-        self.process_obs = process_obs
-        self.encoder = encoder
-        self.rnn = rnn
-        self.recurrent_cfg = RecurrentStateConfig([rnn.hidden_shape])
-
-    def _encode(self, *obs_in):
-        with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        return self.encoder(processed_obs)
-
-    def forward(self, rnn_states_in, *obs_in):
-        features = self._encode(*obs_in)
-        rnn_out, new_rnn_states = self.rnn(features, rnn_states_in)
-
-        return features, features, (new_rnn_states,)
+        actor_features, new_actor_rnn_states = self.actor_encoder(processed_obs)
+        critic_features, new_critic_rnn_states = self.critic_encoder(processed_obs)
+        return actor_features, critic_features, (new_actor_rnn_states, new_critic_rnn_states)
 
     def _rollout_common(self, rnn_states_out, rnn_states_in, *obs_in):
-        features = self._encode(*obs_in)
-        rnn_out, new_rnn_states = self.rnn(features, rnn_states_in)
-
-        # FIXME inplace
-        if rnn_states_out:
-            rnn_states_out[...] = new_rnn_states
-
-        return rnn_out
-
-    def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
-        return self._rollout_common(rnn_states_out, rnn_states_in, *obs_in)
-
-    def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
-        return self._rollout_common(rnn_states_out, rnn_states_in, *obs_in)
-
-    def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
-        features = self.rollout_common(rnn_states_out, rnn_states_in, *obs_in)
-        return features, featuers
-
-    def fwd_sequence(self, rnn_start_states, dones, *obs_in):
-        flattened_obs = self._flatten_obs_sequence(obs_in)
-        features = self._encode(*flattened_obs)
-
-        features_seq = features.view(*dones.shape[0:2], *features.shape[1:])
-
-        rnn_out_seq = self.rnn.fwd_sequence(
-            features_seq, rnn_start_states, dones)
-
-        rnn_out_flattened = rnn_out_seq.view(-1, *rnn_out_seq.shape[2:])
-
-        return rnn_out_flattened, rnn_out_flattened
-
-
-class RecurrentBackboneSeparate(Backbone):
-    def __init__(self, common_process_obs,
-                 actor_encoder, actor_rnn,
-                 critic_encoder, critic_rnn):
-        super().__init__()
-
-        self.common_process_obs = common_process_obs
-        self.actor_encoder = actor_encoder
-        self.actor_rnn = actor_rnn
-        self.critic_encoder = critic_encoder
-        self.critic_rnn = critic_rnn
-        self.recurrent_cfg = RecurrentStateConfig([
-            actor_rnn.hidden_shape, critic_rnn.hidden_shape])
-
-    def forward(self, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        actor_features = self.actor_encoder(processed_obs)
-        critic_features = self.critic_encoder(processed_obs)
-
-        actor_rnn_out, new_actor_rnn_states = self.actor_rnn(
-            actor_features, rnn_states_in[0])
-
-        critic_rnn_out, new_critic_rnn_states = self.critic_rnn(
-            critic_features, rnn_states_in[1])
-
-        return actor_rnn_out, critic_rnn_out,
-            (new_actor_rnn_states, new_critic_rnn_states)
+        return self.encoder.fwd_inplace(
+            rnn_states_out, rnn_states_in, processed_obs)
 
     def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        actor_features = self.actor_encoder(processed_obs)
-        actor_rnn_out, new_actor_rnn_states = self.actor_rnn(
-                actor_features, rnn_states_in[0])
-
-        if rnn_states_out:
-            rnn_states_out[0][...] = new_actor_rnn_states
-
-        return actor_rnn_out
+        return self.actor_encoder.fwd_inplace(
+                rnn_states_out[0], rnn_states_in[0], processed_obs)
 
     def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        critic_features = self.critic_encoder(processed_obs)
-        critic_rnn_out, new_critic_rnn_states = self.critic_rnn(
-                critic_features, rnn_states_in[1])
-
-        if rnn_states_out:
-            rnn_states_out[1][...] = new_critic_rnn_states
-
-        return critic_rnn_out
+        return self.critic_encoder.fwd_inplace(
+                rnn_states_out[1], rnn_states_in[1], processed_obs)
 
     def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        actor_features = self.actor_encoder(processed_obs)
-        critic_features = self.critic_encoder(processed_obs)
+        actor_features = self.actor_encoder.fwd_inplace(
+                rnn_states_out[0], rnn_states_in[0], processed_obs)
 
-        actor_rnn_out, new_actor_rnn_states = self.actor_rnn(
-            actor_features, rnn_states_in[0])
+        critic_features = self.critic_encoder.fwd_inplace(
+                rnn_states_out[1], rnn_states_in[1], processed_obs)
 
-        critic_rnn_out, new_critic_rnn_states = self.critic_rnn(
-            critic_features, rnn_states_in[1])
-
-        rnn_states_out[0][...] = actor_rnn_out
-        rnn_states_out[1][...] = critic_rnn_out
-
-        return actor_rnn_out, critic_rnn_out
+        return actor_features, critic_features
 
     def fwd_sequence(self, rnn_start_states, dones, *obs_in):
-        flattened_obs = self._flatten_obs_sequence(obs_in)
-
         with torch.no_grad():
-            processed_obs = self.process_obs(*obs_in)
+            flattened_obs = self._flatten_obs_sequence(obs_in)
+            processed_obs = self.process_obs(*flattened_obs)
+        
+        actor_features = self.actor_encoder.fwd_sequence(
+            rnn_start_states[0], dones, processed_obs)
 
-        actor_features = self.actor_encoder(processed_obs)
-        critic_features = self.critic_encoder(processed_obs)
+        critic_features = self.critic_encoder.fwd_sequence(
+            rnn_start_states[1], dones, processed_obs)
 
-        actor_features_seq = actor_features.view(
-                *dones.shape[0:2], *actor_features.shape[1:])
-        critic_features_seq = critic_features.view(
-                *dones.shape[0:2], *critic_features.shape[1:])
-
-        rnn_out_seq = self.rnn.fwd_sequence(
-            features_seq, rnn_start_states, dones)
-
-        rnn_out_flattened = rnn_out_seq.view(-1, *rnn_out_seq.shape[2:])
-
-        return rnn_out_flattened, rnn_out_flattened
+        return actor_features, critic_features

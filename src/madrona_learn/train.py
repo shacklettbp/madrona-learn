@@ -105,12 +105,8 @@ def _ppo_update(cfg : TrainConfig,
                 actor_critic : ActorCritic,
                 optimizer : torch.optim.Optimizer):
     with amp.enable():
-        if mb.rnn_hidden_starts is not None:
-            new_log_probs, entropies, new_values = actor_critic.train(
-                mb.rnn_hidden_starts, mb.dones, mb.actions, *mb.obs)
-        else:
-            new_log_probs, entropies, new_values = actor_critic.train(
-                mb.actions, *mb.obs)
+        new_log_probs, entropies, new_values = actor_critic.train(
+            mb.rnn_hidden_starts, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
             action_scores = _compute_action_scores(cfg, amp, mb.advantages)
@@ -212,7 +208,7 @@ def train(sim, cfg, actor_critic, dev):
     optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
 
     rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
-        amp, actor_critic.rnn_hidden_shape)
+        amp, actor_critic.recurrent_cfg)
 
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':
