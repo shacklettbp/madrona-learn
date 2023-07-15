@@ -28,7 +28,6 @@ class RolloutManager:
         ):
         self.dev = dev
         self.need_obs_copy = sim.obs[0].device != dev
-        self.need_rnn_mask = len(recurrent_cfg.shapes) > 0
 
         if dev.type == 'cuda':
             float_storage_type = torch.float16
@@ -45,7 +44,7 @@ class RolloutManager:
 
         self.dones = torch.zeros(
             (steps_per_update, *sim.dones.shape),
-            dtype=torch.uint8, device=dev)
+            dtype=torch.bool, device=dev)
 
         self.rewards = torch.zeros(
             (steps_per_update, *sim.rewards.shape),
@@ -133,15 +132,11 @@ class RolloutManager:
             sim.step()
             step_total += time() - step_start_time
 
-            if self.need_rnn_mask:
-                rnn_mask = 1.0 - sim.dones.to(
-                    dtype=amp.compute_dtype, device=self.dev)
-
-                for rnn_states in rnn_states_cur_in:
-                    rnn_states.mul_(rnn_mask)
-
             self.dones[slot].copy_(sim.dones, non_blocking=True)
             self.rewards[slot].copy_(sim.rewards, non_blocking=True)
+
+            for rnn_states in rnn_states_cur_in:
+                rnn_states.masked_fill_(self.dones[slot], 0)
 
         if self.need_obs_copy:
             final_obs = self.final_obs

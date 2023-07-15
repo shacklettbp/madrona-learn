@@ -199,7 +199,7 @@ def build_rnn_build_seq_info(
 def build_rnn_inputs(
     x: torch.Tensor,
     rnn_states: torch.Tensor,
-    not_dones,
+    rnn_resets,
     rnn_build_seq_info,
 ) -> Tuple[PackedSequence, torch.Tensor,]:
     r"""Create a PackedSequence input for an RNN such that each
@@ -244,9 +244,7 @@ def build_rnn_inputs(
 
     # Now zero things out in the correct locations
     rnn_states.masked_fill_(
-        torch.logical_not(
-            not_dones.view(1, -1, 1).index_select(1, sequence_starts)
-        ),
+        rnn_resets.view(1, -1, 1).index_select(1, sequence_starts),
         0,
     )
 
@@ -364,12 +362,12 @@ class FastLSTM(nn.Module):
         rnn_states = start_hidden.view(
             start_hidden.shape[0] * start_hidden.shape[1],
             start_hidden.shape[2], -1)
-        masks = (1.0 - sequence_breaks).view(-1)
+        rnn_resets = sequence_breaks.view(-1)
 
         (
             x_seq,
             hidden_states,
-        ) = build_rnn_inputs(x, rnn_states, masks, rnn_build_seq_info)
+        ) = build_rnn_inputs(x, rnn_states, rnn_resets, rnn_build_seq_info)
 
         hidden_states = hidden_states.view(
             -1, self.num_layers, *hidden_states.shape[1:])
