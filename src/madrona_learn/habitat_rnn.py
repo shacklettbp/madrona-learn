@@ -350,7 +350,7 @@ class FastLSTM(nn.Module):
         start_hidden,
         sequence_breaks,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        dones_cpu = sequence_breaks.squeeze(dim=-1).numpy()
+        dones_cpu = sequence_breaks.squeeze(dim=-1).cpu().numpy()
 
         rnn_build_seq_info = build_rnn_build_seq_info(
             device=in_sequences.device,
