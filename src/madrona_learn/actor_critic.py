@@ -183,7 +183,7 @@ class BackboneShared(Backbone):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        features, new_rnn_states = self.encoder(processed_obs)
+        features, new_rnn_states = self.encoder(rnn_states, processed_obs)
         return features, features, new_rnn_states
 
     def _rollout_common(self, rnn_states_out, rnn_states_in, *obs_in):
@@ -230,8 +230,10 @@ class BackboneSeparate(Backbone):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        actor_features, new_actor_rnn_states = self.actor_encoder(processed_obs)
-        critic_features, new_critic_rnn_states = self.critic_encoder(processed_obs)
+        actor_features, new_actor_rnn_states = self.actor_encoder(
+            rnn_states[0], processed_obs)
+        critic_features, new_critic_rnn_states = self.critic_encoder(
+            rnn_states[1], processed_obs)
         return actor_features, critic_features, (new_actor_rnn_states, new_critic_rnn_states)
 
     def _rollout_common(self, rnn_states_out, rnn_states_in, *obs_in):
