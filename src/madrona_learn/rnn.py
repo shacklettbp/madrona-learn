@@ -2,13 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .habitat_rnn import FastLSTM
+
+__all__ = ["LSTM", "FastLSTM"]
+
 class LSTM(nn.Module):
-    def __init__(self, in_channels, num_hidden, num_layers=1):
+    def __init__(self, in_channels, hidden_channels, num_layers=1):
         super().__init__()
 
         self.lstm = nn.LSTM(
             input_size=in_channels,
-            hidden_size=num_hidden,
+            hidden_size=hidden_channels,
             num_layers=num_layers,
             batch_first=False)
 
@@ -20,7 +24,7 @@ class LSTM(nn.Module):
                 nn.init.constant_(param, 0)
 
         self.num_layers = num_layers
-        self.hidden_shape = (2, self.num_layers, num_hidden)
+        self.hidden_shape = (2, self.num_layers, hidden_channels)
 
     def forward(self, in_features, cur_hidden):
         in_features = in_features.view(1, *in_features.shape)

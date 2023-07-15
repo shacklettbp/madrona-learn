@@ -241,6 +241,7 @@ def build_rnn_inputs(
     # Just select the rnn_states by batch index, the masking bellow will set things
     # to zero in the correct locations
     rnn_states = rnn_states.index_select(1, rnn_state_batch_inds)
+
     # Now zero things out in the correct locations
     rnn_states.masked_fill_(
         torch.logical_not(
@@ -278,7 +279,7 @@ def build_rnn_out_from_seq(
     ]
     rnn_state_batch_inds = rnn_build_seq_info["rnn_state_batch_inds"]
     output_hidden_states = hidden_states.index_select(
-        1,
+        2,
         last_sequence_in_batch_inds[
             _invert_permutation(
                 rnn_state_batch_inds[last_sequence_in_batch_inds]
@@ -299,17 +300,15 @@ class FastLSTM(nn.Module):
 
     def __init__(
         self,
-        input_size: int,
-        hidden_size: int,
+        in_channels: int,
+        hidden_channels: int,
         num_layers: int = 1,
     ):
         super().__init__()
 
-        self.num_recurrent_layers = num_layers * 2
-
         self.rnn = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
+            input_size=in_channels,
+            hidden_size=hidden_channels,
             num_layers=num_layers,
         )
 
@@ -319,25 +318,23 @@ class FastLSTM(nn.Module):
             elif "bias" in name:
                 nn.init.constant_(param, 0)
 
+        self.hidden_shape = (2, num_layers, hidden_channels)
+        self.num_layers = num_layers
+
     def pack_hidden(
         self, hidden_states: Tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
-        return torch.cat(hidden_states, 0)
+        return torch.stack(hidden_states, 0)
 
     def unpack_hidden(
         self, hidden_states
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        lstm_states = torch.chunk(hidden_states.contiguous(), 2, 0)
-        return (lstm_states[0], lstm_states[1])
+        return (hidden_states[0], hidden_states[1])
 
     def forward(
-        self, x, hidden_states, masks
+        self, x, hidden_states
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Forward for a non-sequence input"""
-
-        hidden_states = torch.where(
-            masks.view(1, -1, 1), hidden_states, hidden_states.new_zeros(())
-        )
 
         x, hidden_states = self.rnn(
             x.unsqueeze(0), self.unpack_hidden(hidden_states)
@@ -353,32 +350,29 @@ class FastLSTM(nn.Module):
         start_hidden,
         sequence_breaks,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""Forward for a sequence of length T
-
-        Args:
-            x: (T, N, -1) Tensor that has been flattened to (T * N, -1)
-            hidden_states: The starting hidden state.
-            masks: The masks to be applied to hidden state at every timestep.
-                A (T, N) tensor flatten to (T * N)
-        """
-
-        dones_cpu = sequence_breaks.numpy()
+        dones_cpu = sequence_breaks.squeeze(dim=-1).numpy()
 
         rnn_build_seq_info = build_rnn_build_seq_info(
-            device=self.device,
+            device=in_sequences.device,
             build_fn_result=build_pack_info_from_dones(
-                dones_cpu[
-                    0 : self.current_rollout_step_idx, inds.numpy()
-                ].reshape(-1, len(inds)),
+                dones_cpu,
             ),
         )
 
-        masks = 1.0 - sequence_breaks
+        x = in_sequences.view(
+            in_sequences.shape[0] * in_sequences.shape[1], -1)
+        rnn_states = start_hidden.view(
+            start_hidden.shape[0] * start_hidden.shape[1],
+            start_hidden.shape[2], -1)
+        masks = (1.0 - sequence_breaks).view(-1)
 
         (
             x_seq,
             hidden_states,
-        ) = build_rnn_inputs(in_sequences, start_hidden, masks, rnn_build_seq_info)
+        ) = build_rnn_inputs(x, rnn_states, masks, rnn_build_seq_info)
+
+        hidden_states = hidden_states.view(
+            -1, self.num_layers, *hidden_states.shape[1:])
 
         rnn_ret = self.rnn(x_seq, self.unpack_hidden(hidden_states))
         x_seq: PackedSequence = rnn_ret[0]
@@ -391,4 +385,4 @@ class FastLSTM(nn.Module):
             rnn_build_seq_info,
         )
 
-        return x, hidden_states
+        return x.view(sequence_breaks.shape[0], sequence_breaks.shape[1], -1)
