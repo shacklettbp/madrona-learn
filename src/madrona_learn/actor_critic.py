@@ -175,9 +175,6 @@ class BackboneShared(Backbone):
         self.process_obs = process_obs
         self.encoder = encoder 
 
-        # This if statement isn't stricly necessary, could also have [None]
-        # but this removes a very small amount of bookkeeping if 
-        # no RNN is used
         if encoder.rnn_state_shape:
             self.recurrent_cfg = RecurrentStateConfig([encoder.rnn_state_shape])
         else:
@@ -228,18 +225,48 @@ class BackboneSeparate(Backbone):
         self.process_obs = process_obs
         self.actor_encoder = actor_encoder
         self.critic_encoder = critic_encoder
-        self.recurrent_cfg = RecurrentStateConfig(
-            [actor_encoder.rnn_state_shape, critic_encoder.rnn_state_shape])
+
+        rnn_state_shapes = []
+
+        if actor_encoder.rnn_state_shape == None:
+            self.extract_actor_rnn_state = lambda rnn_states: None
+        else:
+            actor_rnn_idx = len(rnn_state_shapes)
+            rnn_state_shapes.append(actor_encoder.rnn_state_shape)
+            self.extract_actor_rnn_state = \
+                lambda rnn_states: rnn_states[actor_rnn_idx]
+
+        if critic_encoder.rnn_state_shape == None:
+            self.extract_critic_rnn_state = lambda rnn_states: None
+        else:
+            critic_rnn_idx = len(rnn_state_shapes)
+            rnn_state_shapes.append(critic_encoder.rnn_state_shape)
+            self.extract_critic_rnn_state = \
+                lambda rnn_states: rnn_states[critic_rnn_idx]
+
+        if (actor_encoder.rnn_state_shape and
+                critic_encoder.rnn_state_shape):
+            self.package_rnn_states = lambda a, c: (a, c)
+        elif actor_encoder.rnn_state_shape:
+            self.package_rnn_states = lambda a, c: (a,)
+        elif critic_encoder.rnn_state_shape:
+            self.package_rnn_states = lambda a, c: (c,)
+        else:
+            self.package_rnn_states = lambda a, c: None
+
+        self.recurrent_cfg = RecurrentStateConfig(rnn_state_shapes)
 
     def forward(self, rnn_states, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
         actor_features, new_actor_rnn_states = self.actor_encoder(
-            rnn_states[0], processed_obs)
+            self.extract_actor_rnn_state(rnn_states), processed_obs)
         critic_features, new_critic_rnn_states = self.critic_encoder(
-            rnn_states[1], processed_obs)
-        return actor_features, critic_features, (new_actor_rnn_states, new_critic_rnn_states)
+            self.extract_critic_rnn_state(rnn_states), processed_obs)
+
+        return actor_features, critic_features, self.package_rnn_states(
+            new_actor_rnn_states, new_critic_rnn_states)
 
     def _rollout_common(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
@@ -253,26 +280,30 @@ class BackboneSeparate(Backbone):
             processed_obs = self.process_obs(*obs_in)
 
         return self.actor_encoder.fwd_inplace(
-                rnn_states_out[0] if rnn_states_out else None,
-                rnn_states_in[0], processed_obs)
+            self.extract_actor_rnn_state(rnn_states_out) if rnn_states_out else None,
+            self.extract_actor_rnn_state(rnn_states_in), processed_obs)
 
     def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
         return self.critic_encoder.fwd_inplace(
-                rnn_states_out[1] if rnn_states_out else None,
-                rnn_states_in[1], processed_obs)
+            self.extract_critic_rnn_state(rnn_states_out) if rnn_states_out else None,
+            self.extract_critic_rnn_state(rnn_states_in), processed_obs)
 
     def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
         actor_features = self.actor_encoder.fwd_inplace(
-                rnn_states_out[0], rnn_states_in[0], processed_obs)
+            self.extract_actor_rnn_state(rnn_states_out),
+            self.extract_actor_rnn_state(rnn_states_in),
+            processed_obs)
 
         critic_features = self.critic_encoder.fwd_inplace(
-                rnn_states_out[1], rnn_states_in[1], processed_obs)
+            self.extract_critic_rnn_state(rnn_states_out),
+            self.extract_critic_rnn_state(rnn_states_in),
+            processed_obs)
 
         return actor_features, critic_features
 
@@ -282,9 +313,11 @@ class BackboneSeparate(Backbone):
             processed_obs = self.process_obs(*flattened_obs)
         
         actor_features = self.actor_encoder.fwd_sequence(
-            rnn_start_states[0], dones, processed_obs)
+            self.extract_actor_rnn_state(rnn_start_states),
+            dones, processed_obs)
 
         critic_features = self.critic_encoder.fwd_sequence(
-            rnn_start_states[1], dones, processed_obs)
+            self.extract_critic_rnn_state(rnn_start_states),
+            dones, processed_obs)
 
         return actor_features, critic_features
