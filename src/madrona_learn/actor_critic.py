@@ -144,16 +144,16 @@ class RecurrentBackboneEncoder(nn.Module):
 
     def forward(self, rnn_states, *inputs):
         features = self.net(*inputs)
-        rnn_out, new_rnn_states = self.rnn(features)
+        rnn_out, new_rnn_states = self.rnn(features, rnn_states)
 
         return rnn_out, new_rnn_states
 
     def fwd_inplace(self, rnn_states_out, rnn_states_in, *inputs):
         features = self.net(*inputs)
-        rnn_out, new_rnn_states = self.rnn(features)
+        rnn_out, new_rnn_states = self.rnn(features, rnn_states_in)
 
         # FIXME: proper inplace
-        if rnn_states_out:
+        if rnn_states_out != None:
             rnn_states_out[...] = rnn_states_in
 
         return rnn_out
@@ -177,22 +177,29 @@ class BackboneShared(Backbone):
 
         if encoder.rnn_state_shape:
             self.recurrent_cfg = RecurrentStateConfig([encoder.rnn_state_shape])
+            self.extract_rnn_state = lambda x: x[0] if x != None else None
+            self.package_rnn_state = lambda x: (x,)
         else:
             self.recurrent_cfg = RecurrentStateConfig([])
+            self.extract_rnn_state = lambda x: None
+            self.package_rnn_state = lambda x: ()
 
     def forward(self, rnn_states, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
-        features, new_rnn_states = self.encoder(rnn_states, processed_obs)
-        return features, features, new_rnn_states
+        features, new_rnn_states = self.encoder(
+            self.extract_rnn_state(rnn_states), processed_obs)
+        return features, features, self.package_rnn_state(new_rnn_states)
 
     def _rollout_common(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
         return self.encoder.fwd_inplace(
-            rnn_states_out, rnn_states_in, processed_obs)
+            self.extract_rnn_state(rnn_states_out),
+            self.extract_rnn_state(rnn_states_in),
+            processed_obs)
 
     def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
         return self._rollout_common(
@@ -214,7 +221,8 @@ class BackboneShared(Backbone):
             processed_obs = self.process_obs(*flattened_obs)
         
         features = self.encoder.fwd_sequence(
-            rnn_start_states, dones, processed_obs)
+            self.extract_rnn_state(rnn_start_states),
+            dones, processed_obs)
 
         return features, features
 
@@ -252,7 +260,7 @@ class BackboneSeparate(Backbone):
         elif critic_encoder.rnn_state_shape:
             self.package_rnn_states = lambda a, c: (c,)
         else:
-            self.package_rnn_states = lambda a, c: None
+            self.package_rnn_states = lambda a, c: ()
 
         self.recurrent_cfg = RecurrentStateConfig(rnn_state_shapes)
 

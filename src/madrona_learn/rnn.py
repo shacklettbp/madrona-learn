@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class LSTMEncoder(nn.Module):
+class LSTM(nn.Module):
     def __init__(self, in_channels, num_hidden, num_layers=1):
         super().__init__()
 
