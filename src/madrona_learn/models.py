@@ -3,21 +3,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .action import DiscreteActionDistributions
-from .recurrent_policy import LSTMRecurrentPolicy
+from .rnn import LSTM
 from .actor_critic import ActorCritic
 
-class SmallMLPBackbone(nn.Module):
-    def __init__(self, process_obs_fn, input_dim, num_channels):
+class MLP(nn.Module):
+    def __init__(self, input_dim, num_channels, num_layers):
         super().__init__()
 
-        self.process_obs = process_obs_fn
-
         layers = [
-                nn.Linear(input_dim, num_channels),
-                nn.ReLU(),
-                nn.Linear(num_channels, num_channels),
-                nn.ReLU()
-            ]
+            nn.Linear(input_dim, num_channels),
+            nn.ReLU(),
+        ]
+        for i in range(num_layers - 1):
+            layers.append(nn.Linear(num_channels, num_channels))
+            layers.append(nn.ReLU())
 
         self.net = nn.Sequential(*layers)
 
@@ -28,11 +27,8 @@ class SmallMLPBackbone(nn.Module):
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, val=0)
 
-    def forward(self, *in_obs):
-        with torch.no_grad():
-            processed_obs = self.process_obs(*in_obs)
-
-        return self.net(processed_obs)
+    def forward(self, inputs):
+        return self.net(inputs)
 
 class LinearLayerDiscreteActor(ActorCritic.DiscreteActor):
     def __init__(self, actions_num_buckets, in_channels):

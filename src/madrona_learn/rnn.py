@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class LSTMRecurrentPolicy(nn.Module):
+class LSTM(nn.Module):
     def __init__(self, in_channels, num_hidden, num_layers=1):
         super().__init__()
 
@@ -12,10 +12,17 @@ class LSTMRecurrentPolicy(nn.Module):
             num_layers=num_layers,
             batch_first=False)
 
+        for name, param in self.lstm.named_parameters():
+            # LSTM parameters are named weight_* and bias_*
+            if 'weight' in name:
+                nn.init.orthogonal_(param)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0)
+
         self.num_layers = num_layers
         self.hidden_shape = (2, self.num_layers, num_hidden)
 
-    def infer(self, in_features, cur_hidden):
+    def forward(self, in_features, cur_hidden):
         in_features = in_features.view(1, *in_features.shape)
 
         out, (new_h, new_c) = self.lstm(in_features,
@@ -57,7 +64,7 @@ class LSTMRecurrentPolicy(nn.Module):
         return o, new_hidden
 
     # Slow naive LSTM implementation
-    def eval_sequence_slow(self, in_sequences, start_hidden, sequence_breaks):
+    def fwd_sequence_slow(self, in_sequences, start_hidden, sequence_breaks):
         seq_len = in_sequences.shape[0]
 
         hidden_dim_per_layer = start_hidden.shape[-1]
@@ -90,4 +97,4 @@ class LSTMRecurrentPolicy(nn.Module):
 
         return torch.stack(out_sequences, dim=0)
 
-    eval_sequence = eval_sequence_slow
+    fwd_sequence = eval_sequence_slow
