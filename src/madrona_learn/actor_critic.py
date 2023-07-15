@@ -126,7 +126,7 @@ class BackboneEncoder(nn.Module):
 
     def forward(self, rnn_states, *inputs):
         features = self.net(*inputs)
-        return features, ()
+        return features, None
 
     def fwd_inplace(self, rnn_states_out, rnn_states_in, *inputs):
         return self.net(*inputs)
@@ -146,7 +146,7 @@ class RecurrentBackboneEncoder(nn.Module):
         features = self.net(*inputs)
         rnn_out, new_rnn_states = self.rnn(features)
 
-        return rnn_out, (new_rnn_states,)
+        return rnn_out, new_rnn_states
 
     def fwd_inplace(self, rnn_states_out, rnn_states_in, *inputs):
         features = self.net(*inputs)
@@ -174,6 +174,10 @@ class BackboneShared(Backbone):
         super().__init__()
         self.process_obs = process_obs
         self.encoder = encoder 
+
+        # This if statement isn't stricly necessary, could also have [None]
+        # but this removes a very small amount of bookkeeping if 
+        # no RNN is used
         if encoder.rnn_state_shape:
             self.recurrent_cfg = RecurrentStateConfig([encoder.rnn_state_shape])
         else:
@@ -220,6 +224,7 @@ class BackboneShared(Backbone):
 
 class BackboneSeparate(Backbone):
     def __init__(self, process_obs, actor_encoder, critic_encoder):
+        super().__init__()
         self.process_obs = process_obs
         self.actor_encoder = actor_encoder
         self.critic_encoder = critic_encoder
@@ -248,14 +253,16 @@ class BackboneSeparate(Backbone):
             processed_obs = self.process_obs(*obs_in)
 
         return self.actor_encoder.fwd_inplace(
-                rnn_states_out[0], rnn_states_in[0], processed_obs)
+                rnn_states_out[0] if rnn_states_out else None,
+                rnn_states_in[0], processed_obs)
 
     def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():
             processed_obs = self.process_obs(*obs_in)
 
         return self.critic_encoder.fwd_inplace(
-                rnn_states_out[1], rnn_states_in[1], processed_obs)
+                rnn_states_out[1] if rnn_states_out else None,
+                rnn_states_in[1], processed_obs)
 
     def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
         with torch.no_grad():

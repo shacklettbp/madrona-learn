@@ -78,6 +78,12 @@ class RolloutManager:
         self.rnn_end_states = []
         self.rnn_alt_states = []
         for rnn_state_shape in recurrent_cfg.shapes:
+            if rnn_state_shape is None:
+                self.rnn_start_states.append(None)
+                self.rnn_end_states.append(None)
+                self.rnn_alt_states.append(None)
+                continue
+
             # expand shape to batch size
             rnn_batch_shape = (*rnn_state_shape[0:2],
                 sim.actions.shape[0], rnn_state_shape[2])
@@ -105,7 +111,8 @@ class RolloutManager:
 
         for start_state, end_state in zip(
                 self.rnn_start_states, self.rnn_end_states):
-            start_state.copy_(end_state)
+            if start_state != None:
+                start_state.copy_(end_state)
 
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states

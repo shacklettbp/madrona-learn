@@ -39,7 +39,9 @@ def _gather_minibatch(rollouts : Rollouts,
     values_slice = rollouts.values[:, inds, ...].to(dtype=amp.compute_dtype)
     advantages_slice = advantages[:, inds, ...].to(dtype=amp.compute_dtype)
 
-    rnn_starts_slice = tuple(state[:, :, inds, ...] for state in rollouts.rnn_start_states)
+    rnn_starts_slice = tuple(
+        state[:, :, inds, ...] if state else None
+            for state in rollouts.rnn_start_states)
     
     return MiniBatch(
         obs=obs_slice,
