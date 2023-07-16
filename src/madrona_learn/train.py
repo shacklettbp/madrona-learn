@@ -30,14 +30,14 @@ def _mb_slice(tensor, inds):
     # Tensors come from the rollout manager as (C, T, N, ...)
     # Want to select mb from C * N and keep sequences of length T
 
-    return tensor.transpose(1, 2).view(
-        -1, tensor.shape[1], *tensor.shape[3:])[inds]
+    return tensor.transpose(0, 1).reshape(
+        tensor.shape[1], tensor.shape[0] * tensor.shape[2], *tensor.shape[3:])[:, inds, ...]
 
 def _mb_slice_rnn(rnn_state, inds):
     # RNN state comes from the rollout manager as (C, :, :, N, :)
     # Want to select minibatch from C * N and keep sequences of length T
 
-    reshaped = rnn_state.permute(1, 2, 0, 3, 4).view(
+    reshaped = rnn_state.permute(1, 2, 0, 3, 4).reshape(
         rnn_state.shape[1], rnn_state.shape[2], -1, rnn_state.shape[4])
 
     return reshaped[:, :, inds, :] 
