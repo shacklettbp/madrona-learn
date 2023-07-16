@@ -4,11 +4,11 @@ import torch.nn.functional as F
 import torch._dynamo
 from torch import optim
 from torch.func import vmap
-from time import time
 from os import environ as env_vars
 from typing import Callable
 from dataclasses import dataclass
 from typing import List, Optional, Dict
+from .profile import profile
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
@@ -46,7 +46,6 @@ def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
                       inds : torch.Tensor,
                       amp : AMPInfo):
-
     obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
     
     actions_slice = _mb_slice(rollouts.actions, inds)
@@ -62,7 +61,7 @@ def _gather_minibatch(rollouts : Rollouts,
 
     rnn_starts_slice = tuple(
         _mb_slice_rnn(state, inds) for state in rollouts.rnn_start_states)
-    
+
     return MiniBatch(
         obs=obs_slice,
         actions=actions_slice,
@@ -184,7 +183,32 @@ def _ppo_update(cfg : TrainConfig,
     with torch.no_grad():
         print(f"    Loss: {loss.cpu().float().item()} {-action_obj.cpu().float().item()} {value_loss.cpu().float().item()} {-entropies.cpu().float().item()}")
 
-def _update_loop(cfg : TrainConfig,
+def _update_iter(cfg : TrainConfig,
+                 amp : AMPInfo,
+                 num_train_seqs : int,
+                 sim : SimInterface,
+                 rollout_mgr : RolloutManager,
+                 actor_critic : ActorCritic,
+                 advantages : torch.Tensor,
+                 optimizer,
+                 scheduler):
+    with torch.no_grad():
+        rollouts = rollout_mgr.collect(amp, sim, actor_critic)
+    
+        # Engstrom et al suggest recomputing advantages after every epoch
+        # but that's pretty annoying for a recurrent policy since values
+        # need to be recomputed. https://arxiv.org/abs/2005.12729
+        _compute_advantages(cfg, amp, advantages, rollouts)
+    
+    for epoch in range(cfg.ppo.num_epochs):
+        for inds in torch.randperm(num_train_seqs).chunk(
+                cfg.ppo.num_mini_batches):
+            with torch.no_grad():
+                mb = _gather_minibatch(rollouts, advantages, inds, amp)
+            _ppo_update(cfg, amp, mb, actor_critic, optimizer)
+
+def _update_loop(update_iter_fn,
+                 cfg : TrainConfig,
                  amp : AMPInfo,
                  num_agents: int,
                  sim : SimInterface,
@@ -192,36 +216,29 @@ def _update_loop(cfg : TrainConfig,
                  actor_critic : ActorCritic,
                  optimizer,
                  scheduler):
-    total_train_chunks = num_agents * cfg.num_bptt_chunks
-
-    assert(total_train_chunks % cfg.ppo.num_mini_batches == 0)
+    num_train_seqs = num_agents * cfg.num_bptt_chunks
+    assert(num_train_seqs % cfg.ppo.num_mini_batches == 0)
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
     for update_idx in range(cfg.num_updates):
-        update_start_time = time()
 
         if update_idx % 1 == 0:
             print(f'\nUpdate: {update_idx}')
 
-        with torch.no_grad():
-            rollouts = rollout_mgr.collect(amp, sim, actor_critic)
+        with profile("Update Iter", gpu=True):
+            update_iter_fn(cfg,
+                           amp,
+                           num_train_seqs,
+                           sim,
+                           rollout_mgr,
+                           actor_critic,
+                           advantages,
+                           optimizer,
+                           scheduler)
 
-            # Engstrom et al suggest recomputing advantages after every epoch
-            # but that's pretty annoying for a recurrent policy since values
-            # need to be recomputed. https://arxiv.org/abs/2005.12729
-            _compute_advantages(cfg, amp, advantages, rollouts)
-
-        for epoch in range(cfg.ppo.num_epochs):
-            for inds in torch.randperm(total_train_chunks).chunk(
-                    cfg.ppo.num_mini_batches):
-                with torch.no_grad():
-                    mb = _gather_minibatch(rollouts, advantages, inds, amp)
-                _ppo_update(cfg, amp, mb, actor_critic, optimizer)
-
-        update_end_time = time()
-
-        print(f"    Time: {update_end_time - update_start_time}")
+        profile.commit()
+        profile.report()
 
 def train(sim, cfg, actor_critic, dev):
     print(cfg)
@@ -250,11 +267,12 @@ def train(sim, cfg, actor_critic, dev):
             from torch._inductor import config as inductor_cfg
             inductor_cfg.cpp.cxx = env_vars['MADRONA_LEARN_COMPILE_CXX']
 
-        update_loop = torch.compile(_update_loop, dynamic=False)
+        update_iter_fn = torch.compile(_update_iter, dynamic=False)
     else:
-        update_loop = _update_loop
+        update_iter_fn = _update_iter
 
-    update_loop(
+    _update_loop(
+        update_iter_fn=update_iter_fn,
         cfg=cfg,
         amp=amp,
         num_agents=num_agents,
@@ -262,6 +280,7 @@ def train(sim, cfg, actor_critic, dev):
         rollout_mgr=rollout_mgr,
         actor_critic=actor_critic,
         optimizer=optimizer,
-        scheduler=None)
+        scheduler=None,
+    )
 
     return actor_critic.cpu()

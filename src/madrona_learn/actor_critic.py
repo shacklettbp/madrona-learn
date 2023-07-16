@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from .action import DiscreteActionDistributions
+from .profile import profile
 
 class Backbone(nn.Module):
     def __init__(self):
@@ -144,6 +145,7 @@ class RecurrentBackboneEncoder(nn.Module):
 
     def forward(self, rnn_states_in, *inputs):
         features = self.net(*inputs)
+
         rnn_out, new_rnn_states = self.rnn(features, rnn_states_in)
 
         return rnn_out, new_rnn_states
@@ -165,8 +167,9 @@ class RecurrentBackboneEncoder(nn.Module):
         features_seq = features.view(
             *sequence_breaks.shape[0:2], *features.shape[1:])
 
-        rnn_out_seq = self.rnn.fwd_sequence(
-            features_seq, rnn_start_states, sequence_breaks)
+        with profile('RecurrentBackboneEncoder.fwd_sequence.rnn'):
+            rnn_out_seq = self.rnn.fwd_sequence(
+                features_seq, rnn_start_states, sequence_breaks)
 
         rnn_out_flattened = rnn_out_seq.view(-1, *rnn_out_seq.shape[2:])
         return rnn_out_flattened
