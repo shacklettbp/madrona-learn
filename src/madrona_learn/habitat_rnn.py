@@ -348,6 +348,7 @@ class FastLSTM(nn.Module):
         in_sequences,
         start_hidden,
         sequence_breaks,
+        return_hidden = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         dones_cpu = sequence_breaks.squeeze(dim=-1).cpu().numpy()
 
@@ -383,4 +384,78 @@ class FastLSTM(nn.Module):
             rnn_build_seq_info,
         )
 
-        return x.view(sequence_breaks.shape[0], sequence_breaks.shape[1], -1)
+        if not return_hidden:
+            return x.view(sequence_breaks.shape[0], sequence_breaks.shape[1], -1)
+        else:
+            hidden_states = hidden_states.view(*start_hidden.shape)
+            final_clears = sequence_breaks[sequence_breaks.shape[0] - 1].view(1, -1, 1).logical_not()
+            hidden_states = hidden_states * final_clears
+
+            return x.view(sequence_breaks.shape[0], sequence_breaks.shape[1], -1), hidden_states
+
+    @staticmethod
+    def test():
+        try:
+            torch.backends.cudnn.allow_tf32 = False
+            torch.backends.cuda.matmul.allow_tf32 = False
+        except AttributeError:
+            pass
+
+        device = (
+            torch.device("cuda")
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        rnn_state_encoder = FastLSTM(32, 32, num_layers=2).to(
+            device=device
+        )
+        rnn = rnn_state_encoder.rnn
+        with torch.no_grad():
+            for T in [1, 2, 4, 8, 16, 32, 64, 3, 13, 31]:
+                for N in [1, 2, 4, 8, 3, 5]:
+                    dones = torch.rand((T, N, 1), device=device) <= (
+                        1.0 / 25.0
+                    )
+
+                    inputs = torch.randn((T, N, 32), device=device)
+                    hidden_states = torch.randn(
+                        2,
+                        rnn_state_encoder.num_layers,
+                        N,
+                        32,
+                        device=device,
+                    )
+
+                    outputs, out_hiddens = rnn_state_encoder.fwd_sequence(
+                        inputs,
+                        hidden_states,
+                        dones,
+                        True,
+                    )
+
+                    reference_outputs = []
+                    reference_hiddens = hidden_states.clone()
+                    for t in range(T):
+                        x, reference_hiddens = rnn(
+                            inputs[t : t + 1], (reference_hiddens[0], reference_hiddens[1])
+                        )
+
+                        reference_hiddens = torch.stack(reference_hiddens, dim=0)
+
+                        reference_outputs.append(x.squeeze(0))
+
+                        reference_hiddens = torch.where(
+                            dones[t].view(1, -1, 1),
+                            reference_hiddens.new_zeros(()),
+                            reference_hiddens,
+                        )
+
+                    reference_outputs = torch.stack(reference_outputs, 0)
+
+                    assert (
+                        torch.norm(reference_outputs - outputs) < 0.001
+                    ), "Failed on (T={}, N={})".format(T, N)
+
+                    assert (
+                        torch.norm(reference_hiddens - out_hiddens) < 0.001
+                    ), "Failed on (T={}, N={})".format(T, N)
