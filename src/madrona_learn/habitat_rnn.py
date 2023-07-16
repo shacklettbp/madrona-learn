@@ -81,6 +81,7 @@ def build_pack_info_from_episode_ids(
     unique_episode_ids, sequence_lengths = np.unique(
         episode_ids, return_counts=True
     )
+
     # Exclusive cumsum
     sequence_starts = np.cumsum(sequence_lengths) - sequence_lengths
 
@@ -166,7 +167,7 @@ def build_pack_info_from_episode_ids(
 
 def build_pack_info_from_dones(dones: np.ndarray) -> Dict[str, np.ndarray]:
     T, N = dones.shape
-    episode_ids = np.cumsum(dones, 0)
+    episode_ids = np.cumsum(dones, 0) - dones
     environment_ids = np.arange(N).reshape(1, N).repeat(T, 0)
     # Technically the step_ids should reset to 0 after each done,
     # but build_pack_info_from_episode_ids doesn't depend on this
@@ -199,7 +200,6 @@ def build_rnn_build_seq_info(
 def build_rnn_inputs(
     x: torch.Tensor,
     rnn_states: torch.Tensor,
-    rnn_resets,
     rnn_build_seq_info,
 ) -> Tuple[PackedSequence, torch.Tensor,]:
     r"""Create a PackedSequence input for an RNN such that each
@@ -237,6 +237,7 @@ def build_rnn_inputs(
 
     rnn_state_batch_inds = rnn_build_seq_info["rnn_state_batch_inds"]
     sequence_starts = rnn_build_seq_info["sequence_starts"]
+    batch_first_seqs = rnn_build_seq_info["first_sequence_in_batch_mask"].view(1, -1, 1)
 
     # Just select the rnn_states by batch index, the masking bellow will set things
     # to zero in the correct locations
@@ -244,7 +245,7 @@ def build_rnn_inputs(
 
     # Now zero things out in the correct locations
     rnn_states.masked_fill_(
-        rnn_resets.view(1, -1, 1).index_select(1, sequence_starts),
+        torch.logical_not(batch_first_seqs),
         0,
     )
 
@@ -362,12 +363,11 @@ class FastLSTM(nn.Module):
         rnn_states = start_hidden.view(
             start_hidden.shape[0] * start_hidden.shape[1],
             start_hidden.shape[2], -1)
-        rnn_resets = sequence_breaks.view(-1)
 
         (
             x_seq,
             hidden_states,
-        ) = build_rnn_inputs(x, rnn_states, rnn_resets, rnn_build_seq_info)
+        ) = build_rnn_inputs(x, rnn_states, rnn_build_seq_info)
 
         hidden_states = hidden_states.view(
             -1, self.num_layers, *hidden_states.shape[1:])
