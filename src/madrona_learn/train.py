@@ -26,21 +26,42 @@ class MiniBatch:
     advantages: torch.Tensor
     rnn_start_states: tuple[torch.Tensor, ...]
 
+def _mb_slice(tensor, inds):
+    # Tensors come from the rollout manager as (C, T, N, ...)
+    # Want to select mb from C * N and keep sequences of length T
+
+    return tensor.transpose(1, 2).view(
+        -1, tensor.shape[1], *tensor.shape[3:])[inds]
+
+def _mb_slice_rnn(rnn_state, inds):
+    # RNN state comes from the rollout manager as (C, :, :, N, :)
+    # Want to select minibatch from C * N and keep sequences of length T
+
+    reshaped = rnn_state.permute(1, 2, 0, 3, 4).view(
+        rnn_state.shape[1], rnn_state.shape[2], -1, rnn_state.shape[4])
+
+    return reshaped[:, :, inds, :] 
+
 def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
                       inds : torch.Tensor,
                       amp : AMPInfo):
-    obs_slice = tuple(obs[:, inds, ...] for obs in rollouts.obs)
+
+    obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
     
-    actions_slice = rollouts.actions[:, inds, ...]
-    log_probs_slice = rollouts.log_probs[:, inds, ...].to(dtype=amp.compute_dtype)
-    dones_slice = rollouts.dones[:, inds, ...]
-    rewards_slice = rollouts.rewards[:, inds, ...].to(dtype=amp.compute_dtype)
-    values_slice = rollouts.values[:, inds, ...].to(dtype=amp.compute_dtype)
-    advantages_slice = advantages[:, inds, ...].to(dtype=amp.compute_dtype)
+    actions_slice = _mb_slice(rollouts.actions, inds)
+    log_probs_slice = _mb_slice(rollouts.log_probs, inds).to(
+        dtype=amp.compute_dtype)
+    dones_slice = _mb_slice(rollouts.dones, inds)
+    rewards_slice = _mb_slice(rollouts.rewards, inds).to(
+        dtype=amp.compute_dtype)
+    values_slice = _mb_slice(rollouts.values, inds).to(
+        dtype=amp.compute_dtype)
+    advantages_slice = _mb_slice(advantages, inds).to(
+        dtype=amp.compute_dtype)
 
     rnn_starts_slice = tuple(
-        state[:, :, inds, ...] for state in rollouts.rnn_start_states)
+        _mb_slice_rnn(state, inds) for state in rollouts.rnn_start_states)
     
     return MiniBatch(
         obs=obs_slice,
@@ -62,12 +83,20 @@ def _compute_advantages(cfg : TrainConfig,
     # even though there is no autocast here. Unclear if this is desirable or
     # even beneficial for performance.
 
+    num_chunks, steps_per_chunk, N = rollouts.dones.shape[0:3]
+    T = num_chunks * steps_per_chunk
+
+    seq_dones = rollouts.dones.view(T, N, 1)
+    seq_rewards = rollouts.rewards.view(T, N, 1)
+    seq_values = rollouts.values.view(T, N, 1)
+    seq_advantages_out = advantages_out.view(T, N, 1)
+
     next_advantage = 0.0
     next_values = rollouts.bootstrap_values
     for i in reversed(range(cfg.steps_per_update)):
-        cur_dones = rollouts.dones[i].to(dtype=amp.compute_dtype)
-        cur_rewards = rollouts.rewards[i].to(dtype=amp.compute_dtype)
-        cur_values = rollouts.values[i].to(dtype=amp.compute_dtype)
+        cur_dones = seq_dones[i].to(dtype=amp.compute_dtype)
+        cur_rewards = seq_rewards[i].to(dtype=amp.compute_dtype)
+        cur_values = seq_values[i].to(dtype=amp.compute_dtype)
 
         next_valid = 1.0 - cur_dones
 
@@ -80,7 +109,7 @@ def _compute_advantages(cfg : TrainConfig,
         cur_advantage = (td_err +
             cfg.gamma * cfg.gae_lambda * next_valid * next_advantage)
 
-        advantages_out[i] = cur_advantage
+        seq_advantages_out[i] = cur_advantage
 
         next_advantage = cur_advantage
         next_values = cur_values
@@ -163,7 +192,9 @@ def _update_loop(cfg : TrainConfig,
                  actor_critic : ActorCritic,
                  optimizer,
                  scheduler):
-    assert(num_agents % cfg.ppo.num_mini_batches == 0)
+    total_train_chunks = num_agents * cfg.num_bptt_chunks
+
+    assert(total_train_chunks % cfg.ppo.num_mini_batches == 0)
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
@@ -182,9 +213,10 @@ def _update_loop(cfg : TrainConfig,
             _compute_advantages(cfg, amp, advantages, rollouts)
 
         for epoch in range(cfg.ppo.num_epochs):
-            for inds in torch.randperm(num_agents).chunk(
+            for inds in torch.randperm(total_train_chunks).chunk(
                     cfg.ppo.num_mini_batches):
-                mb = _gather_minibatch(rollouts, advantages, inds, amp)
+                with torch.no_grad():
+                    mb = _gather_minibatch(rollouts, advantages, inds, amp)
                 _ppo_update(cfg, amp, mb, actor_critic, optimizer)
 
         update_end_time = time()
@@ -206,7 +238,7 @@ def train(sim, cfg, actor_critic, dev):
     optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
 
     rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
-        amp, actor_critic.recurrent_cfg)
+        cfg.num_bptt_chunks, amp, actor_critic.recurrent_cfg)
 
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':

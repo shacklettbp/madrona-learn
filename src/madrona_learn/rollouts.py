@@ -23,10 +23,17 @@ class RolloutManager:
             dev : torch.device,
             sim : SimInterface,
             steps_per_update : int,
+            num_bptt_chunks : int,
             amp : AMPInfo,
             recurrent_cfg : RecurrentStateConfig,
         ):
         self.dev = dev
+        self.steps_per_update = steps_per_update
+        self.num_bptt_chunks = num_bptt_chunks
+        assert(steps_per_update % num_bptt_chunks == 0)
+        num_bptt_steps = steps_per_update // num_bptt_chunks
+        self.num_bptt_steps = num_bptt_steps
+
         self.need_obs_copy = sim.obs[0].device != dev
 
         if dev.type == 'cuda':
@@ -35,27 +42,25 @@ class RolloutManager:
             float_storage_type = torch.bfloat16
 
         self.actions = torch.zeros(
-            (steps_per_update, *sim.actions.shape),
+            (num_bptt_chunks, num_bptt_steps, *sim.actions.shape),
             dtype=sim.actions.dtype, device=dev)
 
         self.log_probs = torch.zeros(
-            (steps_per_update, *sim.actions.shape),
+            self.actions.shape,
             dtype=float_storage_type, device=dev)
 
         self.dones = torch.zeros(
-            (steps_per_update, *sim.dones.shape),
+            (num_bptt_chunks, num_bptt_steps, *sim.dones.shape),
             dtype=torch.bool, device=dev)
 
         self.rewards = torch.zeros(
-            (steps_per_update, *sim.rewards.shape),
+            (num_bptt_chunks, num_bptt_steps, *sim.rewards.shape),
             dtype=float_storage_type, device=dev)
 
         self.values = torch.zeros(
-            (steps_per_update, *sim.rewards.shape),
+            (num_bptt_chunks, num_bptt_steps, *sim.rewards.shape),
             dtype=float_storage_type, device=dev)
 
-        # FIXME: seems like this could be combined into self.values by
-        # making self.values one longer, but that breaks torch.compile
         self.bootstrap_values = torch.zeros(
             sim.rewards.shape, dtype=amp.compute_dtype, device=dev)
 
@@ -63,7 +68,7 @@ class RolloutManager:
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
-                (steps_per_update, *obs_tensor.shape),
+                (num_bptt_chunks, num_bptt_steps, *obs_tensor.shape),
                 dtype=obs_tensor.dtype, device=dev))
 
         if self.need_obs_copy:
@@ -73,28 +78,31 @@ class RolloutManager:
                 self.final_obs.append(torch.zeros(
                     obs_tensor.shape, dtype=obs_tensor.dtype, device=dev))
 
-        self.steps_per_update = steps_per_update
-
-        self.rnn_start_states = []
         self.rnn_end_states = []
         self.rnn_alt_states = []
+        self.rnn_start_states = []
         for rnn_state_shape in recurrent_cfg.shapes:
             # expand shape to batch size
-            rnn_batch_shape = (*rnn_state_shape[0:2],
+            batched_state_shape = (*rnn_state_shape[0:2],
                 sim.actions.shape[0], rnn_state_shape[2])
 
-            rnn_start_state = torch.zeros(
-                rnn_batch_shape, dtype=amp.compute_dtype, device=dev)
-            rnn_end_state = torch.zeros_like(rnn_start_state)
-            rnn_alt_state = torch.zeros_like(rnn_start_state)
+            rnn_end_state = torch.zeros(
+                batched_state_shape, dtype=amp.compute_dtype, device=dev)
+            rnn_alt_state = torch.zeros_like(rnn_end_state)
 
-            self.rnn_start_states.append(rnn_start_state)
             self.rnn_end_states.append(rnn_end_state)
             self.rnn_alt_states.append(rnn_alt_state)
 
-        self.rnn_start_states = tuple(self.rnn_start_states)
+            bptt_starts_shape = (num_bptt_chunks, *batched_state_shape)
+
+            rnn_start_state = torch.zeros(
+                bptt_starts_shape, dtype=amp.compute_dtype, device=dev)
+
+            self.rnn_start_states.append(rnn_start_state)
+
         self.rnn_end_states = tuple(self.rnn_end_states)
         self.rnn_alt_states = tuple(self.rnn_alt_states)
+        self.rnn_start_states = tuple(self.rnn_start_states)
 
     def collect(
             self,
@@ -102,41 +110,56 @@ class RolloutManager:
             sim : SimInterface,
             actor_critic : ActorCritic,
         ):
-        step_total = 0
-
-        for start_state, end_state in zip(
-                self.rnn_start_states, self.rnn_end_states):
-            start_state.copy_(end_state)
+        step_total_time = 0
 
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
 
-        for slot in range(0, self.steps_per_update):
-            cur_obs_buffers = [obs[slot] for obs in self.obs]
+        for bptt_chunk in range(0, self.num_bptt_chunks):
+            # Cache starting RNN state for this chunk
+            for start_state, end_state in zip(
+                    self.rnn_start_states, rnn_states_cur_in):
+                start_state[bptt_chunk].copy_(end_state)
 
-            for obs_idx, step_obs in enumerate(sim.obs):
-                cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
+            for slot in range(0, self.num_bptt_steps):
+                cur_obs_buffers = [obs[bptt_chunk, slot] for obs in self.obs]
 
-            with amp.enable():
-                actor_critic.rollout_infer(
-                    self.actions[slot], self.log_probs[slot],
-                    self.values[slot], rnn_states_cur_out,
-                    rnn_states_cur_in, *cur_obs_buffers)
+                for obs_idx, step_obs in enumerate(sim.obs):
+                    cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
-            rnn_states_cur_in, rnn_states_cur_out = \
-                rnn_states_cur_out, rnn_states_cur_in
+                cur_actions_store = self.actions[bptt_chunk, slot]
 
-            sim.actions.copy_(self.actions[slot], non_blocking=True)
+                with amp.enable():
+                    actor_critic.rollout_infer(
+                        cur_actions_store,
+                        self.log_probs[bptt_chunk, slot],
+                        self.values[bptt_chunk, slot],
+                        rnn_states_cur_out,
+                        rnn_states_cur_in,
+                        *cur_obs_buffers,
+                    )
 
-            step_start_time = time()
-            sim.step()
-            step_total += time() - step_start_time
+                rnn_states_cur_in, rnn_states_cur_out = \
+                    rnn_states_cur_out, rnn_states_cur_in
 
-            self.dones[slot].copy_(sim.dones, non_blocking=True)
-            self.rewards[slot].copy_(sim.rewards, non_blocking=True)
+                # This isn't non-blocking because if the sim is running in
+                # CPU mode, the copy needs to be finished before sim.step()
+                # FIXME: proper pytorch <-> madrona cuda stream integration
+                sim.actions.copy_(cur_actions_store)
 
-            for rnn_states in rnn_states_cur_in:
-                rnn_states.masked_fill_(self.dones[slot], 0)
+                step_start_time = time()
+                sim.step()
+                step_total_time += time() - step_start_time
+
+                self.rewards[bptt_chunk, slot].copy_(
+                    sim.rewards, non_blocking=True)
+
+                cur_dones_store = self.dones[bptt_chunk, slot]
+                cur_dones_store.copy_(
+                    sim.dones, non_blocking=True)
+
+                for rnn_states in rnn_states_cur_in:
+                    rnn_states.masked_fill_(cur_dones_store, 0)
 
         if self.need_obs_copy:
             final_obs = self.final_obs
@@ -145,12 +168,12 @@ class RolloutManager:
         else:
             final_obs = sim.obs
 
-        with amp.enable():
-            # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
-            # iter so rnn_hidden_cur_in is the final output
-            self.rnn_end_states = rnn_states_cur_in
-            self.rnn_alt_states = rnn_states_cur_out
+        # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
+        # iter so rnn_hidden_cur_in is the final output
+        self.rnn_end_states = rnn_states_cur_in
+        self.rnn_alt_states = rnn_states_cur_out
 
+        with amp.enable():
             actor_critic.critic_infer(
                 self.bootstrap_values, None, self.rnn_end_states, *final_obs)
 

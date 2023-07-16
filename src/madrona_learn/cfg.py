@@ -18,6 +18,7 @@ class PPOConfig:
 class TrainConfig:
     num_updates: int
     steps_per_update: int
+    num_bptt_chunks: int
     lr: float
     gamma: float
     ppo: PPOConfig
