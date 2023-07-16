@@ -67,7 +67,7 @@ class LSTM(nn.Module):
 
         return o, new_hidden
 
-    # Slow naive LSTM implementation
+    # Manually written LSTM implementation, doesn't work
     def fwd_sequence_slow(self, in_sequences, start_hidden, sequence_breaks):
         seq_len = in_sequences.shape[0]
 
@@ -101,4 +101,30 @@ class LSTM(nn.Module):
 
         return torch.stack(out_sequences, dim=0)
 
-    fwd_sequence = fwd_sequence_slow
+    # Just call forward repeatedly
+    def fwd_sequence_default(self, in_sequences, start_hidden, sequence_breaks):
+        seq_len = in_sequences.shape[0]
+
+        hidden_dim_per_layer = start_hidden.shape[-1]
+
+        zero_hidden = torch.zeros((2, self.num_layers, 1,
+                                   hidden_dim_per_layer),
+                                  device=start_hidden.device,
+                                  dtype=start_hidden.dtype)
+
+        out_sequences = []
+
+        cur_hidden = start_hidden
+        for i in range(seq_len):
+            cur_features = in_sequences[i]
+            cur_breaks = sequence_breaks[i]
+
+            out, new_hidden = self.forward(cur_features, cur_hidden)
+            out_sequences.append(out)
+
+            cur_hidden = torch.where(
+                cur_breaks.bool(), zero_hidden, new_hidden)
+
+        return torch.stack(out_sequences, dim=0)
+
+    fwd_sequence = fwd_sequence_default
