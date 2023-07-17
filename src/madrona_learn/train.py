@@ -256,7 +256,7 @@ def _update_loop(update_iter_fn,
         outer_timing_mean += (outer_diff - outer_timing_mean) / (update_idx + 1)
         print(f"    Outer Loop Timing: {outer_timing_mean:.3f}")
 
-def train(sim, cfg, actor_critic, dev):
+def train(dev, sim, cfg, actor_critic, update_cb):
     print(cfg)
 
     torch.backends.cuda.matmul.allow_tf32 = True
