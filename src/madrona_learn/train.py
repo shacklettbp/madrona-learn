@@ -27,6 +27,21 @@ class MiniBatch:
     advantages: torch.Tensor
     rnn_start_states: tuple[torch.Tensor, ...]
 
+@dataclass()
+class PPOStats:
+    loss : float = 0
+    action_loss : float = 0
+    value_loss : float = 0
+    entropy_loss : float = 0
+
+@dataclass(frozen = True)
+class UpdateResult:
+    actions : torch.Tensor
+    rewards : torch.Tensor
+    values : torch.Tensor
+    advantages : torch.Tensor
+    ppo_stats : PPOStats
+
 def _mb_slice(tensor, inds):
     # Tensors come from the rollout manager as (C, T, N, ...)
     # Want to select mb from C * N and keep sequences of length T
@@ -184,7 +199,14 @@ def _ppo_update(cfg : TrainConfig,
         optimizer.zero_grad()
 
     with torch.no_grad():
-        print(f"    Loss: {loss.cpu().float().item()} {-action_obj.cpu().float().item()} {value_loss.cpu().float().item()} {-entropies.cpu().float().item()}")
+        stats = PPOStats(
+            loss = loss.cpu().float().item(),
+            action_loss = -(action_obj.cpu().float().item()),
+            value_loss = value_loss.cpu().float().item(),
+            entropy_loss = -(entropies.cpu().float().item()),
+        )
+
+    return stats
 
 def _update_iter(cfg : TrainConfig,
                  amp : AMPInfo,
@@ -206,15 +228,37 @@ def _update_iter(cfg : TrainConfig,
             _compute_advantages(cfg, amp, advantages, rollouts)
     
     with profile('PPO'):
+        aggregate_stats = PPOStats()
+        num_stats = 0
+
         for epoch in range(cfg.ppo.num_epochs):
             for inds in torch.randperm(num_train_seqs).chunk(
                     cfg.ppo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
                     mb = _gather_minibatch(rollouts, advantages, inds, amp)
-                _ppo_update(cfg, amp, mb, actor_critic, optimizer)
+                cur_stats = _ppo_update(cfg, amp, mb, actor_critic, optimizer)
+
+                with torch.no_grad():
+                    num_stats += 1
+                    aggregate_stats.loss += (cur_stats.loss - aggregate_stats.loss) / num_stats
+                    aggregate_stats.action_loss += (
+                        cur_stats.action_loss - aggregate_stats.action_loss) / num_stats
+                    aggregate_stats.value_loss += (
+                        cur_stats.value_loss - aggregate_stats.value_loss) / num_stats
+                    aggregate_stats.entropy_loss += (
+                        cur_stats.entropy_loss - aggregate_stats.entropy_loss) / num_stats
+
+    return UpdateResult(
+        actions = rollouts.actions.view(-1, *rollouts.actions.shape[2:]),
+        rewards = rollouts.rewards.view(-1, *rollouts.rewards.shape[2:]),
+        values = rollouts.values.view(-1, *rollouts.values.shape[2:]),
+        advantages = advantages.view(-1, *advantages.shape[2:]),
+        ppo_stats = aggregate_stats,
+    )
 
 def _update_loop(update_iter_fn : Callable,
                  gpu_sync_fn : Callable,
+                 user_cb : Callable,
                  cfg : TrainConfig,
                  amp : AMPInfo,
                  num_agents: int,
@@ -228,34 +272,30 @@ def _update_loop(update_iter_fn : Callable,
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
-    outer_timing_mean = 0
     for update_idx in range(cfg.num_updates):
-        start_outer = time()
-
-        if update_idx % 1 == 0:
-            print(f'\nUpdate: {update_idx}')
+        update_start_time  = time()
 
         with profile("Update Iter Timing"):
-            update_iter_fn(cfg,
-                           amp,
-                           num_train_seqs,
-                           sim,
-                           rollout_mgr,
-                           actor_critic,
-                           advantages,
-                           optimizer,
-                           scheduler)
+            update_result = update_iter_fn(
+                cfg,
+                amp,
+                num_train_seqs,
+                sim,
+                rollout_mgr,
+                actor_critic,
+                advantages,
+                optimizer,
+                scheduler,
+            )
 
             gpu_sync_fn()
 
         profile.gpu_measure()
         profile.commit()
-        profile.report()
 
-        end_outer = time()
-        outer_diff = end_outer - start_outer
-        outer_timing_mean += (outer_diff - outer_timing_mean) / (update_idx + 1)
-        print(f"    Outer Loop Timing: {outer_timing_mean:.3f}")
+        update_end_time = time()
+        update_time = update_end_time - update_start_time
+        user_cb(update_idx, update_time, update_result)
 
 def train(dev, sim, cfg, actor_critic, update_cb):
     print(cfg)
@@ -298,6 +338,7 @@ def train(dev, sim, cfg, actor_critic, update_cb):
     _update_loop(
         update_iter_fn=update_iter_fn,
         gpu_sync_fn=gpu_sync_fn,
+        user_cb=update_cb,
         cfg=cfg,
         amp=amp,
         num_agents=num_agents,
