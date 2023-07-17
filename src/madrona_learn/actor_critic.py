@@ -167,7 +167,7 @@ class RecurrentBackboneEncoder(nn.Module):
         features_seq = features.view(
             *sequence_breaks.shape[0:2], *features.shape[1:])
 
-        with profile('RecurrentBackboneEncoder.fwd_sequence.rnn'):
+        with profile('rnn.fwd_sequence'):
             rnn_out_seq = self.rnn.fwd_sequence(
                 features_seq, rnn_start_states, sequence_breaks)
 

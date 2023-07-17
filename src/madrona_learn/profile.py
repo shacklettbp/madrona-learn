@@ -18,9 +18,11 @@ else:
 
 
 class TimingData:
-    def __init__(self):
+    def __init__(self, name):
+        self.name = name
         self.cpu_mean = 0
         self.N = 0
+        self.children = {}
 
     def start(self):
         self.cpu_start = time()
@@ -40,12 +42,12 @@ class TimingData:
         pass
 
     def __repr__(self):
-        return f"{self.cpu_mean:.3f}"
+        return f"{self.name} => CPU: {self.cpu_mean:.3f}"
 
 
 class GPUTimingData(TimingData):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name):
+        super().__init__(name)
 
         self.gpu_mean = 0
         self.gpu_N = 0
@@ -83,22 +85,31 @@ class GPUTimingData(TimingData):
         cur_event_idx = 0
 
     def __repr__(self):
-        return f"CPU: {super().__repr__()}, GPU: {self.gpu_mean:.3f}"
+        return f"{self.name} => CPU: {self.cpu_mean:.3f}, GPU: {self.gpu_mean:.3f}"
 
 class Profiler:
     def __init__(self):
-        self.timings = {}
+        self.top = {}
+        self.parents = []
+        self.iter_stack = []
 
     @contextmanager
     def __call__(self, name, gpu=False):
+        if len(self.parents) > 0:
+            cur_timings = self.parents[-1].children
+        else:
+            cur_timings = self.top
+
         try:
-            timing_data = self.timings[name]
+            timing_data = cur_timings[name]
         except KeyError:
             if gpu:
-                timing_data = GPUTimingData()
+                timing_data = GPUTimingData(name)
             else:
-                timing_data = TimingData()
-            self.timings[name] = timing_data
+                timing_data = TimingData(name)
+            cur_timings[name] = timing_data
+
+        self.parents.append(timing_data)
 
         try:
             timing_data.start()
@@ -106,21 +117,35 @@ class Profiler:
         finally:
             timing_data.end()
 
+        self.parents.pop()
+
+    def _iter_timings(self, fn):
+        for timing in self.top.values():
+            self.iter_stack.append((timing, 0))
+
+        while len(self.iter_stack) > 0:
+            cur, depth = self.iter_stack.pop()
+            fn(cur, depth)
+            for child in cur.children.values():
+                self.iter_stack.append((child, depth + 1))
+
     def commit(self):
-        for timing in self.timings.values():
-            timing.commit()
+        assert(len(self.parents) == 0)
+        self._iter_timings(lambda x, d: x.commit())
 
     def reset(self):
-        for timing in self.timings.values():
-            timing.reset()
+        self._iter_timings(lambda x, d: x.reset())
 
     def clear(self):
-        self.timings.clear()
+        assert(len(self.parents) == 0)
+        self.top.clear()
 
-    def report(self, indent='    '):
-        print(f"{indent}Timings:")
-        for name, timing in self.timings.items():
-            print(f"{indent * 2}{name}: {timing}")
+    def report(self, base_indent='    ', depth_indent='  '):
+        print(f"{base_indent}Timings:")
+        def print_timing(timing, depth):
+            print(f"{base_indent}{depth_indent * depth}{timing}")
+
+        self._iter_timings(print_timing)
 
 
 profile = Profiler()

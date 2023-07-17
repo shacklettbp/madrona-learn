@@ -131,8 +131,9 @@ def _ppo_update(cfg : TrainConfig,
                 actor_critic : ActorCritic,
                 optimizer : torch.optim.Optimizer):
     with amp.enable():
-        new_log_probs, entropies, new_values = actor_critic.train(
-            mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
+        with profile('actor_critic.train', gpu=True):
+            new_log_probs, entropies, new_values = actor_critic.train(
+                mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
             action_scores = _compute_action_scores(cfg, amp, mb.advantages)
