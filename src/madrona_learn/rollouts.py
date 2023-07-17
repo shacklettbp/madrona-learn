@@ -124,7 +124,7 @@ class RolloutManager:
             for slot in range(0, self.num_bptt_steps):
                 cur_obs_buffers = [obs[bptt_chunk, slot] for obs in self.obs]
 
-                with profile('Policy Infer'):
+                with profile('Policy Infer', gpu=True):
                     for obs_idx, step_obs in enumerate(sim.obs):
                         cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
@@ -165,6 +165,8 @@ class RolloutManager:
                     for rnn_states in rnn_states_cur_in:
                         rnn_states.masked_fill_(cur_dones_store, 0)
 
+                profile.gpu_measure(sync=True)
+
         if self.need_obs_copy:
             final_obs = self.final_obs
             for obs_idx, step_obs in enumerate(sim.obs):
@@ -177,7 +179,7 @@ class RolloutManager:
         self.rnn_end_states = rnn_states_cur_in
         self.rnn_alt_states = rnn_states_cur_out
 
-        with amp.enable(), profile("Compute Bootstrap Values"):
+        with amp.enable(), profile("Bootstrap Values"):
             actor_critic.critic_infer(
                 self.bootstrap_values, None, self.rnn_end_states, *final_obs)
 

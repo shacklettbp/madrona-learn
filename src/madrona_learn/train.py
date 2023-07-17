@@ -167,7 +167,7 @@ def _ppo_update(cfg : TrainConfig,
             - cfg.ppo.entropy_coef * entropies # Maximize entropy
         )
 
-    with profile('Backward'):
+    with profile('Optimize'):
         if amp.scaler is None:
             loss.backward()
             nn.utils.clip_grad_norm_(
@@ -205,12 +205,13 @@ def _update_iter(cfg : TrainConfig,
         with profile('Compute Advantages'):
             _compute_advantages(cfg, amp, advantages, rollouts)
     
-    for epoch in range(cfg.ppo.num_epochs):
-        for inds in torch.randperm(num_train_seqs).chunk(
-                cfg.ppo.num_mini_batches):
-            with torch.no_grad(), profile('Gather Minibatch', gpu=True):
-                mb = _gather_minibatch(rollouts, advantages, inds, amp)
-            _ppo_update(cfg, amp, mb, actor_critic, optimizer)
+    with profile('PPO'):
+        for epoch in range(cfg.ppo.num_epochs):
+            for inds in torch.randperm(num_train_seqs).chunk(
+                    cfg.ppo.num_mini_batches):
+                with torch.no_grad(), profile('Gather Minibatch', gpu=True):
+                    mb = _gather_minibatch(rollouts, advantages, inds, amp)
+                _ppo_update(cfg, amp, mb, actor_critic, optimizer)
 
 def _update_loop(update_iter_fn,
                  cfg : TrainConfig,
@@ -233,7 +234,7 @@ def _update_loop(update_iter_fn,
         if update_idx % 1 == 0:
             print(f'\nUpdate: {update_idx}')
 
-        with profile("Update Iter Timing", gpu=True):
+        with profile("Update Iter Timing"):
             update_iter_fn(cfg,
                            amp,
                            num_train_seqs,
@@ -244,6 +245,9 @@ def _update_loop(update_iter_fn,
                            optimizer,
                            scheduler)
 
+            torch.cuda.synchronize()
+
+        profile.gpu_measure()
         profile.commit()
         profile.report()
 

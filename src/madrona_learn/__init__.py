@@ -6,6 +6,7 @@ from madrona_learn.actor_critic import (
         BackboneEncoder, RecurrentBackboneEncoder,
         Backbone, BackboneShared, BackboneSeparate,
     )
+from madrona_learn.profile import profile
 import madrona_learn.models
 import madrona_learn.rnn
 
