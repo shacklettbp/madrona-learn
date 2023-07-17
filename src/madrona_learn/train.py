@@ -9,6 +9,7 @@ from typing import Callable
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 from .profile import profile
+from time import time
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
@@ -207,7 +208,7 @@ def _update_iter(cfg : TrainConfig,
     for epoch in range(cfg.ppo.num_epochs):
         for inds in torch.randperm(num_train_seqs).chunk(
                 cfg.ppo.num_mini_batches):
-            with torch.no_grad():
+            with torch.no_grad(), profile('Gather Minibatch', gpu=True):
                 mb = _gather_minibatch(rollouts, advantages, inds, amp)
             _ppo_update(cfg, amp, mb, actor_critic, optimizer)
 
@@ -225,7 +226,9 @@ def _update_loop(update_iter_fn,
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
+    outer_timing_mean = 0
     for update_idx in range(cfg.num_updates):
+        start_outer = time()
 
         if update_idx % 1 == 0:
             print(f'\nUpdate: {update_idx}')
@@ -243,6 +246,11 @@ def _update_loop(update_iter_fn,
 
         profile.commit()
         profile.report()
+
+        end_outer = time()
+        outer_diff = end_outer - start_outer
+        outer_timing_mean += (outer_diff - outer_timing_mean) / (update_idx + 1)
+        print(f"    Outer Loop Timing: {outer_timing_mean:.3f}")
 
 def train(sim, cfg, actor_critic, dev):
     print(cfg)

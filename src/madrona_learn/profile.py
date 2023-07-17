@@ -8,8 +8,11 @@ class DummyGPUEvent:
     def __init__(self, enable_timing):
         pass
 
-    def record():
+    def record(self):
         pass
+
+    def elapsed_time(self, e):
+        return 0.0
 
 if torch.cuda.is_available():
     GPUTimingEvent = torch.cuda.Event
@@ -20,6 +23,7 @@ else:
 class TimingData:
     def __init__(self, name):
         self.name = name
+        self.cur_sum = 0
         self.cpu_mean = 0
         self.N = 0
         self.children = {}
@@ -30,16 +34,18 @@ class TimingData:
     def end(self):
         end = time()
 
-        self.N += 1
         diff = end - self.cpu_start
-        self.cpu_mean += (diff - self.cpu_mean) / self.N
+        self.cur_sum += diff
 
     def reset(self):
+        self.cur_sum = 0
         self.cpu_mean = 0
         self.N = 0
 
     def commit(self):
-        pass
+        self.N += 1
+        self.cpu_mean += (self.cur_sum - self.cpu_mean) / self.N
+        self.cur_sum = 0
 
     def __repr__(self):
         return f"CPU: {self.cpu_mean:.3f}"
@@ -50,7 +56,6 @@ class GPUTimingData(TimingData):
         super().__init__(name)
 
         self.gpu_mean = 0
-        self.gpu_N = 0
         self.cur_event_idx = 0
         self.start_events = []
         self.end_events = []
@@ -72,17 +77,17 @@ class GPUTimingData(TimingData):
     def reset(self):
         super().reset()
         self.gpu_mean = 0
-        self.gpu_N = 0
         self.cur_event_idx = 0
 
     def commit(self):
         super().commit()
-        for start, end in zip(self.start_events, self.end_events):
-            self.gpu_N += 1
-            diff = start.elapsed_time(end) / 1000
-            self.gpu_mean += (diff - self.gpu_mean) / self.gpu_N
 
-        cur_event_idx = 0
+        gpu_sum = 0
+        for start, end in zip(self.start_events, self.end_events):
+            gpu_sum += start.elapsed_time(end) / 1000
+
+        self.gpu_mean += (gpu_sum - self.gpu_mean) / self.N
+        self.cur_event_idx = 0
 
     def __repr__(self):
         return f"CPU: {self.cpu_mean:.3f}, GPU: {self.gpu_mean:.3f}"
@@ -92,9 +97,17 @@ class Profiler:
         self.top = {}
         self.parents = []
         self.iter_stack = []
+        self.disabled = False
 
     @contextmanager
     def __call__(self, name, gpu=False):
+        if self.disabled:
+            try:
+                yield
+            finally:
+                pass
+            return
+
         if len(self.parents) > 0:
             cur_timings = self.parents[-1].children
         else:
@@ -116,31 +129,44 @@ class Profiler:
             yield
         finally:
             timing_data.end()
+            self.parents.pop()
 
-        self.parents.pop()
-
-    def _iter_timings(self, fn):
-        for timing in self.top.values():
-            self.iter_stack.append((timing, 0))
+    def _iter_timings(self, start, starting_depth, fn):
+        for timing in reversed(start.values()):
+            self.iter_stack.append((timing, starting_depth))
 
         while len(self.iter_stack) > 0:
             cur, depth = self.iter_stack.pop()
             fn(cur, depth)
-            for child in cur.children.values():
+            for child in reversed(cur.children.values()):
                 self.iter_stack.append((child, depth + 1))
 
     def commit(self):
-        assert(len(self.parents) == 0)
-        self._iter_timings(lambda x, d: x.commit())
+        commit_lambda = lambda x, d: x.commit()
+
+        if len(self.parents) == 0:
+            self._iter_timings(self.top, 0, commit_lambda)
+        else:
+            self._iter_timings(
+                self.parents[-1].children, len(self.parents), commit_lambda)
 
     def reset(self):
-        self._iter_timings(lambda x, d: x.reset())
+        assert(len(self.parents) == 0)
+        self._iter_timings(self.top, 0, lambda x, d: x.reset())
 
     def clear(self):
         assert(len(self.parents) == 0)
         self.top.clear()
 
+    def disable(self):
+        self.disabled = True
+
+    def enable(self):
+        self.disabled = False
+
     def report(self, base_indent='    ', depth_indent='  '):
+        assert(len(self.parents) == 0)
+
         def pad(depth):
             return f"{base_indent}{depth_indent * depth}"
 
@@ -152,7 +178,7 @@ class Profiler:
             if prefix_len > max_len:
                 max_len = prefix_len
 
-        self._iter_timings(compute_max_len)
+        self._iter_timings(self.top, 0, compute_max_len)
 
         def print_timing(timing, depth):
             prefix = f"{pad(depth)}{timing.name}"
@@ -160,7 +186,7 @@ class Profiler:
 
             print(f"{pad(depth)}{timing.name}{' ' * right_pad_amount} => {timing}")
 
-        self._iter_timings(print_timing)
+        self._iter_timings(self.top, 0, print_timing)
 
 
 profile = Profiler()

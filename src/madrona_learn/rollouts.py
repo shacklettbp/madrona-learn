@@ -115,20 +115,21 @@ class RolloutManager:
         rnn_states_cur_out = self.rnn_alt_states
 
         for bptt_chunk in range(0, self.num_bptt_chunks):
-            # Cache starting RNN state for this chunk
-            for start_state, end_state in zip(
-                    self.rnn_start_states, rnn_states_cur_in):
-                start_state[bptt_chunk].copy_(end_state)
+            with profile("Cache RNN state"):
+                # Cache starting RNN state for this chunk
+                for start_state, end_state in zip(
+                        self.rnn_start_states, rnn_states_cur_in):
+                    start_state[bptt_chunk].copy_(end_state)
 
             for slot in range(0, self.num_bptt_steps):
                 cur_obs_buffers = [obs[bptt_chunk, slot] for obs in self.obs]
 
-                for obs_idx, step_obs in enumerate(sim.obs):
-                    cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
+                with profile('Policy Infer'):
+                    for obs_idx, step_obs in enumerate(sim.obs):
+                        cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
-                cur_actions_store = self.actions[bptt_chunk, slot]
+                    cur_actions_store = self.actions[bptt_chunk, slot]
 
-                with profile('AC Rollout Infer'):
                     with amp.enable():
                         actor_critic.rollout_infer(
                             cur_actions_store,
@@ -145,20 +146,24 @@ class RolloutManager:
                     # This isn't non-blocking because if the sim is running in
                     # CPU mode, the copy needs to be finished before sim.step()
                     # FIXME: proper pytorch <-> madrona cuda stream integration
+
+                    # For now, the Policy Infer profile block ends here to get
+                    # a CPU synchronization
                     sim.actions.copy_(cur_actions_store)
 
                 with profile('Simulator Step'):
                     sim.step()
 
-                self.rewards[bptt_chunk, slot].copy_(
-                    sim.rewards, non_blocking=True)
+                with profile('Post Step Copy'):
+                    self.rewards[bptt_chunk, slot].copy_(
+                        sim.rewards, non_blocking=True)
 
-                cur_dones_store = self.dones[bptt_chunk, slot]
-                cur_dones_store.copy_(
-                    sim.dones, non_blocking=True)
+                    cur_dones_store = self.dones[bptt_chunk, slot]
+                    cur_dones_store.copy_(
+                        sim.dones, non_blocking=True)
 
-                for rnn_states in rnn_states_cur_in:
-                    rnn_states.masked_fill_(cur_dones_store, 0)
+                    for rnn_states in rnn_states_cur_in:
+                        rnn_states.masked_fill_(cur_dones_store, 0)
 
         if self.need_obs_copy:
             final_obs = self.final_obs
@@ -172,7 +177,7 @@ class RolloutManager:
         self.rnn_end_states = rnn_states_cur_in
         self.rnn_alt_states = rnn_states_cur_out
 
-        with amp.enable():
+        with amp.enable(), profile("Compute Bootstrap Values"):
             actor_critic.critic_infer(
                 self.bootstrap_values, None, self.rnn_end_states, *final_obs)
 
