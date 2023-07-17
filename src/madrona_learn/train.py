@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict
 from .profile import profile
 from time import time
+from pathlib import Path
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
@@ -35,7 +36,7 @@ class LearningState:
             scaler_state_dict = None
 
         torch.save({
-            'next_update_idx': update_idx + 1,
+            'next_update': update_idx + 1,
             'policy': self.policy.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': scheduler_state_dict,
@@ -68,7 +69,12 @@ class LearningState:
             self.amp.enabled == amp_dict['enabled'] and
             self.amp.compute_dtype == amp_dict['compute_dtype'])
 
-        return loaded['next_update_idx']
+        return loaded['next_update']
+
+    @staticmethod
+    def load_policy_weights(path):
+        loaded = torch.load(path)
+        return loaded['policy']
 
 
 @dataclass(frozen = True)
@@ -375,7 +381,7 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
     )
 
     if restore_ckpt != None:
-        start_update_idx = learning_state.load(restore_cktp)
+        start_update_idx = learning_state.load(restore_ckpt)
     else:
         start_update_idx = 0
 

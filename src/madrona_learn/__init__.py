@@ -1,4 +1,4 @@
-from madrona_learn.train import train
+from madrona_learn.train import train, LearningState
 from madrona_learn.cfg import TrainConfig, PPOConfig, SimInterface
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
@@ -11,7 +11,7 @@ import madrona_learn.models
 import madrona_learn.rnn
 
 __all__ = [
-        "train", "models", "rnn",
+        "train", "LearningState", "models", "rnn",
         "TrainConfig", "PPOConfig", "SimInterface",
         "DiscreteActionDistributions",
         "ActorCritic", "DiscreteActor", "Critic",
