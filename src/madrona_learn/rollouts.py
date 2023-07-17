@@ -5,6 +5,7 @@ from typing import List, Optional
 from .amp import AMPInfo
 from .cfg import SimInterface
 from .actor_critic import ActorCritic, RecurrentStateConfig
+from .profile import profile
 
 @dataclass(frozen = True)
 class Rollouts:
@@ -110,8 +111,6 @@ class RolloutManager:
             sim : SimInterface,
             actor_critic : ActorCritic,
         ):
-        step_total_time = 0
-
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
 
@@ -129,27 +128,27 @@ class RolloutManager:
 
                 cur_actions_store = self.actions[bptt_chunk, slot]
 
-                with amp.enable():
-                    actor_critic.rollout_infer(
-                        cur_actions_store,
-                        self.log_probs[bptt_chunk, slot],
-                        self.values[bptt_chunk, slot],
-                        rnn_states_cur_out,
-                        rnn_states_cur_in,
-                        *cur_obs_buffers,
-                    )
+                with profile('AC Rollout Infer'):
+                    with amp.enable():
+                        actor_critic.rollout_infer(
+                            cur_actions_store,
+                            self.log_probs[bptt_chunk, slot],
+                            self.values[bptt_chunk, slot],
+                            rnn_states_cur_out,
+                            rnn_states_cur_in,
+                            *cur_obs_buffers,
+                        )
 
-                rnn_states_cur_in, rnn_states_cur_out = \
-                    rnn_states_cur_out, rnn_states_cur_in
+                    rnn_states_cur_in, rnn_states_cur_out = \
+                        rnn_states_cur_out, rnn_states_cur_in
 
-                # This isn't non-blocking because if the sim is running in
-                # CPU mode, the copy needs to be finished before sim.step()
-                # FIXME: proper pytorch <-> madrona cuda stream integration
-                sim.actions.copy_(cur_actions_store)
+                    # This isn't non-blocking because if the sim is running in
+                    # CPU mode, the copy needs to be finished before sim.step()
+                    # FIXME: proper pytorch <-> madrona cuda stream integration
+                    sim.actions.copy_(cur_actions_store)
 
-                step_start_time = time()
-                sim.step()
-                step_total_time += time() - step_start_time
+                with profile('Simulator Step'):
+                    sim.step()
 
                 self.rewards[bptt_chunk, slot].copy_(
                     sim.rewards, non_blocking=True)

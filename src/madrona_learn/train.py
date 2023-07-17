@@ -131,7 +131,7 @@ def _ppo_update(cfg : TrainConfig,
                 actor_critic : ActorCritic,
                 optimizer : torch.optim.Optimizer):
     with amp.enable():
-        with profile('actor_critic.train', gpu=True):
+        with profile('AC Forward', gpu=True):
             new_log_probs, entropies, new_values = actor_critic.train(
                 mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
@@ -166,20 +166,21 @@ def _ppo_update(cfg : TrainConfig,
             - cfg.ppo.entropy_coef * entropies # Maximize entropy
         )
 
-    if amp.scaler is None:
-        loss.backward()
-        nn.utils.clip_grad_norm_(
-            actor_critic.parameters(), cfg.ppo.max_grad_norm)
-        optimizer.step()
-    else:
-        amp.scaler.scale(loss).backward()
-        amp.scaler.unscale_(optimizer)
-        nn.utils.clip_grad_norm_(
-            actor_critic.parameters(), cfg.ppo.max_grad_norm)
-        amp.scaler.step(optimizer)
-        amp.scaler.update()
+    with profile('Backward'):
+        if amp.scaler is None:
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                actor_critic.parameters(), cfg.ppo.max_grad_norm)
+            optimizer.step()
+        else:
+            amp.scaler.scale(loss).backward()
+            amp.scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(
+                actor_critic.parameters(), cfg.ppo.max_grad_norm)
+            amp.scaler.step(optimizer)
+            amp.scaler.update()
 
-    optimizer.zero_grad()
+        optimizer.zero_grad()
 
     with torch.no_grad():
         print(f"    Loss: {loss.cpu().float().item()} {-action_obj.cpu().float().item()} {value_loss.cpu().float().item()} {-entropies.cpu().float().item()}")
@@ -194,12 +195,14 @@ def _update_iter(cfg : TrainConfig,
                  optimizer,
                  scheduler):
     with torch.no_grad():
-        rollouts = rollout_mgr.collect(amp, sim, actor_critic)
+        with profile('Collect Rollouts'):
+            rollouts = rollout_mgr.collect(amp, sim, actor_critic)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
         # need to be recomputed. https://arxiv.org/abs/2005.12729
-        _compute_advantages(cfg, amp, advantages, rollouts)
+        with profile('Compute Advantages'):
+            _compute_advantages(cfg, amp, advantages, rollouts)
     
     for epoch in range(cfg.ppo.num_epochs):
         for inds in torch.randperm(num_train_seqs).chunk(
@@ -227,7 +230,7 @@ def _update_loop(update_iter_fn,
         if update_idx % 1 == 0:
             print(f'\nUpdate: {update_idx}')
 
-        with profile("Update Iter", gpu=True):
+        with profile("Update Iter Timing", gpu=True):
             update_iter_fn(cfg,
                            amp,
                            num_train_seqs,

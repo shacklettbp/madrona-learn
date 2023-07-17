@@ -42,7 +42,7 @@ class TimingData:
         pass
 
     def __repr__(self):
-        return f"{self.name} => CPU: {self.cpu_mean:.3f}"
+        return f"CPU: {self.cpu_mean:.3f}"
 
 
 class GPUTimingData(TimingData):
@@ -85,7 +85,7 @@ class GPUTimingData(TimingData):
         cur_event_idx = 0
 
     def __repr__(self):
-        return f"{self.name} => CPU: {self.cpu_mean:.3f}, GPU: {self.gpu_mean:.3f}"
+        return f"CPU: {self.cpu_mean:.3f}, GPU: {self.gpu_mean:.3f}"
 
 class Profiler:
     def __init__(self):
@@ -141,9 +141,24 @@ class Profiler:
         self.top.clear()
 
     def report(self, base_indent='    ', depth_indent='  '):
-        print(f"{base_indent}Timings:")
+        def pad(depth):
+            return f"{base_indent}{depth_indent * depth}"
+
+        max_len = 0
+        def compute_max_len(timing, depth):
+            nonlocal max_len
+
+            prefix_len = len(f"{pad(depth)}{timing.name}")
+            if prefix_len > max_len:
+                max_len = prefix_len
+
+        self._iter_timings(compute_max_len)
+
         def print_timing(timing, depth):
-            print(f"{base_indent}{depth_indent * depth}{timing}")
+            prefix = f"{pad(depth)}{timing.name}"
+            right_pad_amount = max_len - len(prefix)
+
+            print(f"{pad(depth)}{timing.name}{' ' * right_pad_amount} => {timing}")
 
         self._iter_timings(print_timing)
 
