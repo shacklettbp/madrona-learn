@@ -19,7 +19,7 @@ from .actor_critic import ActorCritic
 @dataclass
 class LearningState:
     policy: ActorCritic
-    optimizer : torch.optim
+    optimizer : torch.optim.Optimizer
     scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
     amp: AMPState
 
@@ -270,10 +270,11 @@ def _update_iter(cfg : TrainConfig,
                  rollout_mgr : RolloutManager,
                  advantages : torch.Tensor,
                  actor_critic : ActorCritic,
-                 optimizer,
-                 scheduler):
+                 optimizer : torch.optim.Optimizer,
+                 scheduler : torch.optim.lr_scheduler.LRScheduler):
     with torch.no_grad():
         with profile('Collect Rollouts'):
+            actor_critic.eval()
             rollouts = rollout_mgr.collect(amp, sim, actor_critic)
     
         # Engstrom et al suggest recomputing advantages after every epoch
@@ -283,6 +284,8 @@ def _update_iter(cfg : TrainConfig,
             _compute_advantages(cfg, amp, advantages, rollouts)
     
     with profile('PPO'):
+        actor_critic.train()
+
         aggregate_stats = PPOStats()
         num_stats = 0
 
@@ -359,7 +362,6 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
     num_agents = sim.actions.shape[0]
 
     actor_critic = actor_critic.to(dev)
-    actor_critic.train()
 
     optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
 
