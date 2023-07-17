@@ -213,7 +213,8 @@ def _update_iter(cfg : TrainConfig,
                     mb = _gather_minibatch(rollouts, advantages, inds, amp)
                 _ppo_update(cfg, amp, mb, actor_critic, optimizer)
 
-def _update_loop(update_iter_fn,
+def _update_loop(update_iter_fn : Callable,
+                 gpu_sync_fn : Callable,
                  cfg : TrainConfig,
                  amp : AMPInfo,
                  num_agents: int,
@@ -245,7 +246,7 @@ def _update_loop(update_iter_fn,
                            optimizer,
                            scheduler)
 
-            torch.cuda.synchronize()
+            gpu_sync_fn()
 
         profile.gpu_measure()
         profile.commit()
@@ -287,8 +288,16 @@ def train(dev, sim, cfg, actor_critic, update_cb):
     else:
         update_iter_fn = _update_iter
 
+    if dev.type == 'cuda':
+        def gpu_sync_fn():
+            torch.cuda.synchronize()
+    else:
+        def gpu_sync_fn():
+            pass
+
     _update_loop(
         update_iter_fn=update_iter_fn,
+        gpu_sync_fn=gpu_sync_fn,
         cfg=cfg,
         amp=amp,
         num_agents=num_agents,

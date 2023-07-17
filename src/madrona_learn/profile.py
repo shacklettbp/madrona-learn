@@ -5,7 +5,7 @@ import torch
 __all__ = [ "profile" ]
 
 class DummyGPUEvent:
-    def __init__(self, enable_timer):
+    def __init__(self, enable_timing):
         pass
 
     def record(self):
@@ -13,6 +13,9 @@ class DummyGPUEvent:
 
     def elapsed_time(self, e):
         return 0.0
+
+    def synchronize(self):
+        pass
 
 if torch.cuda.is_available():
     GPUTimingEvent = torch.cuda.Event
