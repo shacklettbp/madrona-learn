@@ -2,7 +2,7 @@ import torch
 from time import time
 from dataclasses import dataclass
 from typing import List, Optional
-from .amp import AMPInfo
+from .amp import AMPState
 from .cfg import SimInterface
 from .actor_critic import ActorCritic, RecurrentStateConfig
 from .profile import profile
@@ -25,7 +25,7 @@ class RolloutManager:
             sim : SimInterface,
             steps_per_update : int,
             num_bptt_chunks : int,
-            amp : AMPInfo,
+            amp : AMPState,
             recurrent_cfg : RecurrentStateConfig,
         ):
         self.dev = dev
@@ -107,7 +107,7 @@ class RolloutManager:
 
     def collect(
             self,
-            amp : AMPInfo,
+            amp : AMPState,
             sim : SimInterface,
             actor_critic : ActorCritic,
         ):
@@ -131,7 +131,7 @@ class RolloutManager:
                     cur_actions_store = self.actions[bptt_chunk, slot]
 
                     with amp.enable():
-                        actor_critic.rollout_infer(
+                        actor_critic.fwd_rollout(
                             cur_actions_store,
                             self.log_probs[bptt_chunk, slot],
                             self.values[bptt_chunk, slot],
@@ -180,7 +180,7 @@ class RolloutManager:
         self.rnn_alt_states = rnn_states_cur_out
 
         with amp.enable(), profile("Bootstrap Values"):
-            actor_critic.critic_infer(
+            actor_critic.fwd_critic(
                 self.bootstrap_values, None, self.rnn_end_states, *final_obs)
 
         # Right now this just returns the rollout manager's pointers,

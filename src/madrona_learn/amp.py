@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 @dataclass(init=False)
-class AMPInfo:
+class AMPState:
     device_type: str
     enabled: bool
     compute_dtype: torch.dtype

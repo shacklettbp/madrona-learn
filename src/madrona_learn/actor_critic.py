@@ -76,19 +76,19 @@ class ActorCritic(nn.Module):
 
         return action_dists, values, new_rnn_states
 
-    def actor_infer(self, actions_out, rnn_states_out, rnn_states_in, *obs_in):
+    def fwd_actor(self, actions_out, rnn_states_out, rnn_states_in, *obs_in):
         actor_features = self.backbone.fwd_actor_only(
             rnn_states_out, rnn_states_in, *obs_in)
 
         action_dists = self.actor(actor_features)
         action_dists.best(out=actions_out)
 
-    def critic_infer(self, values_out, rnn_states_out, rnn_states_in, *obs_in):
+    def fwd_critic(self, values_out, rnn_states_out, rnn_states_in, *obs_in):
         features = self.backbone.fwd_critic_only(
             rnn_states_out, rnn_states_in, *obs_in)
         values_out[...] = self.critic(features)
 
-    def rollout_infer(self, actions_out, log_probs_out, values_out,
+    def fwd_rollout(self, actions_out, log_probs_out, values_out,
                       rnn_states_out, rnn_states_in, *obs_in):
         actor_features, critic_features = self.backbone.fwd_rollout(
             rnn_states_out, rnn_states_in, *obs_in)
@@ -99,7 +99,7 @@ class ActorCritic(nn.Module):
         action_dists.sample(actions_out, log_probs_out)
         values_out[...] = values
 
-    def train(self, rnn_states, sequence_breaks, rollout_actions, *obs):
+    def fwd_update(self, rnn_states, sequence_breaks, rollout_actions, *obs):
         actor_features, critic_features = self.backbone.fwd_sequence(
             rnn_states, sequence_breaks, *obs)
 

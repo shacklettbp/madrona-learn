@@ -13,8 +13,63 @@ from time import time
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
-from .amp import AMPInfo
+from .amp import AMPState
 from .actor_critic import ActorCritic
+
+@dataclass
+class LearningState:
+    policy: ActorCritic
+    optimizer : torch.optim
+    scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
+    amp: AMPState
+
+    def save(self, update_idx, path):
+        if self.scheduler != None:
+            scheduler_state_dict = self.scheduler.state_dict()
+        else:
+            scheduler_state_dict = None
+
+        if self.amp.scaler != None:
+            scaler_state_dict = self.amp.scaler.state_dict()
+        else:
+            scaler_state_dict = None
+
+        torch.save({
+            'next_update_idx': update_idx + 1,
+            'policy': self.policy.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': scheduler_state_dict,
+            'amp': {
+                'device_type': self.amp.device_type,
+                'enabled': self.amp.enabled,
+                'compute_dtype': self.amp.compute_dtype,
+                'scaler': scaler_state_dict,
+            },
+        }, path)
+
+    def load(self, path):
+        loaded = torch.load(path)
+
+        self.policy.load_state_dict(loaded['policy'])
+        self.optimizer.load_state_dict(loaded['optimizer'])
+
+        if self.scheduler:
+            self.scheduler.load_state_dict(loaded['scheduler'])
+        else:
+            assert(loaded['scheduler'] == None)
+
+        amp_dict = loaded['amp']
+        if self.amp.scaler:
+            self.amp.scaler.load_state_dict(amp_dict['scaler'])
+        else:
+            assert(amp_dict['scaler'] == None)
+        assert(
+            self.amp.device_type == amp_dict['device_type'] and
+            self.amp.enabled == amp_dict['enabled'] and
+            self.amp.compute_dtype == amp_dict['compute_dtype'])
+
+        return loaded['next_update_idx']
+
 
 @dataclass(frozen = True)
 class MiniBatch:
@@ -27,7 +82,7 @@ class MiniBatch:
     advantages: torch.Tensor
     rnn_start_states: tuple[torch.Tensor, ...]
 
-@dataclass()
+@dataclass
 class PPOStats:
     loss : float = 0
     action_loss : float = 0
@@ -61,7 +116,7 @@ def _mb_slice_rnn(rnn_state, inds):
 def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
                       inds : torch.Tensor,
-                      amp : AMPInfo):
+                      amp : AMPState):
     obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
     
     actions_slice = _mb_slice(rollouts.actions, inds)
@@ -90,7 +145,7 @@ def _gather_minibatch(rollouts : Rollouts,
     )
 
 def _compute_advantages(cfg : TrainConfig,
-                        amp : AMPInfo,
+                        amp : AMPState,
                         advantages_out : torch.Tensor,
                         rollouts : Rollouts):
     # This function is going to be operating in fp16 mode completely
@@ -142,13 +197,13 @@ def _compute_action_scores(cfg, amp, advantages):
             return action_scores.to(dtype=amp.compute_dtype)
 
 def _ppo_update(cfg : TrainConfig,
-                amp : AMPInfo,
+                amp : AMPState,
                 mb : MiniBatch,
                 actor_critic : ActorCritic,
                 optimizer : torch.optim.Optimizer):
     with amp.enable():
         with profile('AC Forward', gpu=True):
-            new_log_probs, entropies, new_values = actor_critic.train(
+            new_log_probs, entropies, new_values = actor_critic.fwd_update(
                 mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
@@ -209,12 +264,12 @@ def _ppo_update(cfg : TrainConfig,
     return stats
 
 def _update_iter(cfg : TrainConfig,
-                 amp : AMPInfo,
+                 amp : AMPState,
                  num_train_seqs : int,
                  sim : SimInterface,
                  rollout_mgr : RolloutManager,
-                 actor_critic : ActorCritic,
                  advantages : torch.Tensor,
+                 actor_critic : ActorCritic,
                  optimizer,
                  scheduler):
     with torch.no_grad():
@@ -260,32 +315,30 @@ def _update_loop(update_iter_fn : Callable,
                  gpu_sync_fn : Callable,
                  user_cb : Callable,
                  cfg : TrainConfig,
-                 amp : AMPInfo,
                  num_agents: int,
                  sim : SimInterface,
                  rollout_mgr : RolloutManager,
-                 actor_critic : ActorCritic,
-                 optimizer,
-                 scheduler):
+                 learning_state : LearningState,
+                 start_update_idx : int):
     num_train_seqs = num_agents * cfg.num_bptt_chunks
     assert(num_train_seqs % cfg.ppo.num_mini_batches == 0)
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
-    for update_idx in range(cfg.num_updates):
+    for update_idx in range(start_update_idx, cfg.num_updates):
         update_start_time  = time()
 
         with profile("Update Iter Timing"):
             update_result = update_iter_fn(
                 cfg,
-                amp,
+                learning_state.amp,
                 num_train_seqs,
                 sim,
                 rollout_mgr,
-                actor_critic,
                 advantages,
-                optimizer,
-                scheduler,
+                learning_state.policy,
+                learning_state.optimizer,
+                learning_state.scheduler,
             )
 
             gpu_sync_fn()
@@ -295,21 +348,34 @@ def _update_loop(update_iter_fn : Callable,
 
         update_end_time = time()
         update_time = update_end_time - update_start_time
-        user_cb(update_idx, update_time, update_result)
+        user_cb(update_idx, update_time, update_result, learning_state)
 
-def train(dev, sim, cfg, actor_critic, update_cb):
+def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
     print(cfg)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    amp = AMPInfo(dev, cfg.mixed_precision)
-
     num_agents = sim.actions.shape[0]
 
     actor_critic = actor_critic.to(dev)
+    actor_critic.train()
 
     optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
+
+    amp = AMPState(dev, cfg.mixed_precision)
+
+    learning_state = LearningState(
+        policy = actor_critic,
+        optimizer = optimizer,
+        scheduler = None,
+        amp = amp,
+    )
+
+    if restore_ckpt != None:
+        start_update_idx = learning_state.load(restore_cktp)
+    else:
+        start_update_idx = 0
 
     rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
         cfg.num_bptt_chunks, amp, actor_critic.recurrent_cfg)
@@ -340,13 +406,11 @@ def train(dev, sim, cfg, actor_critic, update_cb):
         gpu_sync_fn=gpu_sync_fn,
         user_cb=update_cb,
         cfg=cfg,
-        amp=amp,
         num_agents=num_agents,
         sim=sim,
         rollout_mgr=rollout_mgr,
-        actor_critic=actor_critic,
-        optimizer=optimizer,
-        scheduler=None,
+        learning_state=learning_state,
+        start_update_idx=start_update_idx,
     )
 
     return actor_critic.cpu()
