@@ -1,4 +1,5 @@
-from madrona_learn.train import train, LearningState
+from madrona_learn.train import train
+from madrona_learn.learning_state import LearningState
 from madrona_learn.cfg import TrainConfig, PPOConfig, SimInterface
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
