@@ -4,12 +4,14 @@ from typing import Optional
 
 from .amp import AMPState
 from .actor_critic import ActorCritic
+from .moving_avg import EMANormalizer
 
 @dataclass
 class LearningState:
     policy: ActorCritic
     optimizer : torch.optim.Optimizer
     scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
+    value_normalizer: EMANormalizer
     amp: AMPState
 
     def save(self, update_idx, path):

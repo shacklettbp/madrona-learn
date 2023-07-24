@@ -24,6 +24,8 @@ class TrainConfig:
     ppo: PPOConfig
     gae_lambda: float = 1.0
     normalize_advantages: bool = True
+    normalize_values : bool = True
+    value_normalizer_decay = 0.99999
     mixed_precision : bool = False
 
     def __repr__(self):

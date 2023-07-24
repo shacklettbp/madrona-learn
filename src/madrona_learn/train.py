@@ -29,12 +29,14 @@ class MiniBatch:
     advantages: torch.Tensor
     rnn_start_states: tuple[torch.Tensor, ...]
 
+
 @dataclass
 class PPOStats:
     loss : float = 0
     action_loss : float = 0
     value_loss : float = 0
     entropy_loss : float = 0
+
 
 @dataclass(frozen = True)
 class UpdateResult:
@@ -44,6 +46,7 @@ class UpdateResult:
     advantages : torch.Tensor
     bootstrap_values : torch.Tensor
     ppo_stats : PPOStats
+
 
 def _mb_slice(tensor, inds):
     # Tensors come from the rollout manager as (C, T, N, ...)

@@ -11,10 +11,12 @@ class MLP(nn.Module):
 
         layers = [
             nn.Linear(input_dim, num_channels),
+            nn.LayerNorm(num_channels),
             nn.ReLU(),
         ]
         for i in range(num_layers - 1):
             layers.append(nn.Linear(num_channels, num_channels))
+            layers.append(nn.LayerNorm(num_channels))
             layers.append(nn.ReLU())
 
         self.net = nn.Sequential(*layers)
