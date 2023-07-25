@@ -52,22 +52,21 @@ class EMANormalizer(nn.Module):
                                     (x_f32.mean() - self.mu_biased))
 
                 self.N.add_(1)
-
-                # Note this diff is against unbiased mu which hasn't been
-                # updated yet
-                mu_diffs = x_f32 - self.mu
-                sq_mu_diffs = mu_diffs * mu_diffs
-
-                self.sigma_sq_biased.add_(
-                    self.one_minus_decay * (
-                        self.decay * sq_mu_diffs.mean() - self.sigma_sq_biased))
-
                 bias_correction = 1.0 - self.decay ** self.N
+
+                new_mu = self.mu_biased / bias_correction
+
+                # Note this is different from the tensorflow probability repo,
+                # and instead uses Welford's formulation for moving variance
+                # The tensorflow repo returns a biased result for high mean
+                mul_diffs = (x_f32 - self.mu) * (x_f32 - new_mu)
+                self.sigma_sq_biased.add_(
+                    self.one_minus_decay * mul_diffs.mean())
 
                 sigma_sq = self.sigma_sq_biased / bias_correction
 
                 # Write out new unbiased params
-                self.mu = self.mu_biased / bias_correction
+                self.mu = new_mu
                 self.inv_sigma = torch.rsqrt(torch.clamp(sigma_sq, min=self.eps))
                 self.sigma = torch.reciprocal(self.inv_sigma)
 
