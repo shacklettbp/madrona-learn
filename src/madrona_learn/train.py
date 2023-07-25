@@ -16,6 +16,7 @@ from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
 from .amp import AMPState
 from .actor_critic import ActorCritic
+from .moving_avg import EMANormalizer
 from .learning_state import LearningState
 
 @dataclass(frozen = True)
@@ -36,6 +37,8 @@ class PPOStats:
     action_loss : float = 0
     value_loss : float = 0
     entropy_loss : float = 0
+    returns_mean : float = 0
+    returns_stddev : float = 0
 
 
 @dataclass(frozen = True)
@@ -97,6 +100,7 @@ def _gather_minibatch(rollouts : Rollouts,
 
 def _compute_advantages(cfg : TrainConfig,
                         amp : AMPState,
+                        value_normalizer : EMANormalizer,
                         advantages_out : torch.Tensor,
                         rollouts : Rollouts):
     # This function is going to be operating in fp16 mode completely
@@ -113,7 +117,7 @@ def _compute_advantages(cfg : TrainConfig,
     seq_advantages_out = advantages_out.view(T, N, 1)
 
     next_advantage = 0.0
-    next_values = rollouts.bootstrap_values
+    next_values = value_normalizer.invert(amp, rollouts.bootstrap_values)
     for i in reversed(range(cfg.steps_per_update)):
         cur_dones = seq_dones[i].to(dtype=amp.compute_dtype)
         cur_rewards = seq_rewards[i].to(dtype=amp.compute_dtype)
@@ -151,7 +155,9 @@ def _ppo_update(cfg : TrainConfig,
                 amp : AMPState,
                 mb : MiniBatch,
                 actor_critic : ActorCritic,
-                optimizer : torch.optim.Optimizer):
+                optimizer : torch.optim.Optimizer,
+                value_normalizer : EMANormalizer,
+            ):
     with amp.enable():
         with profile('AC Forward', gpu=True):
             new_log_probs, entropies, new_values = actor_critic.fwd_update(
@@ -176,7 +182,9 @@ def _ppo_update(cfg : TrainConfig,
 
             new_values = torch.clamp(new_values, low, high)
 
-        value_loss = 0.5 * F.mse_loss(new_values, returns, reduction='none')
+        normalized_returns = value_normalizer(amp, returns)
+        value_loss = 0.5 * F.mse_loss(
+            new_values, normalized_returns, reduction='none')
 
         action_obj = torch.mean(action_obj)
         value_loss = torch.mean(value_loss)
@@ -205,11 +213,16 @@ def _ppo_update(cfg : TrainConfig,
         optimizer.zero_grad()
 
     with torch.no_grad():
+        returns_var, returns_mean = torch.var_mean(normalized_returns)
+        returns_stddev = torch.sqrt(returns_var)
+
         stats = PPOStats(
             loss = loss.cpu().float().item(),
             action_loss = -(action_obj.cpu().float().item()),
             value_loss = value_loss.cpu().float().item(),
             entropy_loss = -(entropies.cpu().float().item()),
+            returns_mean = returns_mean.cpu().float().item(),
+            returns_stddev = returns_stddev.cpu().float().item(),
         )
 
     return stats
@@ -222,21 +235,30 @@ def _update_iter(cfg : TrainConfig,
                  advantages : torch.Tensor,
                  actor_critic : ActorCritic,
                  optimizer : torch.optim.Optimizer,
-                 scheduler : torch.optim.lr_scheduler.LRScheduler):
+                 scheduler : torch.optim.lr_scheduler.LRScheduler,
+                 value_normalizer : EMANormalizer
+            ):
     with torch.no_grad():
+        actor_critic.eval()
+        value_normalizer.eval()
+
         with profile('Collect Rollouts'):
-            actor_critic.eval()
             rollouts = rollout_mgr.collect(amp, sim, actor_critic)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
         # need to be recomputed. https://arxiv.org/abs/2005.12729
         with profile('Compute Advantages'):
-            _compute_advantages(cfg, amp, advantages, rollouts)
+            _compute_advantages(cfg,
+                                amp,
+                                value_normalizer,
+                                advantages,
+                                rollouts)
     
-    with profile('PPO'):
-        actor_critic.train()
+    actor_critic.train()
+    value_normalizer.train()
 
+    with profile('PPO'):
         aggregate_stats = PPOStats()
         num_stats = 0
 
@@ -245,7 +267,12 @@ def _update_iter(cfg : TrainConfig,
                     cfg.ppo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
                     mb = _gather_minibatch(rollouts, advantages, inds, amp)
-                cur_stats = _ppo_update(cfg, amp, mb, actor_critic, optimizer)
+                cur_stats = _ppo_update(cfg,
+                                        amp,
+                                        mb,
+                                        actor_critic,
+                                        optimizer,
+                                        value_normalizer)
 
                 with torch.no_grad():
                     num_stats += 1
@@ -256,6 +283,11 @@ def _update_iter(cfg : TrainConfig,
                         cur_stats.value_loss - aggregate_stats.value_loss) / num_stats
                     aggregate_stats.entropy_loss += (
                         cur_stats.entropy_loss - aggregate_stats.entropy_loss) / num_stats
+                    aggregate_stats.returns_mean += (
+                        cur_stats.returns_mean - aggregate_stats.returns_mean) / num_stats
+                    # FIXME
+                    aggregate_stats.returns_stddev += (
+                        cur_stats.returns_stddev - aggregate_stats.returns_stddev) / num_stats
 
     return UpdateResult(
         actions = rollouts.actions.view(-1, *rollouts.actions.shape[2:]),
@@ -294,6 +326,7 @@ def _update_loop(update_iter_fn : Callable,
                 learning_state.policy,
                 learning_state.optimizer,
                 learning_state.scheduler,
+                learning_state.value_normalizer,
             )
 
             gpu_sync_fn()
@@ -319,10 +352,15 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
 
     amp = AMPState(dev, cfg.mixed_precision)
 
+    value_normalizer = EMANormalizer(cfg.value_normalizer_decay,
+                                     disable=not cfg.normalize_values)
+    value_normalizer = value_normalizer.to(dev)
+
     learning_state = LearningState(
         policy = actor_critic,
         optimizer = optimizer,
         scheduler = None,
+        value_normalizer = value_normalizer,
         amp = amp,
     )
 

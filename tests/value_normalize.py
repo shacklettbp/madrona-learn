@@ -15,25 +15,31 @@ batch_size = 1024
 amp = AMPState(dev, True)
 
 log = []
-naive_mean = torch.zeros(1, device=dev)
-naive_mean_sqs = torch.zeros(1, device=dev)
-naive_decay = torch.tensor([decay], device=dev)
+naive_mean = torch.zeros(1, device=dev, dtype=torch.float64)
+naive_mean_sqs = torch.zeros(1, device=dev, dtype=torch.float64)
+naive_decay = torch.tensor([decay], device=dev, dtype=torch.float64)
 naive_one_minus_decay = 1 - naive_decay
 
-for i in range(10):
+num_iters = 10
+
+means = torch.rand(num_iters) * 10 - 5
+stddevs = torch.randn(num_iters) * 2
+
+means[-1] = -20
+stddevs[-1] = 0.01
+
+for i in range(num_iters):
     print()
-    #mean = (torch.rand([1]) * 100).cpu().item() - 200
-    #stddev = (torch.rand([1]) * 25).cpu().item()
-    mean = 5000
-    stddev = 0.1
+    mean = means[i]
+    stddev = stddevs[i]
 
     #stddev = 2 * (1 + i)
     #if i == 3:
     #    stddev = 0.1
 
     values = torch.randn([batch_size, 1], device=dev) * stddev + mean
-    naive_mean = naive_decay * naive_mean + naive_one_minus_decay * torch.mean(values)
-    naive_mean_sqs = naive_decay * naive_mean_sqs + naive_one_minus_decay * torch.mean(values * values)
+    naive_mean = naive_decay * naive_mean + naive_one_minus_decay * torch.mean(values.to(dtype=torch.float64))
+    naive_mean_sqs = naive_decay * naive_mean_sqs + naive_one_minus_decay * torch.mean(values.to(dtype=torch.float64) * values.to(dtype=torch.float64))
     #naive_debias = 1 - naive_decay ** (i + 1)
     naive_debias = -torch.expm1((i + 1) * torch.log(naive_decay))
 

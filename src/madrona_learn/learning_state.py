@@ -11,6 +11,7 @@ class LearningState:
     policy: ActorCritic
     optimizer : torch.optim.Optimizer
     scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
+    value_normalizer: EMANormalizer
     amp: AMPState
 
     def save(self, update_idx, path):
@@ -29,6 +30,7 @@ class LearningState:
             'policy': self.policy.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': scheduler_state_dict,
+            'value_normalizer': self.value_normalizer.state_dict(),
             'amp': {
                 'device_type': self.amp.device_type,
                 'enabled': self.amp.enabled,
@@ -47,6 +49,8 @@ class LearningState:
             self.scheduler.load_state_dict(loaded['scheduler'])
         else:
             assert(loaded['scheduler'] == None)
+
+        self.value_normalizer.load_state_dict(loaded['value_normalizer'])
 
         amp_dict = loaded['amp']
         if self.amp.scaler:

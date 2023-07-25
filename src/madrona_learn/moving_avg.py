@@ -71,7 +71,6 @@ class EMANormalizer(nn.Module):
                 else:
                     prev_mu = self.mu
 
-                # The below code is a batched variant of Welford's algorithm 
                 sigma_sq_new = torch.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
 
                 self.sigma_sq_biased.mul_(self.decay).addcmul_(
