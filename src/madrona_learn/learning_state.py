@@ -11,7 +11,6 @@ class LearningState:
     policy: ActorCritic
     optimizer : torch.optim.Optimizer
     scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
-    value_normalizer: EMANormalizer
     amp: AMPState
 
     def save(self, update_idx, path):
