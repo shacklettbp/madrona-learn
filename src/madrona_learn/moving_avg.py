@@ -3,8 +3,6 @@ import torch.nn as nn
 
 from .amp import AMPState
 
-# Based on tensorflow probability moving_stats.py
-
 # Exponential Moving Average mean and variance estimator for
 # values and observations
 class EMANormalizer(nn.Module):
@@ -15,8 +13,6 @@ class EMANormalizer(nn.Module):
         if disable:
             return
 
-        self.decay = decay
-        self.one_minus_decay = 1 - decay
         self.eps = eps
 
         # Current parameter estimates
@@ -25,6 +21,14 @@ class EMANormalizer(nn.Module):
         self.register_buffer("sigma", torch.zeros(1, dtype=torch.float32))
 
         # Intermediate values used to compute the moving average
+        # decay and one_minus_decay don't strictly need to be tensors, but it's
+        # critically important for floating point precision that
+        # one_minus_decay is computed in fp32 rather than fp64 to 
+        # match the bias_correction computation below
+        self.register_buffer("decay",
+                             torch.tensor([decay], dtype=torch.float32))
+        self.register_buffer("one_minus_decay", 1 - self.decay)
+
         self.register_buffer("mu_biased",
                              torch.zeros(1, dtype=torch.float32))
         self.register_buffer("sigma_sq_biased",
@@ -47,21 +51,29 @@ class EMANormalizer(nn.Module):
         with amp.disable():
             if self.training:
                 x_f32 = x.to(dtype=torch.float32)
+                x_mean = x_f32.mean()
+
+                self.N.add_(1)
+                bias_correction = -torch.expm1(self.N * torch.log(self.decay))
 
                 self.mu_biased.add_(self.one_minus_decay *
                                     (x_f32.mean() - self.mu_biased))
 
-                self.N.add_(1)
-                bias_correction = 1.0 - self.decay ** self.N
 
                 new_mu = self.mu_biased / bias_correction
 
-                # Note this is different from the tensorflow probability repo,
-                # and instead uses Welford's formulation for moving variance
-                # The tensorflow repo returns a biased result for high mean
-                mul_diffs = (x_f32 - self.mu) * (x_f32 - new_mu)
-                self.sigma_sq_biased.add_(
-                    self.one_minus_decay * mul_diffs.mean())
+                # Running variance estimate with Welford's algorithm
+                # adapted to EMA. Need this hack for N == 1 as otherwise
+                # the first estimate of variance is biased by the incorrect
+                # self.mu (in addition to the bias from the EMA with 0)
+                if self.N == 1:
+                    var_contrib = x_f32 - new_mu
+                    var_contrib = torch.mean(var_contrib * var_contrib)
+                else:
+                    var_contrib = torch.mean((x_f32 - self.mu) * (x_f32 - new_mu))
+
+                print(var_contrib, new_mu, x_mean, self.mu_biased)
+                self.sigma_sq_biased.add_(self.one_minus_decay * var_contrib)
 
                 sigma_sq = self.sigma_sq_biased / bias_correction
 
