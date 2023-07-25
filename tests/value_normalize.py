@@ -20,12 +20,16 @@ naive_mean_sqs = torch.zeros(1, device=dev)
 naive_decay = torch.tensor([decay], device=dev)
 naive_one_minus_decay = 1 - naive_decay
 
-for i in range(4):
+for i in range(10):
     print()
-    mean = (torch.rand([1]) * 10).cpu().item()
-    stddev = (torch.rand([1]) * 5).cpu().item()
-    #mean = 100
-    #stddev = 2
+    #mean = (torch.rand([1]) * 100).cpu().item() - 200
+    #stddev = (torch.rand([1]) * 25).cpu().item()
+    mean = 5000
+    stddev = 0.1
+
+    #stddev = 2 * (1 + i)
+    #if i == 3:
+    #    stddev = 0.1
 
     values = torch.randn([batch_size, 1], device=dev) * stddev + mean
     naive_mean = naive_decay * naive_mean + naive_one_minus_decay * torch.mean(values)
