@@ -147,7 +147,7 @@ def _compute_action_scores(cfg, amp, advantages):
         with amp.disable():
             var, mean = torch.var_mean(advantages.to(dtype=torch.float32))
             action_scores = advantages - mean
-            action_scores.mul_(torch.rsqrt(var.clamp(min=1e-5)))# + 1e-5))
+            action_scores.mul_(torch.rsqrt(var.clamp(min=1e-5)))
 
             return action_scores.to(dtype=amp.compute_dtype)
 
