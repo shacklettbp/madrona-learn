@@ -37,6 +37,8 @@ class RolloutManager:
 
         self.need_obs_copy = sim.obs[0].device != dev
 
+        cpu_dev = torch.device('cpu')
+
         if dev.type == 'cuda':
             float_storage_type = torch.float16
         else:
@@ -70,25 +72,27 @@ class RolloutManager:
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
                 (num_bptt_chunks, num_bptt_steps, *obs_tensor.shape),
-                dtype=obs_tensor.dtype, device=dev))
+                dtype=obs_tensor.dtype, device=cpu_dev))
 
         if self.need_obs_copy:
             self.final_obs = []
 
             for obs_tensor in sim.obs:
                 self.final_obs.append(torch.zeros(
-                    obs_tensor.shape, dtype=obs_tensor.dtype, device=dev))
+                    obs_tensor.shape, dtype=obs_tensor.dtype, device=cpu_dev))
 
         self.rnn_end_states = []
         self.rnn_alt_states = []
         self.rnn_start_states = []
+
         for rnn_state_shape in recurrent_cfg.shapes:
             # expand shape to batch size
             batched_state_shape = (*rnn_state_shape[0:2],
                 sim.actions.shape[0], rnn_state_shape[2])
 
             rnn_end_state = torch.zeros(
-                batched_state_shape, dtype=amp.compute_dtype, device=dev)
+                batched_state_shape, dtype=amp.compute_dtype,
+                device=dev)
             rnn_alt_state = torch.zeros_like(rnn_end_state)
 
             self.rnn_end_states.append(rnn_end_state)
@@ -97,7 +101,8 @@ class RolloutManager:
             bptt_starts_shape = (num_bptt_chunks, *batched_state_shape)
 
             rnn_start_state = torch.zeros(
-                bptt_starts_shape, dtype=amp.compute_dtype, device=dev)
+                bptt_starts_shape, dtype=amp.compute_dtype,
+                device=torch.device('cpu'))
 
             self.rnn_start_states.append(rnn_start_state)
 
@@ -128,6 +133,8 @@ class RolloutManager:
                     for obs_idx, step_obs in enumerate(sim.obs):
                         cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
 
+                    obs_dev = [o.to(device=self.dev, non_blocking=True) for o in sim.obs]
+
                     cur_actions_store = self.actions[bptt_chunk, slot]
 
                     with amp.enable():
@@ -137,7 +144,7 @@ class RolloutManager:
                             self.values[bptt_chunk, slot],
                             rnn_states_cur_out,
                             rnn_states_cur_in,
-                            *cur_obs_buffers,
+                            *obs_dev,
                         )
 
                     rnn_states_cur_in, rnn_states_cur_out = \
@@ -174,6 +181,8 @@ class RolloutManager:
         else:
             final_obs = sim.obs
 
+        final_obs_dev = [o.to(device=self.dev, non_blocking=True) for o in sim.obs]
+
         # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
         # iter so rnn_hidden_cur_in is the final output
         self.rnn_end_states = rnn_states_cur_in
@@ -181,7 +190,7 @@ class RolloutManager:
 
         with amp.enable(), profile("Bootstrap Values"):
             actor_critic.fwd_critic(
-                self.bootstrap_values, None, self.rnn_end_states, *final_obs)
+                self.bootstrap_values, None, self.rnn_end_states, *final_obs_dev)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers from a

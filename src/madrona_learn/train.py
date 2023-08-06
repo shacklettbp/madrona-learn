@@ -58,20 +58,21 @@ def _mb_slice(tensor, inds):
     return tensor.transpose(0, 1).reshape(
         tensor.shape[1], tensor.shape[0] * tensor.shape[2], *tensor.shape[3:])[:, inds, ...]
 
-def _mb_slice_rnn(rnn_state, inds):
+def _mb_slice_rnn(rnn_state, inds, dev):
     # RNN state comes from the rollout manager as (C, :, :, N, :)
     # Want to select minibatch from C * N and keep sequences of length T
 
     reshaped = rnn_state.permute(1, 2, 0, 3, 4).reshape(
         rnn_state.shape[1], rnn_state.shape[2], -1, rnn_state.shape[4])
 
-    return reshaped[:, :, inds, :] 
+    return reshaped[:, :, inds, :].to(device=dev)
 
 def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
                       inds : torch.Tensor,
-                      amp : AMPState):
-    obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
+                      amp : AMPState,
+                      dev: torch.device):
+    obs_slice = tuple(_mb_slice(obs, inds).to(device=dev, non_blocking=True) for obs in rollouts.obs)
     
     actions_slice = _mb_slice(rollouts.actions, inds)
     log_probs_slice = _mb_slice(rollouts.log_probs, inds).to(
@@ -85,7 +86,7 @@ def _gather_minibatch(rollouts : Rollouts,
         dtype=amp.compute_dtype)
 
     rnn_starts_slice = tuple(
-        _mb_slice_rnn(state, inds) for state in rollouts.rnn_start_states)
+        _mb_slice_rnn(state, inds, dev) for state in rollouts.rnn_start_states)
 
     return MiniBatch(
         obs=obs_slice,
@@ -266,7 +267,8 @@ def _update_iter(cfg : TrainConfig,
             for inds in torch.randperm(num_train_seqs).chunk(
                     cfg.ppo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
-                    mb = _gather_minibatch(rollouts, advantages, inds, amp)
+                    mb = _gather_minibatch(
+                        rollouts, advantages, inds, amp, advantages.device)
                 cur_stats = _ppo_update(cfg,
                                         amp,
                                         mb,

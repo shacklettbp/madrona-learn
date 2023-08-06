@@ -152,6 +152,7 @@ class RecurrentBackboneEncoder(nn.Module):
 
     def fwd_inplace(self, rnn_states_out, rnn_states_in, *inputs):
         features = self.net(*inputs)
+
         rnn_out, new_rnn_states = self.rnn(features, rnn_states_in)
 
         # FIXME: proper inplace
