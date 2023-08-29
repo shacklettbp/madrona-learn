@@ -34,7 +34,7 @@ class EMANormalizer(nn.Module):
         self.register_buffer("sigma_sq_biased",
                              torch.zeros(shape, dtype=torch.float32))
         self.register_buffer("N",
-                             torch.zeros(shape, dtype=torch.int64))
+                             torch.zeros([], dtype=torch.int64))
 
         nn.init.constant_(self.mu , 0)
         nn.init.constant_(self.inv_sigma, 0)
