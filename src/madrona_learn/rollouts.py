@@ -2,7 +2,7 @@ import torch
 from time import time
 from dataclasses import dataclass
 from typing import List, Optional
-from .amp import AMPState
+from .amp import amp
 from .cfg import SimInterface
 from .actor_critic import ActorCritic, RecurrentStateConfig
 from .profile import profile
@@ -25,7 +25,6 @@ class RolloutManager:
             sim : SimInterface,
             steps_per_update : int,
             num_bptt_chunks : int,
-            amp : AMPState,
             recurrent_cfg : RecurrentStateConfig,
         ):
         self.dev = dev
@@ -107,7 +106,6 @@ class RolloutManager:
 
     def collect(
             self,
-            amp : AMPState,
             sim : SimInterface,
             actor_critic : ActorCritic,
         ):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
-from .amp import AMPState
+from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 from .learning_state import LearningState
@@ -69,8 +69,7 @@ def _mb_slice_rnn(rnn_state, inds):
 
 def _gather_minibatch(rollouts : Rollouts,
                       advantages : torch.Tensor,
-                      inds : torch.Tensor,
-                      amp : AMPState):
+                      inds : torch.Tensor):
     obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
     
     actions_slice = _mb_slice(rollouts.actions, inds)
@@ -99,7 +98,6 @@ def _gather_minibatch(rollouts : Rollouts,
     )
 
 def _compute_advantages(cfg : TrainConfig,
-                        amp : AMPState,
                         value_normalizer : EMANormalizer,
                         advantages_out : torch.Tensor,
                         rollouts : Rollouts):
@@ -117,7 +115,7 @@ def _compute_advantages(cfg : TrainConfig,
     seq_advantages_out = advantages_out.view(T, N, 1)
 
     next_advantage = 0.0
-    next_values = value_normalizer.invert(amp, rollouts.bootstrap_values)
+    next_values = value_normalizer.invert(rollouts.bootstrap_values)
     for i in reversed(range(cfg.steps_per_update)):
         cur_dones = seq_dones[i].to(dtype=amp.compute_dtype)
         cur_rewards = seq_rewards[i].to(dtype=amp.compute_dtype)
@@ -139,7 +137,7 @@ def _compute_advantages(cfg : TrainConfig,
         next_advantage = cur_advantage
         next_values = cur_values
 
-def _compute_action_scores(cfg, amp, advantages):
+def _compute_action_scores(cfg, advantages):
     if not cfg.normalize_advantages:
         return advantages
     else:
@@ -152,7 +150,6 @@ def _compute_action_scores(cfg, amp, advantages):
             return action_scores.to(dtype=amp.compute_dtype)
 
 def _ppo_update(cfg : TrainConfig,
-                amp : AMPState,
                 mb : MiniBatch,
                 actor_critic : ActorCritic,
                 optimizer : torch.optim.Optimizer,
@@ -164,7 +161,7 @@ def _ppo_update(cfg : TrainConfig,
                 mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
-            action_scores = _compute_action_scores(cfg, amp, mb.advantages)
+            action_scores = _compute_action_scores(cfg, mb.advantages)
 
         ratio = torch.exp(new_log_probs - mb.log_probs)
         surr1 = action_scores * ratio
@@ -182,7 +179,7 @@ def _ppo_update(cfg : TrainConfig,
 
             new_values = torch.clamp(new_values, low, high)
 
-        normalized_returns = value_normalizer(amp, returns)
+        normalized_returns = value_normalizer(returns)
         value_loss = 0.5 * F.mse_loss(
             new_values, normalized_returns, reduction='none')
 
@@ -228,7 +225,6 @@ def _ppo_update(cfg : TrainConfig,
     return stats
 
 def _update_iter(cfg : TrainConfig,
-                 amp : AMPState,
                  num_train_seqs : int,
                  sim : SimInterface,
                  rollout_mgr : RolloutManager,
@@ -243,14 +239,13 @@ def _update_iter(cfg : TrainConfig,
         value_normalizer.eval()
 
         with profile('Collect Rollouts'):
-            rollouts = rollout_mgr.collect(amp, sim, actor_critic)
+            rollouts = rollout_mgr.collect(sim, actor_critic)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
         # need to be recomputed. https://arxiv.org/abs/2005.12729
         with profile('Compute Advantages'):
             _compute_advantages(cfg,
-                                amp,
                                 value_normalizer,
                                 advantages,
                                 rollouts)
@@ -266,9 +261,8 @@ def _update_iter(cfg : TrainConfig,
             for inds in torch.randperm(num_train_seqs).chunk(
                     cfg.ppo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
-                    mb = _gather_minibatch(rollouts, advantages, inds, amp)
+                    mb = _gather_minibatch(rollouts, advantages, inds)
                 cur_stats = _ppo_update(cfg,
-                                        amp,
                                         mb,
                                         actor_critic,
                                         optimizer,
@@ -318,7 +312,6 @@ def _update_loop(update_iter_fn : Callable,
         with profile("Update Iter Timing"):
             update_result = update_iter_fn(
                 cfg,
-                learning_state.amp,
                 num_train_seqs,
                 sim,
                 rollout_mgr,
@@ -343,14 +336,13 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    amp.init(dev, cfg.mixed_precision)
 
     num_agents = sim.actions.shape[0]
 
     actor_critic = actor_critic.to(dev)
 
     optimizer = optim.Adam(actor_critic.parameters(), lr=cfg.lr)
-
-    amp = AMPState(dev, cfg.mixed_precision)
 
     value_normalizer = EMANormalizer(cfg.value_normalizer_decay,
                                      disable=not cfg.normalize_values)
@@ -361,7 +353,6 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
         optimizer = optimizer,
         scheduler = None,
         value_normalizer = value_normalizer,
-        amp = amp,
     )
 
     if restore_ckpt != None:
@@ -370,7 +361,7 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
         start_update_idx = 0
 
     rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
-        cfg.num_bptt_chunks, amp, actor_critic.recurrent_cfg)
+        cfg.num_bptt_chunks, actor_critic.recurrent_cfg)
 
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':

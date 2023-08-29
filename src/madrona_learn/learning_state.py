@@ -2,7 +2,7 @@ import torch
 from dataclasses import dataclass
 from typing import Optional
 
-from .amp import AMPState
+from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 
@@ -12,7 +12,6 @@ class LearningState:
     optimizer : torch.optim.Optimizer
     scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
     value_normalizer: EMANormalizer
-    amp: AMPState
 
     def save(self, update_idx, path):
         if self.scheduler != None:
@@ -20,8 +19,8 @@ class LearningState:
         else:
             scheduler_state_dict = None
 
-        if self.amp.scaler != None:
-            scaler_state_dict = self.amp.scaler.state_dict()
+        if amp.scaler != None:
+            scaler_state_dict = amp.scaler.state_dict()
         else:
             scaler_state_dict = None
 
@@ -32,9 +31,9 @@ class LearningState:
             'scheduler': scheduler_state_dict,
             'value_normalizer': self.value_normalizer.state_dict(),
             'amp': {
-                'device_type': self.amp.device_type,
-                'enabled': self.amp.enabled,
-                'compute_dtype': self.amp.compute_dtype,
+                'device_type': amp.device_type,
+                'enabled': amp.enabled,
+                'compute_dtype': amp.compute_dtype,
                 'scaler': scaler_state_dict,
             },
         }, path)
@@ -53,14 +52,14 @@ class LearningState:
         self.value_normalizer.load_state_dict(loaded['value_normalizer'])
 
         amp_dict = loaded['amp']
-        if self.amp.scaler:
-            self.amp.scaler.load_state_dict(amp_dict['scaler'])
+        if amp.scaler:
+            amp.scaler.load_state_dict(amp_dict['scaler'])
         else:
             assert(amp_dict['scaler'] == None)
         assert(
-            self.amp.device_type == amp_dict['device_type'] and
-            self.amp.enabled == amp_dict['enabled'] and
-            self.amp.compute_dtype == amp_dict['compute_dtype'])
+            amp.device_type == amp_dict['device_type'] and
+            amp.enabled == amp_dict['enabled'] and
+            amp.compute_dtype == amp_dict['compute_dtype'])
 
         return loaded['next_update']
 

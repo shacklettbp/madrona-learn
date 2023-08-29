@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .amp import AMPState
+from .amp import amp
 
 # Exponential Moving Average mean and variance estimator for
 # values and observations
@@ -44,7 +44,7 @@ class EMANormalizer(nn.Module):
         nn.init.constant_(self.sigma_sq_biased, 0)
         nn.init.constant_(self.N, 0)
 
-    def forward(self, amp, x):
+    def forward(self, x):
         if self.disable:
             return x 
 
@@ -90,7 +90,7 @@ class EMANormalizer(nn.Module):
                 self.inv_sigma,
             ).to(dtype=x.dtype)
 
-    def invert(self, amp, normalized_x):
+    def invert(self, normalized_x):
         if self.disable:
             return normalized_x
 

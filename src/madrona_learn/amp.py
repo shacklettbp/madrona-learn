@@ -3,6 +3,8 @@ from typing import Optional
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+__all__ = [ "amp" ]
+
 @dataclass(init=False)
 class AMPState:
     device_type: str
@@ -10,7 +12,10 @@ class AMPState:
     compute_dtype: torch.dtype
     scaler: Optional[torch.cuda.amp.GradScaler]
 
-    def __init__(self, dev, enable_mixed_precision):
+    def __init__(self):
+        pass
+
+    def init(self, dev, enable_mixed_precision):
         self.device_type = dev.type
 
         if enable_mixed_precision:
@@ -54,3 +59,5 @@ class AMPState:
                     yield
                 finally:
                     pass
+
+amp = AMPState() 
