@@ -6,7 +6,7 @@ from .amp import AMPState
 # Exponential Moving Average mean and variance estimator for
 # values and observations
 class EMANormalizer(nn.Module):
-    def __init__(self, decay, eps=1e-5, disable=False):
+    def __init__(self, decay, shape=[], eps=1e-5, disable=False):
         super().__init__()
 
         self.disable = disable
@@ -16,9 +16,9 @@ class EMANormalizer(nn.Module):
         self.eps = eps
 
         # Current parameter estimates
-        self.register_buffer("mu", torch.zeros([], dtype=torch.float32))
-        self.register_buffer("inv_sigma", torch.zeros([], dtype=torch.float32))
-        self.register_buffer("sigma", torch.zeros([], dtype=torch.float32))
+        self.register_buffer("mu", torch.zeros(shape, dtype=torch.float32))
+        self.register_buffer("inv_sigma", torch.zeros(shape, dtype=torch.float32))
+        self.register_buffer("sigma", torch.zeros(shape, dtype=torch.float32))
 
         # Intermediate values used to compute the moving average
         # decay and one_minus_decay don't strictly need to be tensors, but it's
@@ -30,11 +30,11 @@ class EMANormalizer(nn.Module):
         self.register_buffer("one_minus_decay", 1 - self.decay)
 
         self.register_buffer("mu_biased",
-                             torch.zeros([], dtype=torch.float32))
+                             torch.zeros(shape, dtype=torch.float32))
         self.register_buffer("sigma_sq_biased",
-                             torch.zeros([], dtype=torch.float32))
+                             torch.zeros(shape, dtype=torch.float32))
         self.register_buffer("N",
-                             torch.zeros([], dtype=torch.int64))
+                             torch.zeros(shape, dtype=torch.int64))
 
         nn.init.constant_(self.mu , 0)
         nn.init.constant_(self.inv_sigma, 0)
