@@ -1,8 +1,14 @@
 from dataclasses import dataclass
 import torch
+from torch import nn
+import torch.nn.functional as F
 
-from .cfg import Algorithm, TrainConfig
+from .actor_critic import ActorCritic
+from .amp import amp
+from .cfg import AlgoConfig, TrainConfig, SimInterface
+from .moving_avg import EMANormalizer
 from .rollouts import RolloutManager, Rollouts
+from .profile import profile
 
 from .train_common import (
         MiniBatch, UpdateResult, 
@@ -12,7 +18,7 @@ from .train_common import (
 __all__ = [ "PPOConfig", "cfg_standard_ppo", "cfg_competitive_ppo" ]
 
 @dataclass(frozen=True)
-class PPOConfig:
+class PPOConfig(AlgoConfig):
     num_mini_batches: int
     clip_coef: float
     value_loss_coef: float
@@ -45,21 +51,21 @@ def _ppo_update(cfg : TrainConfig,
                 mb.rnn_start_states, mb.dones, mb.actions, *mb.obs)
 
         with torch.no_grad():
-            action_scores = _compute_action_scores(cfg, mb.advantages)
+            action_scores = compute_action_scores(cfg, mb.advantages)
 
         ratio = torch.exp(new_log_probs - mb.log_probs)
         surr1 = action_scores * ratio
         surr2 = action_scores * (
-            torch.clamp(ratio, 1.0 - cfg.ppo.clip_coef, 1.0 + cfg.ppo.clip_coef))
+            torch.clamp(ratio, 1.0 - cfg.algo.clip_coef, 1.0 + cfg.algo.clip_coef))
 
         action_obj = torch.min(surr1, surr2)
 
         returns = mb.advantages + mb.values
 
-        if cfg.ppo.clip_value_loss:
+        if cfg.algo.clip_value_loss:
             with torch.no_grad():
-                low = mb.values - cfg.ppo.clip_coef
-                high = mb.values + cfg.ppo.clip_coef
+                low = mb.values - cfg.algo.clip_coef
+                high = mb.values + cfg.algo.clip_coef
 
             new_values = torch.clamp(new_values, low, high)
 
@@ -73,21 +79,21 @@ def _ppo_update(cfg : TrainConfig,
 
         loss = (
             - action_obj # Maximize the action objective function
-            + cfg.ppo.value_loss_coef * value_loss
-            - cfg.ppo.entropy_coef * entropies # Maximize entropy
+            + cfg.algo.value_loss_coef * value_loss
+            - cfg.algo.entropy_coef * entropies # Maximize entropy
         )
 
     with profile('Optimize'):
         if amp.scaler is None:
             loss.backward()
             nn.utils.clip_grad_norm_(
-                actor_critic.parameters(), cfg.ppo.max_grad_norm)
+                actor_critic.parameters(), cfg.algo.max_grad_norm)
             optimizer.step()
         else:
             amp.scaler.scale(loss).backward()
             amp.scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(
-                actor_critic.parameters(), cfg.ppo.max_grad_norm)
+                actor_critic.parameters(), cfg.algo.max_grad_norm)
             amp.scaler.step(optimizer)
             amp.scaler.update()
 
@@ -119,6 +125,8 @@ def ppo(cfg: TrainConfig,
         scheduler : torch.optim.lr_scheduler.LRScheduler,
         value_normalizer : EMANormalizer
         ):
+    assert(num_train_seqs % cfg.algo.num_mini_batches == 0)
+
     with torch.no_grad():
         actor_critic.eval()
         value_normalizer.eval()
@@ -130,10 +138,10 @@ def ppo(cfg: TrainConfig,
         # but that's pretty annoying for a recurrent policy since values
         # need to be recomputed. https://arxiv.org/abs/2005.12729
         with profile('Compute Advantages'):
-            _compute_advantages(cfg,
-                                value_normalizer,
-                                advantages,
-                                rollouts)
+            compute_advantages(cfg,
+                               value_normalizer,
+                               advantages,
+                               rollouts)
     
     actor_critic.train()
     value_normalizer.train()
@@ -142,11 +150,11 @@ def ppo(cfg: TrainConfig,
         aggregate_stats = PPOStats()
         num_stats = 0
 
-        for epoch in range(cfg.ppo.num_epochs):
+        for epoch in range(cfg.algo.num_epochs):
             for inds in torch.randperm(num_train_seqs).chunk(
-                    cfg.ppo.num_mini_batches):
+                    cfg.algo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
-                    mb = _gather_minibatch(rollouts, advantages, inds)
+                    mb = gather_minibatch(rollouts, advantages, inds)
                 cur_stats = _ppo_update(cfg,
                                         mb,
                                         actor_critic,
@@ -174,13 +182,13 @@ def ppo(cfg: TrainConfig,
         values = rollouts.values.view(-1, *rollouts.values.shape[2:]),
         advantages = advantages.view(-1, *advantages.shape[2:]),
         bootstrap_values = rollouts.bootstrap_values,
-        ppo_stats = aggregate_stats,
+        algo_stats = aggregate_stats,
     )
 
 
-def cfg_standard_ppo(cfg: PPOConfig):
-    return Algorithm(name='ppo', cfg=cfg, update_iter_fn=ppo)
+def cfg_standard_ppo(**kwargs):
+    return PPOConfig(name='ppo', update_iter_fn=ppo, **kwargs)
 
 
 def cfg_competitive_ppo(cfg: PPOConfig):
-    return Algorithm(name='ppo', cfg=cfg, update_iter_fn=ppo)
+    return PPOConfig(name='ppo', update_iter_fn=ppo, **kwargs)

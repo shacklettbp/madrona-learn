@@ -30,7 +30,6 @@ def _update_loop(update_iter_fn : Callable,
                  learning_state : LearningState,
                  start_update_idx : int):
     num_train_seqs = num_agents * cfg.num_bptt_chunks
-    assert(num_train_seqs % cfg.ppo.num_mini_batches == 0)
 
     advantages = torch.zeros_like(rollout_mgr.rewards)
 
