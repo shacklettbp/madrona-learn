@@ -10,13 +10,17 @@ from madrona_learn.actor_critic import (
 from madrona_learn.profile import profile
 import madrona_learn.models
 import madrona_learn.rnn
+from madrona_learn.ppo import (
+        PPOConfig, cfg_standard_ppo, cfg_competitive_ppo
+    )
 from madrona_learn.amp import amp
 
 __all__ = [
         "train", "LearningState", "models", "rnn", "amp",
-        "TrainConfig", "PPOConfig", "SimInterface",
+        "TrainConfig", "SimInterface",
         "DiscreteActionDistributions",
         "ActorCritic", "DiscreteActor", "Critic",
         "BackboneEncoder", "RecurrentBackboneEncoder",
         "Backbone", "BackboneShared", "BackboneSeparate",
+        "PPOConfig", "cfg_standard_ppo", "cfg_competitive_ppo",
     ]

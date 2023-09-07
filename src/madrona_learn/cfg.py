@@ -1,27 +1,23 @@
 from dataclasses import dataclass
 from typing import Callable, List
+from .typing_utils import DataclassProtocol
 
 import torch
 
 @dataclass(frozen=True)
-class PPOConfig:
-    num_mini_batches: int
-    clip_coef: float
-    value_loss_coef: float
-    entropy_coef: float
-    max_grad_norm: float
-    num_epochs: int = 1
-    clip_value_loss: bool = False
-    adaptive_entropy: bool = True
+class Algorithm:
+    name: str
+    cfg: DataclassProtocol
+    update_iter_fn: Callable
 
 @dataclass(frozen=True)
 class TrainConfig:
     num_updates: int
     steps_per_update: int
-    num_bptt_chunks: int
     lr: float
+    algo: Algorithm
+    num_bptt_chunks: int
     gamma: float
-    ppo: PPOConfig
     gae_lambda: float = 1.0
     normalize_advantages: bool = True
     normalize_values : bool = True
@@ -32,10 +28,10 @@ class TrainConfig:
         rep = "TrainConfig:"
 
         for k, v in self.__dict__.items():
-            if k == 'ppo':
-                rep += f"\n  ppo:"
-                for ppo_k, ppo_v in self.ppo.__dict__.items():
-                    rep += f"\n    {ppo_k}: {ppo_v}"
+            if k == 'algo':
+                rep += f"\n  {v.name}:"
+                for algo_cfg_k, algo_cfg_v in self.algo.cfg.__dict__.items():
+                    rep += f"\n    {algo_cfg_k}: {algo_cfg_v}"
             else:
                 rep += f"\n  {k}: {v}" 
 
