@@ -90,6 +90,8 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
     rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
         cfg.num_bptt_chunks, actor_critic.recurrent_cfg)
 
+    update_iter_fn = cfg.algo.setup(cfg)
+
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':
         if 'MADRONA_LEARN_COMPILE_DEBUG' in env_vars and \
@@ -100,9 +102,7 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
             from torch._inductor import config as inductor_cfg
             inductor_cfg.cpp.cxx = env_vars['MADRONA_LEARN_COMPILE_CXX']
 
-        update_iter_fn = torch.compile(cfg.algo.update_iter_fn, dynamic=False)
-    else:
-        update_iter_fn = cfg.algo.update_iter_fn
+        update_iter_fn = torch.compile(update_iter_fn, dynamic=False)
 
     if dev.type == 'cuda':
         def gpu_sync_fn():
@@ -122,5 +122,3 @@ def train(dev, sim, cfg, actor_critic, update_cb, restore_ckpt=None):
         learning_state=learning_state,
         start_update_idx=start_update_idx,
     )
-
-    return actor_critic.cpu()

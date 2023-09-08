@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from typing import Callable, List
-from .typing_utils import DataclassProtocol
 
 import torch
 
-@dataclass(frozen=True)
 class AlgoConfig:
-    name: str
-    update_iter_fn: Callable
+    def name(self):
+        raise NotImplementedError
+
+    def setup(self, cfg: "TrainConfig"):
+        raise NotImplementedError
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -17,7 +18,11 @@ class TrainConfig:
     algo: AlgoConfig
     num_bptt_chunks: int
     gamma: float
+    team_size: int = 1
+    num_teams: int = 1
     gae_lambda: float = 1.0
+    pbt_ensemble_size: int = 1
+    train_all_teams: bool = True
     normalize_advantages: bool = True
     normalize_values : bool = True
     value_normalizer_decay : float = 0.99999
@@ -28,11 +33,8 @@ class TrainConfig:
 
         for k, v in self.__dict__.items():
             if k == 'algo':
-                rep += f"\n  {v.name}:"
+                rep += f"\n  {v.name()}:"
                 for algo_cfg_k, algo_cfg_v in self.algo.__dict__.items():
-                    if algo_cfg_k in ['name', 'update_iter_fn']:
-                        continue
-
                     rep += f"\n    {algo_cfg_k}: {algo_cfg_v}"
             else:
                 rep += f"\n  {k}: {v}" 

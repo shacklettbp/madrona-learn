@@ -15,7 +15,7 @@ from .train_common import (
         compute_advantages, compute_action_scores, gather_minibatch
     )
 
-__all__ = [ "PPOConfig", "cfg_standard_ppo", "cfg_competitive_ppo" ]
+__all__ = [ "PPOConfig" ]
 
 @dataclass(frozen=True)
 class PPOConfig(AlgoConfig):
@@ -28,6 +28,12 @@ class PPOConfig(AlgoConfig):
     clip_value_loss: bool = False
     adaptive_entropy: bool = True
 
+    def name(self):
+        return "ppo"
+
+    def setup(self,
+              cfg: TrainConfig):
+        return _setup_ppo(cfg)
 
 @dataclass
 class PPOStats:
@@ -115,18 +121,16 @@ def _ppo_update(cfg : TrainConfig,
     return stats
 
 
-def ppo(cfg: TrainConfig,
-        num_train_seqs : int,
-        sim : SimInterface,
-        rollout_mgr : RolloutManager,
-        advantages : torch.Tensor,
-        actor_critic : ActorCritic,
-        optimizer : torch.optim.Optimizer,
-        scheduler : torch.optim.lr_scheduler.LRScheduler,
-        value_normalizer : EMANormalizer
+def _ppo(cfg: TrainConfig,
+         num_train_seqs : int,
+         sim : SimInterface,
+         rollout_mgr : RolloutManager,
+         advantages : torch.Tensor,
+         actor_critic : ActorCritic,
+         optimizer : torch.optim.Optimizer,
+         scheduler : torch.optim.lr_scheduler.LRScheduler,
+         value_normalizer : EMANormalizer
         ):
-    assert(num_train_seqs % cfg.algo.num_mini_batches == 0)
-
     with torch.no_grad():
         actor_critic.eval()
         value_normalizer.eval()
@@ -185,10 +189,22 @@ def ppo(cfg: TrainConfig,
         algo_stats = aggregate_stats,
     )
 
+def _ensemble_ppo(cfg: TrainConfig,
+                  num_train_seqs : int,
+                  sim : SimInterface,
+                  rollout_mgr : RolloutManager,
+                  advantages : torch.Tensor,
+                  actor_critic : ActorCritic,
+                  optimizer : torch.optim.Optimizer,
+                  scheduler : torch.optim.lr_scheduler.LRScheduler,
+                  value_normalizer : EMANormalizer
+              ):
+    pass
 
-def cfg_standard_ppo(**kwargs):
-    return PPOConfig(name='ppo', update_iter_fn=ppo, **kwargs)
+def _setup_ppo(cfg):
+    num_train_teams = cfg.num_teams if cfg.train_all_teams else 1
+    num_train_seqs = cfg.team_size * num_train_teams
 
+    assert(num_train_seqs % cfg.algo.num_mini_batches == 0)
 
-def cfg_competitive_ppo(cfg: PPOConfig):
-    return PPOConfig(name='ppo', update_iter_fn=ppo, **kwargs)
+    return _ppo
