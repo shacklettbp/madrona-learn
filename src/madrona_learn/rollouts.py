@@ -29,10 +29,10 @@ class RolloutManager:
             icfg : InternalConfig,
             recurrent_cfg : RecurrentStateConfig,
         ):
-        self.dev = dev
-        self.num_bptt_steps = num_bptt_steps
+        cpu_dev = torch.device('cpu')
 
-        self.need_obs_copy = sim.obs[0].device != dev
+        self.dev = dev
+        self.need_sim_copy = sim.obs[0].device != dev
 
         if dev.type == 'cuda':
             float_storage_type = torch.float16
@@ -42,43 +42,60 @@ class RolloutManager:
         self.actions = torch.zeros(
             (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents,
              *sim.actions.shape[1:]),
-            dtype=sim.actions.dtype, device=dev)
+            dtype=sim.actions.dtype, device=cpu_dev)
 
         self.log_probs = torch.zeros(
             self.actions.shape,
-            dtype=float_storage_type, device=dev)
+            dtype=float_storage_type, device=cpu_dev)
 
         self.dones = torch.zeros(
             (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
-            dtype=torch.bool, device=dev)
+            dtype=torch.bool, device=cpu_dev)
 
         self.rewards = torch.zeros(
             (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
-            dtype=float_storage_type, device=dev)
+            dtype=float_storage_type, device=cpu_dev)
 
         self.values = torch.zeros(
             (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
-            dtype=float_storage_type, device=dev)
+            dtype=float_storage_type, device=cpu_dev)
 
         self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
-            dtype=amp.compute_dtype, device=dev)
+            dtype=amp.compute_dtype, device=cpu_dev)
 
         self.obs = []
+
+        # obs_in and actions_out are the model inputs / outputs during rollout
+        # generation. For GPU sim + GPU pytorch, this doesn't involve copies,
+        # these just point to the SimInterface members
+        self.obs_in = []
+
+        if self.need_sim_copy:
+            self.actions_out = torch.zeros(sim.actions.shape,
+                dtype=sim.actions.dtype, device=dev)
+        else:
+            sim.actions_out = sim.actions
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
                 (num_bptt_chunks, num_bptt_steps,
                  icfg.num_train_agents, *obs_tensor.shape[1:]),
-                dtype=obs_tensor.dtype, device=dev))
+                dtype=obs_tensor.dtype, device=cpu_dev))
 
-        if self.need_obs_copy:
+            if self.need_sim_copy:
+                self.obs_in.append(torch.zeros(obs_tensor.shape, 
+                    dtype=obs_tensor.dtype, device=dev))
+            else:
+                self.obs_in.append(obs_tensor)
+
+        if self.need_sim_copy:
             self.final_obs = []
 
             for obs_tensor in sim.obs:
                 self.final_obs.append(torch.zeros(
                     (icfg.num_train_agents, *obs_tensor.shape[1:]),
-                    dtype=obs_tensor.dtype, device=dev))
-
+                    dtype=obs_tensor.dtype, device=cpu_dev))
+                
         self.rnn_end_states = []
         self.rnn_alt_states = []
         self.rnn_start_states = []
@@ -109,18 +126,19 @@ class RolloutManager:
             self,
             sim : SimInterface,
             policy_states : List[PolicyLearningState],
+            team_matchups : List[List[int]],
         ):
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
 
-        for bptt_chunk in range(0, self.num_bptt_chunks):
+        for bptt_chunk in range(0, self.actions.shape[0]):
             with profile("Cache RNN state"):
                 # Cache starting RNN state for this chunk
                 for start_state, end_state in zip(
                         self.rnn_start_states, rnn_states_cur_in):
                     start_state[bptt_chunk].copy_(end_state)
 
-            for slot in range(0, self.num_bptt_steps):
+            for slot in range(0, self.actions.shape[1]):
                 cur_obs_buffers = [obs[bptt_chunk, slot] for obs in self.obs]
 
                 with profile('Policy Infer', gpu=True):
@@ -166,12 +184,9 @@ class RolloutManager:
 
                 profile.gpu_measure(sync=True)
 
-        if self.need_obs_copy:
-            final_obs = self.final_obs
+        if self.need_sim_copy:
             for obs_idx, step_obs in enumerate(sim.obs):
-                final_obs[obs_idx].copy_(step_obs, non_blocking=True)
-        else:
-            final_obs = sim.obs
+                self.obs_in[obs_idx].copy_(step_obs, non_blocking=True)
 
         # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
         # iter so rnn_hidden_cur_in is the final output
@@ -180,7 +195,7 @@ class RolloutManager:
 
         with amp.enable(), profile("Bootstrap Values"):
             actor_critic.fwd_critic(
-                self.bootstrap_values, None, self.rnn_end_states, *final_obs)
+                self.bootstrap_values, None, self.rnn_end_states, *self.obs_in)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers from a
