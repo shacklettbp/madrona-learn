@@ -8,6 +8,14 @@ from .typing_utils import DataclassProtocol
 from .rollouts import Rollouts
 
 import torch
+import torch.nn as nn
+
+@dataclass
+class HyperParameters:
+    lr: float
+    gamma: float
+    gae_lambda: float
+
 
 @dataclass(frozen = True)
 class MiniBatch:
@@ -29,6 +37,28 @@ class UpdateResult:
     advantages : torch.Tensor
     bootstrap_values : torch.Tensor
     algo_stats : DataclassProtocol
+
+
+@dataclass
+class InternalConfig:
+    num_train_teams : int
+    num_train_agents : int
+    num_train_seqs : int
+    num_bptt_steps : int
+    float_storage_type : torch.dtype
+
+    def __init__(self, dev, cfg):
+        self.num_train_teams = 1 if cfg.freeze_opponents else cfg.num_teams
+        self.num_train_agents = cfg.team_size * num_train_teams
+
+        assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
+        self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks
+        self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
+
+        if dev.type == 'cuda':
+            self.float_storage_type = torch.float16
+        else:
+            self.float_storage_type = torch.bfloat16
 
 
 def compute_advantages(cfg : TrainConfig,

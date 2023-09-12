@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -9,9 +10,10 @@ from .cfg import AlgoConfig, TrainConfig, SimInterface
 from .moving_avg import EMANormalizer
 from .rollouts import RolloutManager, Rollouts
 from .profile import profile
+from .training_state import PolicyLearningState
 
-from .train_common import (
-        MiniBatch, UpdateResult, 
+from .algo_common import (
+        MiniBatch, UpdateResult, InternalConfig,
         compute_advantages, compute_action_scores, gather_minibatch
     )
 
@@ -32,8 +34,19 @@ class PPOConfig(AlgoConfig):
         return "ppo"
 
     def setup(self,
-              cfg: TrainConfig):
-        return _setup_ppo(cfg)
+              dev: torch.device,
+              cfg: TrainConfig,
+              icfg: InternalConfig):
+        return PPO(dev, cfg, icfg)
+
+
+@dataclass
+class PPOHyperParameters(HyperParameters):
+    clip_coef: float
+    value_loss_coef: float
+    entropy_coef: float
+    max_grad_norm: float
+
 
 @dataclass
 class PPOStats:
@@ -121,22 +134,20 @@ def _ppo_update(cfg : TrainConfig,
     return stats
 
 
-def _ppo(cfg: TrainConfig,
-         num_train_seqs : int,
+def _ppo(cfg : TrainConfig,
+         icfg : InternalConfig,
          sim : SimInterface,
          rollout_mgr : RolloutManager,
          advantages : torch.Tensor,
-         actor_critic : ActorCritic,
-         optimizer : torch.optim.Optimizer,
-         scheduler : torch.optim.lr_scheduler.LRScheduler,
-         value_normalizer : EMANormalizer
+         policy_states : List[PolicyLearningState],
         ):
     with torch.no_grad():
-        actor_critic.eval()
-        value_normalizer.eval()
+        for state in policy_states:
+            state.policy.eval()
+            state.value_normalizer.eval()
 
         with profile('Collect Rollouts'):
-            rollouts = rollout_mgr.collect(sim, actor_critic)
+            rollouts = rollout_mgr.collect(sim, policy_states)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
@@ -147,15 +158,16 @@ def _ppo(cfg: TrainConfig,
                                advantages,
                                rollouts)
     
-    actor_critic.train()
-    value_normalizer.train()
+    for state in policy_states:
+        state.policy.train()
+        state.value_normalizer.train()
 
     with profile('PPO'):
         aggregate_stats = PPOStats()
         num_stats = 0
 
         for epoch in range(cfg.algo.num_epochs):
-            for inds in torch.randperm(num_train_seqs).chunk(
+            for inds in torch.randperm(icfg.num_train_seqs).chunk(
                     cfg.algo.num_mini_batches):
                 with torch.no_grad(), profile('Gather Minibatch', gpu=True):
                     mb = gather_minibatch(rollouts, advantages, inds)
@@ -189,22 +201,39 @@ def _ppo(cfg: TrainConfig,
         algo_stats = aggregate_stats,
     )
 
-def _ensemble_ppo(cfg: TrainConfig,
-                  num_train_seqs : int,
+
+def _ensemble_ppo(cfg : TrainConfig,
+                  icfg : InternalConfig,
                   sim : SimInterface,
                   rollout_mgr : RolloutManager,
                   advantages : torch.Tensor,
-                  actor_critic : ActorCritic,
-                  optimizer : torch.optim.Optimizer,
-                  scheduler : torch.optim.lr_scheduler.LRScheduler,
-                  value_normalizer : EMANormalizer
-              ):
+                  policy_states : List[PolicyLearningState],
+                 ):
     pass
 
-def _setup_ppo(cfg):
-    num_train_teams = cfg.num_teams if cfg.train_all_teams else 1
-    num_train_seqs = cfg.team_size * num_train_teams
 
-    assert(num_train_seqs % cfg.algo.num_mini_batches == 0)
+class PPO:
+    def __init__(self, dev, cfg, icfg):
+        assert(icfg.num_train_seqs % cfg.algo.num_mini_batches == 0)
 
-    return _ppo
+        self.advantages = torch.zeros(
+            (cfg.num_bptt_chunks,
+             icfg.num_bptt_steps,
+             icfg.num_train_agents,
+             1),
+            dtype=float_storage_type, device=dev)
+
+    def __call__(self,
+                 cfg: TrainConfig,
+                 icfg: InternalConfig
+                 sim : SimInterface,
+                 rollout_mgr : RolloutManager,
+                 advantages : torch.Tensor,
+                 policy_states : List[PolicyLearningState],
+                ):
+        return _ppo(cfg,
+                    icfg,
+                    sim,
+                    rollout_mgr,
+                    self.advantages,
+                    policy_states)

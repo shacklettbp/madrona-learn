@@ -3,8 +3,9 @@ from time import time
 from dataclasses import dataclass
 from typing import List, Optional
 from .amp import amp
-from .cfg import SimInterface
+from .cfg import SimInterface, TrainConfig
 from .actor_critic import ActorCritic, RecurrentStateConfig
+from .algo_common import InternalConfig
 from .profile import profile
 
 @dataclass(frozen = True)
@@ -18,20 +19,17 @@ class Rollouts:
     bootstrap_values: torch.Tensor
     rnn_start_states: tuple[torch.Tensor, ...]
 
+
 class RolloutManager:
     def __init__(
             self,
             dev : torch.device,
             sim : SimInterface,
-            steps_per_update : int,
-            num_bptt_chunks : int,
+            cfg : TrainConfig,
+            icfg : InternalConfig,
             recurrent_cfg : RecurrentStateConfig,
         ):
         self.dev = dev
-        self.steps_per_update = steps_per_update
-        self.num_bptt_chunks = num_bptt_chunks
-        assert(steps_per_update % num_bptt_chunks == 0)
-        num_bptt_steps = steps_per_update // num_bptt_chunks
         self.num_bptt_steps = num_bptt_steps
 
         self.need_obs_copy = sim.obs[0].device != dev
@@ -42,7 +40,8 @@ class RolloutManager:
             float_storage_type = torch.bfloat16
 
         self.actions = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, *sim.actions.shape),
+            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents,
+             *sim.actions.shape[1:]),
             dtype=sim.actions.dtype, device=dev)
 
         self.log_probs = torch.zeros(
@@ -50,25 +49,26 @@ class RolloutManager:
             dtype=float_storage_type, device=dev)
 
         self.dones = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, *sim.dones.shape),
+            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
             dtype=torch.bool, device=dev)
 
         self.rewards = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, *sim.rewards.shape),
+            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
             dtype=float_storage_type, device=dev)
 
         self.values = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, *sim.rewards.shape),
+            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
             dtype=float_storage_type, device=dev)
 
-        self.bootstrap_values = torch.zeros(
-            sim.rewards.shape, dtype=amp.compute_dtype, device=dev)
+        self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
+            dtype=amp.compute_dtype, device=dev)
 
         self.obs = []
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
-                (num_bptt_chunks, num_bptt_steps, *obs_tensor.shape),
+                (num_bptt_chunks, num_bptt_steps,
+                 icfg.num_train_agents, *obs_tensor.shape[1:]),
                 dtype=obs_tensor.dtype, device=dev))
 
         if self.need_obs_copy:
@@ -76,7 +76,8 @@ class RolloutManager:
 
             for obs_tensor in sim.obs:
                 self.final_obs.append(torch.zeros(
-                    obs_tensor.shape, dtype=obs_tensor.dtype, device=dev))
+                    (icfg.num_train_agents, *obs_tensor.shape[1:]),
+                    dtype=obs_tensor.dtype, device=dev))
 
         self.rnn_end_states = []
         self.rnn_alt_states = []
@@ -84,7 +85,7 @@ class RolloutManager:
         for rnn_state_shape in recurrent_cfg.shapes:
             # expand shape to batch size
             batched_state_shape = (*rnn_state_shape[0:2],
-                sim.actions.shape[0], rnn_state_shape[2])
+                icfg.num_train_agents, rnn_state_shape[2])
 
             rnn_end_state = torch.zeros(
                 batched_state_shape, dtype=amp.compute_dtype, device=dev)
@@ -107,7 +108,7 @@ class RolloutManager:
     def collect(
             self,
             sim : SimInterface,
-            actor_critic : ActorCritic,
+            policy_states : List[PolicyLearningState],
         ):
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states

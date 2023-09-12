@@ -22,7 +22,7 @@ class TrainConfig:
     num_teams: int = 1
     gae_lambda: float = 1.0
     pbt_ensemble_size: int = 1
-    train_all_teams: bool = True
+    freeze_opponents: bool = False
     normalize_advantages: bool = True
     normalize_values : bool = True
     value_normalizer_decay : float = 0.99999
