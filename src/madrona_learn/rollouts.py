@@ -65,9 +65,17 @@ class RolloutManager:
              icfg.num_train_agents, *sim.actions.shape[1:]),
             dtype=sim.actions.dtype, device=cpu_dev)
 
+        self.actions_gather = torch.zeros(
+            self.actions.shape[2:],
+            dtype=sim.actions.dtype, device=dev)
+
         self.log_probs = torch.zeros(
             self.actions.shape,
             dtype=float_storage_type, device=cpu_dev)
+
+        self.log_probs_gather = torch.zeros(
+            self.actions_gather.shape,
+            dtype=float_storage_type, device=dev)
 
         self.dones = torch.zeros(
             (num_bptt_chunks, num_bptt_steps,
@@ -77,11 +85,28 @@ class RolloutManager:
         self.rewards = torch.zeros(self.dones.shape,
             dtype=float_storage_type, device=cpu_dev)
 
+        if self.need_sim_copy:
+            self.dones_gather = torch.zeros(
+                self.dones.shape[2:],
+                dtype=torch.bool, device=dev)
+
+            self.rewards_gather = torch.zeros(
+                self.dones_gather.shape,
+                dtype=float_storage_type, device=dev)
+
         self.values = torch.zeros(self.dones.shape,
             dtype=float_storage_type, device=cpu_dev)
 
         self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
             dtype=float_storage_type, device=cpu_dev)
+
+        self.values_gather = torch.zeros(
+            self.values.shape[2:],
+            dtype=float_storage_type, device=dev)
+
+        self.bootstrap_values_gather = torch.zeros(
+            self.bootstrap_values.shape,
+            dtype=float_storage_type, device=dev)
 
         self.values_out = torch.zeros(sim.rewards.shape,
             dtype=amp.compute_dtype, device=cpu_dev)
@@ -96,8 +121,8 @@ class RolloutManager:
             self.actions_out = sim.actions
 
         self.obs = []
-
         self.obs_in = []
+        self.obs_gather = []
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
@@ -107,6 +132,10 @@ class RolloutManager:
 
             if self.need_sim_copy:
                 self.obs_in.append(torch.zeros(obs_tensor.shape, 
+                    dtype=obs_tensor.dtype, device=dev))
+
+                self.obs_gather.append(torch.zeros(
+                    (icfg.num_train_agents, *obs_tensor.shape[1:]),
                     dtype=obs_tensor.dtype, device=dev))
             else:
                 self.obs_in.append(obs_tensor)
@@ -201,18 +230,28 @@ class RolloutManager:
                     cur_log_probs_store = self.log_probs[bptt_chunk, slot]
                     cur_values_store = self.values[bptt_chunk, slot]
                     
-                    for cur_ob, store_ob in zip(self.obs_in, cur_obs_store):
-                        torch.index_select(cur_ob, 0, self.gather_indices,
-                                           out=store_ob)
+                    if self.need_sim_copy:
+                        for cur_ob, gather_ob, store_ob in zip(
+                                self.obs_in, self.obs_gather, cur_obs_store):
+                            torch.index_select(cur_ob, 0, self.gather_indices,
+                                               out=gather_ob)
+                            store_ob.copy_(gather_ob, non_blocking=True)
+                    else:
+                        for sim_ob, store_ob in zip(sim.obs, cur_obs_store):
+                            torch.index_select(cur_ob, 0, self.gather_indices,
+                                               out=gather_ob)
 
                     torch.index_select(self.actions_out, 0, self.gather_indices,
-                                       out=cur_actions_store)
+                                       out=self.actions_gather)
+                    cur_actions_store.copy_(self.actions_gather, non_blocking=True)
 
                     torch.index_select(self.log_probs_out, 0, self.gather_indices,
-                                       out=cur_log_probs_store)
+                                       out=self.log_probs_gather)
+                    cur_log_probs_store.copy_(self.log_probs_gather, non_blocking=True)
 
                     torch.index_select(self.values_out, 0, self.gather_indices,
-                                       out=cur_values_store)
+                                       out=self.values_gather)
+                    cur_values_store.copy_(self.values_gather, non_blocking=True)
 
                 with profile('Simulator Step'):
                     if self.need_sim_copy:
@@ -228,11 +267,20 @@ class RolloutManager:
                     cur_rewards_store = self.rewards[bptt_chunk, slot]
                     cur_dones_store = self.dones[bptt_chunk, slot]
 
-                    torch.index_select(sim.rewards, 0, self.gather_indices,
-                                       out=cur_rewards_store)
+                    if self.need_sim_copy:
+                        torch.index_select(sim.rewards, 0, self.gather_indices,
+                                           out=self.rewards_gather)
+                        cur_rewards_store.copy_(self.rewards_gather)
 
-                    torch.index_select(sim.dones, 0, self.gather_indices,
-                                       out=cur_dones_store)
+                        torch.index_select(sim.dones, 0, self.gather_indices,
+                                           out=self.dones_gather)
+                        cur_dones_store.copy_(self.dones_gather)
+                    else:
+                        torch.index_select(sim.rewards, 0, self.gather_indices,
+                                           out=cur_rewards_store)
+
+                        torch.index_select(sim.dones, 0, self.gather_indices,
+                                           out=cur_dones_store)
 
                     for rnn_states in rnn_states_cur_in:
                         rnn_states.masked_fill_(sim.dones, 0)
@@ -251,7 +299,7 @@ class RolloutManager:
         with amp.enable(), profile("Bootstrap Values"):
             # FIXME: this only needs to call the trained policy critics,
             # would eliminate second gather
-            torch.vmap(fpolicy_rollout, in_dims=self.vmap_in_dims_critic)(
+            torch.vmap(fpolicy_critic, in_dims=self.vmap_in_dims_critic)(
                        policy_assignments,
                        self.values_out,
                        None,
@@ -259,8 +307,13 @@ class RolloutManager:
                        *self.obs_in,
                    )
 
-            torch.index_select(self.values_out, 0, self.gather_indices,
-                               out=self.bootstrap_values)
+            if self.need_sim_copy:
+                torch.index_select(self.values_out, 0, self.gather_indices,
+                                   out=self.bootstrap_values_gather)
+                self.bootstrap_values.copy_(self.bootstrap_values_gather)
+            else:
+                torch.index_select(self.values_out, 0, self.gather_indices,
+                                   out=self.bootstrap_values)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers from a
