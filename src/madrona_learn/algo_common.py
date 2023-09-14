@@ -41,15 +41,17 @@ class UpdateResult:
 
 @dataclass
 class InternalConfig:
-    num_train_teams : int
+    rollout_batch_size : int
     num_train_agents : int
     num_train_seqs : int
     num_bptt_steps : int
     float_storage_type : torch.dtype
 
     def __init__(self, dev, cfg):
-        self.num_train_teams = 1 if cfg.freeze_opponents else cfg.num_teams
-        self.num_train_agents = cfg.team_size * num_train_teams
+        self.rollout_batch_size = cfg.num_teams * cfg.team_size * cfg.num_envs
+
+        assert(cfg.num_envs % cfg.pbt_ensemble_size == 0)
+        self.num_train_agents = cfg.team_size * cfg.num_envs
 
         assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
         self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks

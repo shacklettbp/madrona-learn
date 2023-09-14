@@ -1,4 +1,6 @@
 import torch
+from torch.func import stack_module_state, functional_call
+import numpy as np
 from time import time
 from dataclasses import dataclass
 from typing import List, Optional
@@ -34,14 +36,33 @@ class RolloutManager:
         self.dev = dev
         self.need_sim_copy = sim.obs[0].device != dev
 
+        elems_per_policy = icfg.num_train_agents // cfg.pbt_ensemble_size
+        gather_indices_tmp = []
+        for i in range(icfg.num_train_agents):
+            policy_idx = i // cfg.pbt_ensemble_size
+            policy_offset = i % cfg.pbt_ensemble_size
+            policy_base = elems_per_policy * policy_idx
+            gather_indices_tmp.append(policy_base + policy_offset)
+
+        self.gather_indices = torch.tensor(gather_indices_tmp,
+            dtype=torch.long, device=dev)
+
+        self.vmap_in_dims_rollout = (
+                [ 0, 0, 0, 0, 2, 2 ] + [ 0 ] * len(self.obs_in)
+            )
+
+        self.vmap_in_dims_critic = (
+                [ 0, 0, None, 2 ] + [ 0 ] * len(self.obs_in)
+            )
+
         if dev.type == 'cuda':
             float_storage_type = torch.float16
         else:
             float_storage_type = torch.bfloat16
 
         self.actions = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents,
-             *sim.actions.shape[1:]),
+            (num_bptt_chunks, num_bptt_steps,
+             icfg.num_train_agents, *sim.actions.shape[1:]),
             dtype=sim.actions.dtype, device=cpu_dev)
 
         self.log_probs = torch.zeros(
@@ -49,32 +70,34 @@ class RolloutManager:
             dtype=float_storage_type, device=cpu_dev)
 
         self.dones = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
+            (num_bptt_chunks, num_bptt_steps,
+             icfg.num_train_agents, 1),
             dtype=torch.bool, device=cpu_dev)
 
-        self.rewards = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
+        self.rewards = torch.zeros(self.dones.shape,
             dtype=float_storage_type, device=cpu_dev)
 
-        self.values = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps, icfg.num_train_agents, 1),
+        self.values = torch.zeros(self.dones.shape,
             dtype=float_storage_type, device=cpu_dev)
 
         self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
+            dtype=float_storage_type, device=cpu_dev)
+
+        self.values_out = torch.zeros(sim.rewards.shape,
             dtype=amp.compute_dtype, device=cpu_dev)
 
-        self.obs = []
-
-        # obs_in and actions_out are the model inputs / outputs during rollout
-        # generation. For GPU sim + GPU pytorch, this doesn't involve copies,
-        # these just point to the SimInterface members
-        self.obs_in = []
+        self.log_probs_out = torch.zeros(self.actions_out.shape,
+            dtype=float_storage_type, device=dev)
 
         if self.need_sim_copy:
             self.actions_out = torch.zeros(sim.actions.shape,
                 dtype=sim.actions.dtype, device=dev)
         else:
-            sim.actions_out = sim.actions
+            self.actions_out = sim.actions
+
+        self.obs = []
+
+        self.obs_in = []
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
@@ -88,21 +111,13 @@ class RolloutManager:
             else:
                 self.obs_in.append(obs_tensor)
 
-        if self.need_sim_copy:
-            self.final_obs = []
-
-            for obs_tensor in sim.obs:
-                self.final_obs.append(torch.zeros(
-                    (icfg.num_train_agents, *obs_tensor.shape[1:]),
-                    dtype=obs_tensor.dtype, device=cpu_dev))
-                
         self.rnn_end_states = []
         self.rnn_alt_states = []
         self.rnn_start_states = []
         for rnn_state_shape in recurrent_cfg.shapes:
             # expand shape to batch size
             batched_state_shape = (*rnn_state_shape[0:2],
-                icfg.num_train_agents, rnn_state_shape[2])
+                icfg.rollout_batch_size, rnn_state_shape[2])
 
             rnn_end_state = torch.zeros(
                 batched_state_shape, dtype=amp.compute_dtype, device=dev)
@@ -111,7 +126,8 @@ class RolloutManager:
             self.rnn_end_states.append(rnn_end_state)
             self.rnn_alt_states.append(rnn_alt_state)
 
-            bptt_starts_shape = (num_bptt_chunks, *batched_state_shape)
+            bptt_starts_shape = (num_bptt_chunks, *rnn_state_shape[0:2], icfg.num_train_agents,
+                                 rnn_state_shape[2])
 
             rnn_start_state = torch.zeros(
                 bptt_starts_shape, dtype=amp.compute_dtype, device=dev)
@@ -125,9 +141,27 @@ class RolloutManager:
     def collect(
             self,
             sim : SimInterface,
-            policy_states : List[PolicyLearningState],
-            team_matchups : List[List[int]],
+            ac_functional,
+            policies : List[ActorCritic],
+            policy_assignments : np.array, # num_envs * num_teams
         ):
+
+        policy_params, policy_buffers = stack_module_state(policies)
+
+        def fpolicy_rollout(policy_idx, *args):
+            unsqueezed = [a.unsqueeze(dim=0) for a in args]
+
+            return functional_call(ac_functional,
+                (policy_params[policy_idx], policy_buffers[policy_idx]),
+                ('rollout', *unsqueezed))
+
+        def fpolicy_critic(policy_idx, *args):
+            unsqueezed = [a.unsqueeze(dim=0) for a in args]
+
+            return functional_call(ac_functional,
+                (policy_params[policy_idx], policy_buffers[policy_idx]),
+                ('critic', *unsqueezed))
+
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
 
@@ -136,57 +170,78 @@ class RolloutManager:
                 # Cache starting RNN state for this chunk
                 for start_state, end_state in zip(
                         self.rnn_start_states, rnn_states_cur_in):
-                    start_state[bptt_chunk].copy_(end_state)
+                    torch.index_select(end_state, 2,
+                                       self.gather_indices, out=start_state[bptt_chunk])
 
             for slot in range(0, self.actions.shape[1]):
-                cur_obs_buffers = [obs[bptt_chunk, slot] for obs in self.obs]
-
                 with profile('Policy Infer', gpu=True):
-                    for obs_idx, step_obs in enumerate(sim.obs):
-                        cur_obs_buffers[obs_idx].copy_(step_obs, non_blocking=True)
-
-                    cur_actions_store = self.actions[bptt_chunk, slot]
+                    if self.need_sim_copy:
+                        for sim_ob, policy_in in zip(sim.obs, self.obs_in):
+                            policy_in.copy_(sim_ob, non_blocking=True)
 
                     with amp.enable():
-                        actor_critic.fwd_rollout(
-                            cur_actions_store,
-                            self.log_probs[bptt_chunk, slot],
-                            self.values[bptt_chunk, slot],
+                        torch.vmap(fpolicy_rollout,
+                                   in_dims=self.vmap_in_dims_rollout)(
+                            policy_assignments,
+                            self.actions_out,
+                            self.log_probs_out,
+                            self.values_out,
                             rnn_states_cur_out,
                             rnn_states_cur_in,
-                            *cur_obs_buffers,
+                            *self.obs_in,
                         )
+
 
                     rnn_states_cur_in, rnn_states_cur_out = \
                         rnn_states_cur_out, rnn_states_cur_in
 
-                    # This isn't non-blocking because if the sim is running in
-                    # CPU mode, the copy needs to be finished before sim.step()
-                    # FIXME: proper pytorch <-> madrona cuda stream integration
+                with profile('Pre Step Rollout Store')
+                    cur_obs_store = [obs[bptt_chunk, slot] for obs in self.obs]
+                    cur_actions_store = self.actions[bptt_chunk, slot]
+                    cur_log_probs_store = self.log_probs[bptt_chunk, slot]
+                    cur_values_store = self.values[bptt_chunk, slot]
+                    
+                    for cur_ob, store_ob in zip(self.obs_in, cur_obs_store):
+                        torch.index_select(cur_ob, 0, self.gather_indices,
+                                           out=store_ob)
 
-                    # For now, the Policy Infer profile block ends here to get
-                    # a CPU synchronization
-                    sim.actions.copy_(cur_actions_store)
+                    torch.index_select(self.actions_out, 0, self.gather_indices,
+                                       out=cur_actions_store)
+
+                    torch.index_select(self.log_probs_out, 0, self.gather_indices,
+                                       out=cur_log_probs_store)
+
+                    torch.index_select(self.values_out, 0, self.gather_indices,
+                                       out=cur_values_store)
 
                 with profile('Simulator Step'):
+                    if self.need_sim_copy:
+                        # This isn't non-blocking because if the sim is running in
+                        # CPU mode, the copy needs to be finished before sim.step()
+                        # FIXME: proper pytorch <-> madrona cuda stream integration
+
+                        sim.actions.copy_(self.actions_out)
+
                     sim.step()
 
-                with profile('Post Step Copy'):
-                    self.rewards[bptt_chunk, slot].copy_(
-                        sim.rewards, non_blocking=True)
-
+                with profile('Post Step Rollout Store'):
+                    cur_rewards_store = self.rewards[bptt_chunk, slot]
                     cur_dones_store = self.dones[bptt_chunk, slot]
-                    cur_dones_store.copy_(
-                        sim.dones, non_blocking=True)
+
+                    torch.index_select(sim.rewards, 0, self.gather_indices,
+                                       out=cur_rewards_store)
+
+                    torch.index_select(sim.dones, 0, self.gather_indices,
+                                       out=cur_dones_store)
 
                     for rnn_states in rnn_states_cur_in:
-                        rnn_states.masked_fill_(cur_dones_store, 0)
+                        rnn_states.masked_fill_(sim.dones, 0)
 
                 profile.gpu_measure(sync=True)
 
         if self.need_sim_copy:
-            for obs_idx, step_obs in enumerate(sim.obs):
-                self.obs_in[obs_idx].copy_(step_obs, non_blocking=True)
+            for sim_ob, policy_in in zip(sim.obs, self.obs_in):
+                policy_in.copy_(sim_ob, non_blocking=True)
 
         # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
         # iter so rnn_hidden_cur_in is the final output
@@ -194,8 +249,18 @@ class RolloutManager:
         self.rnn_alt_states = rnn_states_cur_out
 
         with amp.enable(), profile("Bootstrap Values"):
-            actor_critic.fwd_critic(
-                self.bootstrap_values, None, self.rnn_end_states, *self.obs_in)
+            # FIXME: this only needs to call the trained policy critics,
+            # would eliminate second gather
+            torch.vmap(fpolicy_rollout, in_dims=self.vmap_in_dims_critic)(
+                       policy_assignments,
+                       self.values_out,
+                       None,
+                       self.rnn_end_states,
+                       *self.obs_in,
+                   )
+
+            torch.index_select(self.values_out, 0, self.gather_indices,
+                               out=self.bootstrap_values)
 
         # Right now this just returns the rollout manager's pointers,
         # but in the future could return only one set of buffers from a

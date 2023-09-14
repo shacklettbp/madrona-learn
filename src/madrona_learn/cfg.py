@@ -12,6 +12,7 @@ class AlgoConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
+    num_envs: int
     num_updates: int
     steps_per_update: int
     lr: float
@@ -22,7 +23,6 @@ class TrainConfig:
     num_teams: int = 1
     gae_lambda: float = 1.0
     pbt_ensemble_size: int = 1
-    freeze_opponents: bool = False
     normalize_advantages: bool = True
     normalize_values : bool = True
     value_normalizer_decay : float = 0.99999

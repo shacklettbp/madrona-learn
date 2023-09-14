@@ -67,9 +67,24 @@ class ActorCritic(nn.Module):
 
     # Direct call intended for debugging only, should use below
     # specialized functions
-    def forward(self, rnn_states, *obs):
+    def forward(self, fwd_type, *args, **kwargs):
+        if fwd_type == 'rollout':
+            return self.fwd_rollout(*args, **kwargs)
+
+        if fwd_type == 'critic':
+            return self.fwd_critic(*args, **kwargs)
+
+        if fwd_type == 'actor':
+            return self.fwd_actor(*args, **kwargs)
+
+        if fwd_type == 'update':
+            return self.fwd_update(*args, **kwargs)
+
+        if fwd_type != 'debug':
+            raise Exception("Unsupported fwd_type")
+
         actor_features, critic_features, new_rnn_states = self.backbone(
-            rnn_states, *obs)
+            *args, **kwargs)
 
         action_dists = self.actor(actor_features)
         values = self.critic(critic_features)
