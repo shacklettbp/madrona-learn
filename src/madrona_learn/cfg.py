@@ -12,17 +12,18 @@ class AlgoConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    num_envs: int
+    num_worlds: int
     num_updates: int
     steps_per_update: int
     lr: float
     algo: AlgoConfig
     num_bptt_chunks: int
     gamma: float
+    gae_lambda: float = 1.0
     team_size: int = 1
     num_teams: int = 1
-    gae_lambda: float = 1.0
     pbt_ensemble_size: int = 1
+    pbt_history_len: int = 1
     normalize_advantages: bool = True
     normalize_values : bool = True
     value_normalizer_decay : float = 0.99999

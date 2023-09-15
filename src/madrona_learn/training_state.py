@@ -7,6 +7,13 @@ from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 
 @dataclass
+class HyperParams:
+    lr: float
+    gamma: float
+    gae_lambda: float
+
+
+@dataclass
 class PolicyLearningState:
     policy: ActorCritic
     optimizer : torch.optim.Optimizer
@@ -80,7 +87,7 @@ class TrainingState:
             else:
                 assert(state.scaler == None)
 
-            state.value_normalizer.load_state_dict(value_normalizers[i]
+            state.value_normalizer.load_state_dict(value_normalizers[i])
 
         amp_dict = loaded['amp']
         assert(

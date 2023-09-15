@@ -7,8 +7,9 @@ from typing import List, Optional, Callable
 from .amp import amp
 from .cfg import SimInterface, TrainConfig
 from .actor_critic import ActorCritic, RecurrentStateConfig
-from .algo_common import InternalConfig
+from .utils import InternalConfig
 from .profile import profile
+from .training_state import PolicyLearningState
 
 @dataclass(frozen = True)
 class Rollouts:
@@ -38,6 +39,9 @@ class RolloutManager:
 
         assert(sim.actions.shape[0] == icfg.rollout_batch_size)
 
+        self.num_bptt_chunks = cfg.num_bptt_chunks
+        self.num_bptt_steps = icfg.num_bptt_steps
+
         elems_per_train_policy = \
             icfg.rollout_batch_size // cfg.pbt_ensemble_size
 
@@ -52,11 +56,11 @@ class RolloutManager:
             dtype=torch.long, device=dev)
 
         self.vmap_in_dims_rollout = (
-                [ 0, 0, 0, 0, 2, 2 ] + [ 0 ] * len(self.obs_in)
+                [ 0, 0, 0, 0, 2, 2 ] + [ 0 ] * len(sim.obs)
             )
 
         self.vmap_in_dims_critic = (
-                [ 0, 0, None, 2 ] + [ 0 ] * len(self.obs_in)
+                [ 0, 0, None, 2 ] + [ 0 ] * len(sim.obs)
             )
 
         if sim.policy_assignments != None:
@@ -77,13 +81,8 @@ class RolloutManager:
             self.policy_assignments = torch.tensor(policy_assignments_static,
                 dtype=torch.long, device=dev)
 
-        if dev.type == 'cuda':
-            float_storage_type = torch.float16
-        else:
-            float_storage_type = torch.bfloat16
-
         self.actions = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps,
+            (self.num_bptt_chunks, self.num_bptt_steps,
              icfg.num_train_agents, *sim.actions.shape[1:]),
             dtype=sim.actions.dtype, device=cpu_dev)
 
@@ -93,19 +92,19 @@ class RolloutManager:
 
         self.log_probs = torch.zeros(
             self.actions.shape,
-            dtype=float_storage_type, device=cpu_dev)
+            dtype=icfg.float_storage_type, device=cpu_dev)
 
         self.log_probs_gather = torch.zeros(
             self.actions_gather.shape,
-            dtype=float_storage_type, device=dev)
+            dtype=icfg.float_storage_type, device=dev)
 
         self.dones = torch.zeros(
-            (num_bptt_chunks, num_bptt_steps,
+            (self.num_bptt_chunks, self.num_bptt_steps,
              icfg.num_train_agents, 1),
             dtype=torch.bool, device=cpu_dev)
 
         self.rewards = torch.zeros(self.dones.shape,
-            dtype=float_storage_type, device=cpu_dev)
+            dtype=icfg.float_storage_type, device=cpu_dev)
 
         if not self.is_cpu_sim:
             self.dones_gather = torch.zeros(
@@ -114,27 +113,24 @@ class RolloutManager:
 
             self.rewards_gather = torch.zeros(
                 self.dones_gather.shape,
-                dtype=float_storage_type, device=dev)
+                dtype=icfg.float_storage_type, device=dev)
 
         self.values = torch.zeros(self.dones.shape,
-            dtype=float_storage_type, device=cpu_dev)
+            dtype=icfg.float_storage_type, device=cpu_dev)
 
         self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
-            dtype=float_storage_type, device=cpu_dev)
+            dtype=icfg.float_storage_type, device=cpu_dev)
 
         self.values_gather = torch.zeros(
             self.values.shape[2:],
-            dtype=float_storage_type, device=dev)
+            dtype=icfg.float_storage_type, device=dev)
 
         self.bootstrap_values_gather = torch.zeros(
             self.bootstrap_values.shape,
-            dtype=float_storage_type, device=dev)
+            dtype=icfg.float_storage_type, device=dev)
 
         self.values_out = torch.zeros(sim.rewards.shape,
             dtype=amp.compute_dtype, device=cpu_dev)
-
-        self.log_probs_out = torch.zeros(self.actions_out.shape,
-            dtype=float_storage_type, device=dev)
 
         if self.is_cpu_sim:
             self.actions_out = torch.zeros(sim.actions.shape,
@@ -142,13 +138,16 @@ class RolloutManager:
         else:
             self.actions_out = sim.actions
 
+        self.log_probs_out = torch.zeros(self.actions_out.shape,
+            dtype=icfg.float_storage_type, device=dev)
+
         self.obs = []
         self.obs_in = []
         self.obs_gather = []
 
         for obs_tensor in sim.obs:
             self.obs.append(torch.zeros(
-                (num_bptt_chunks, num_bptt_steps,
+                (self.num_bptt_chunks, self.num_bptt_steps,
                  icfg.num_train_agents, *obs_tensor.shape[1:]),
                 dtype=obs_tensor.dtype, device=cpu_dev))
 
@@ -177,8 +176,9 @@ class RolloutManager:
             self.rnn_end_states.append(rnn_end_state)
             self.rnn_alt_states.append(rnn_alt_state)
 
-            bptt_starts_shape = (num_bptt_chunks, *rnn_state_shape[0:2], icfg.num_train_agents,
-                                 rnn_state_shape[2])
+            bptt_starts_shape = (
+                self.num_bptt_chunks, *rnn_state_shape[0:2],
+                icfg.num_train_agents, rnn_state_shape[2])
 
             rnn_start_state = torch.zeros(
                 bptt_starts_shape, dtype=amp.compute_dtype, device=dev)
@@ -192,11 +192,12 @@ class RolloutManager:
     def collect(
             self,
             sim : SimInterface,
-            ac_functional,
-            policies : List[ActorCritic],
+            ac_functional : Callable,
+            policies : List[PolicyLearningState],
         ):
 
-        policy_params, policy_buffers = stack_module_state(policies)
+        policy_params, policy_buffers = stack_module_state(
+            [ state.policy for state in policies ])
 
         def fpolicy_rollout(policy_idx, *args):
             unsqueezed = [a.unsqueeze(dim=0) for a in args]
@@ -215,7 +216,7 @@ class RolloutManager:
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
 
-        for bptt_chunk in range(0, self.actions.shape[0]):
+        for bptt_chunk in range(self.num_bptt_chunks):
             with profile("Cache RNN state"):
                 # Cache starting RNN state for this chunk
                 for start_state, end_state in zip(
@@ -223,7 +224,7 @@ class RolloutManager:
                     torch.index_select(end_state, 2,
                         self.gather_indices, out=start_state[bptt_chunk])
 
-            for slot in range(0, self.actions.shape[1]):
+            for slot in range(self.num_bptt_steps):
                 with profile('Policy Infer', gpu=True):
                     if self.is_cpu_sim:
                         # Copy observations to GPU
@@ -249,7 +250,7 @@ class RolloutManager:
                     rnn_states_cur_in, rnn_states_cur_out = \
                         rnn_states_cur_out, rnn_states_cur_in
 
-                with profile('Pre Step Rollout Store')
+                with profile('Pre Step Rollout Store'):
                     cur_obs_store = [obs[bptt_chunk, slot] for obs in self.obs]
                     cur_actions_store = self.actions[bptt_chunk, slot]
                     cur_log_probs_store = self.log_probs[bptt_chunk, slot]

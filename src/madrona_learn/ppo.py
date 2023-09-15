@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Callable
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -10,12 +10,13 @@ from .cfg import AlgoConfig, TrainConfig, SimInterface
 from .moving_avg import EMANormalizer
 from .rollouts import RolloutManager, Rollouts
 from .profile import profile
-from .training_state import PolicyLearningState
+from .training_state import HyperParams, PolicyLearningState
 
 from .algo_common import (
-        MiniBatch, UpdateResult, InternalConfig,
+        MiniBatch, UpdateResult,
         compute_advantages, compute_action_scores, gather_minibatch
     )
+from .utils import InternalConfig
 
 __all__ = [ "PPOConfig" ]
 
@@ -41,7 +42,7 @@ class PPOConfig(AlgoConfig):
 
 
 @dataclass
-class PPOHyperParameters(HyperParameters):
+class PPOHyperParams(HyperParams):
     clip_coef: float
     value_loss_coef: float
     entropy_coef: float
@@ -134,20 +135,22 @@ def _ppo_update(cfg : TrainConfig,
     return stats
 
 
-def _ppo(cfg : TrainConfig,
-         icfg : InternalConfig,
-         sim : SimInterface,
-         rollout_mgr : RolloutManager,
-         advantages : torch.Tensor,
-         policy_states : List[PolicyLearningState],
-        ):
+def _ppo(
+        cfg : TrainConfig,
+        icfg : InternalConfig,
+        sim : SimInterface,
+        rollout_mgr : RolloutManager,
+        advantages : torch.Tensor,
+        ac_functional : Callable,
+        policy_states : List[PolicyLearningState],
+    ):
     with torch.no_grad():
         for state in policy_states:
             state.policy.eval()
             state.value_normalizer.eval()
 
         with profile('Collect Rollouts'):
-            rollouts = rollout_mgr.collect(sim, policy_states)
+            rollouts = rollout_mgr.collect(sim, ac_functional, policy_states)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
@@ -221,19 +224,21 @@ class PPO:
              icfg.num_bptt_steps,
              icfg.num_train_agents,
              1),
-            dtype=float_storage_type, device=dev)
+            dtype=icfg.float_storage_type, device=dev)
 
-    def __call__(self,
-                 cfg: TrainConfig,
-                 icfg: InternalConfig
-                 sim : SimInterface,
-                 rollout_mgr : RolloutManager,
-                 advantages : torch.Tensor,
-                 policy_states : List[PolicyLearningState],
-                ):
+    def __call__(
+            self,
+            cfg: TrainConfig,
+            icfg: InternalConfig,
+            sim : SimInterface,
+            rollout_mgr : RolloutManager,
+            ac_functional : Callable,
+            policy_states : List[PolicyLearningState],
+        ):
         return _ppo(cfg,
                     icfg,
                     sim,
                     rollout_mgr,
                     self.advantages,
+                    ac_functional,
                     policy_states)

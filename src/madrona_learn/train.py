@@ -18,6 +18,7 @@ from .amp import amp
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 from .training_state import PolicyLearningState, TrainingState
+from .utils import InternalConfig
 
 
 def _update_loop(update_iter_fn : Callable,
@@ -27,6 +28,7 @@ def _update_loop(update_iter_fn : Callable,
                  icfg : InternalConfig,
                  sim : SimInterface,
                  rollout_mgr : RolloutManager,
+                 ac_functional : Callable,
                  training_state : TrainingState,
                  start_update_idx : int):
     for update_idx in range(start_update_idx, cfg.num_updates):
@@ -38,7 +40,7 @@ def _update_loop(update_iter_fn : Callable,
                 icfg,
                 sim,
                 rollout_mgr,
-                advantages,
+                ac_functional,
                 training_state.policy_states,
             )
 
@@ -54,15 +56,21 @@ def _update_loop(update_iter_fn : Callable,
 
 def _setup_new_policy(dev, policy_constructor, base_lr, value_norm_decay):
     policy = policy_constructor().to(dev)
-    optimizer = optim.Adam(policy.parameters(), lr=cfg.lr)
+    optimizer = optim.Adam(policy.parameters(), lr=base_lr)
 
     if amp.enabled and dev.type == 'cuda':
         scaler = torch.cuda.amp.GradScaler()
     else:
         scaler = None
 
-    value_normalizer = EMANormalizer(cfg.value_normalizer_decay,
-                                     disable=not cfg.normalize_values)
+    if value_norm_decay == None:
+        value_norm_decay = 1.0
+        value_norm_disable = True
+    else:
+        value_norm_disable = False
+
+    value_normalizer = EMANormalizer(
+        value_norm_decay, disable=value_norm_disable)
     value_normalizer = value_normalizer.to(dev)
 
     return PolicyLearningState(
@@ -83,13 +91,15 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
     torch.backends.cudnn.allow_tf32 = True
     amp.init(dev, cfg.mixed_precision)
 
+    meta_policy = policy_constructor().to('meta')
+
     training_state = TrainingState([
-            _setup_new_policy(dev,
-                              policy_constructor,
-                              cfg.lr,
-                              cfg.value_normalizer_decay,
-                             )
-            for _ in range(cfg.pbt_ensemble_size)
+            _setup_new_policy(
+                dev,
+                policy_constructor,
+                cfg.lr,
+                cfg.value_normalizer_decay if cfg.normalize_values else None,
+            ) for _ in range(cfg.pbt_ensemble_size)
         ]
     )
 
@@ -100,10 +110,9 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
 
     policy_recurrent_cfg = training_state.policy_states[0].policy.recurrent_cfg
 
-    rollout_mgr = RolloutManager(dev, sim, cfg.steps_per_update,
-        cfg.num_bptt_chunks, policy_recurrent_cfg)
+    rollout_mgr = RolloutManager(dev, sim, cfg, icfg, policy_recurrent_cfg)
 
-    update_iter_fn = cfg.algo.setup(dev, cfg)
+    update_iter_fn = cfg.algo.setup(dev, cfg, icfg)
 
     if 'MADRONA_LEARN_COMPILE' in env_vars and \
             env_vars['MADRONA_LEARN_COMPILE'] == '1':
@@ -132,6 +141,7 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
         icfg=icfg,
         sim=sim,
         rollout_mgr=rollout_mgr,
+        ac_functional=meta_policy,
         training_state=training_state,
         start_update_idx=start_update_idx,
     )
