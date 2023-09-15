@@ -236,7 +236,7 @@ class RolloutManager:
                     with amp.enable():
                         torch.vmap(fpolicy_rollout,
                                    in_dims=self.vmap_in_dims_rollout)(
-                            sim.policy_assignments,
+                            self.policy_assignments,
                             self.actions_out,
                             self.log_probs_out,
                             self.values_out,
@@ -328,7 +328,7 @@ class RolloutManager:
             # FIXME: this only needs to call the trained policy critics,
             # would eliminate second gather
             torch.vmap(fpolicy_critic, in_dims=self.vmap_in_dims_critic)(
-                       sim.policy_assignments,
+                       self.policy_assignments,
                        self.values_out,
                        None,
                        self.rnn_end_states,
