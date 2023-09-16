@@ -42,26 +42,30 @@ class RolloutManager:
         self.num_bptt_chunks = cfg.num_bptt_chunks
         self.num_bptt_steps = icfg.num_bptt_steps
 
-        elems_per_train_policy = \
-            icfg.rollout_batch_size // cfg.pbt_ensemble_size
+        agents_per_world = cfg.num_teams * cfg.team_size
 
         gather_indices_tmp = []
-        for i in range(icfg.num_train_agents):
-            policy_idx = i // cfg.pbt_ensemble_size
-            policy_offset = i % cfg.pbt_ensemble_size
-            policy_base = elems_per_train_policy * policy_idx
-            gather_indices_tmp.append(policy_base + policy_offset)
+        for i in range(cfg.num_worlds):
+            world_base = agents_per_world * i
+            for j in range(cfg.team_size):
+                gather_indices_tmp.append(world_base + j)
 
         self.gather_indices = torch.tensor(gather_indices_tmp,
             dtype=torch.long, device=dev)
 
+        rnn_vmap = (2,) * len(recurrent_cfg.shapes)
+        obs_vmap = (0,) * len(sim.obs)
+
         self.vmap_in_dims_rollout = (
-                [ 0, 0, 0, 0, 2, 2 ] + [ 0 ] * len(sim.obs)
+                0, 0, 0, 0, rnn_vmap, rnn_vmap, *obs_vmap
             )
 
         self.vmap_in_dims_critic = (
-                [ 0, 0, None, 2 ] + [ 0 ] * len(sim.obs)
+                0, 0, 0, 0, rnn_vmap, rnn_vmap, *obs_vmap
             )
+
+        self.vmap_in_dims_rollout = tuple(self.vmap_in_dims_rollout)
+        self.vmap_in_dims_critic = tuple(self.vmap_in_dims_critic)
 
         if sim.policy_assignments != None:
             assert(sim.policy_assignments.dtype == torch.long)
@@ -200,18 +204,17 @@ class RolloutManager:
             [ state.policy for state in policies ])
 
         def fpolicy_rollout(policy_idx, *args):
-            unsqueezed = [a.unsqueeze(dim=0) for a in args]
+            indexed_params = { k: v.index_select(dim=0, index=policy_idx) for k, v in policy_params.items() }
+            indexed_buffers = { k: v.index_select(dim=0, index=policy_idx) for k, v in policy_buffers.items() }
 
             return functional_call(ac_functional,
-                (policy_params[policy_idx], policy_buffers[policy_idx]),
-                ('rollout', *unsqueezed))
+                (indexed_params, indexed_buffers),
+                ('rollout', *args))
 
         def fpolicy_critic(policy_idx, *args):
-            unsqueezed = [a.unsqueeze(dim=0) for a in args]
-
             return functional_call(ac_functional,
                 (policy_params[policy_idx], policy_buffers[policy_idx]),
-                ('critic', *unsqueezed))
+                ('critic', *args))
 
         rnn_states_cur_in = self.rnn_end_states
         rnn_states_cur_out = self.rnn_alt_states
@@ -223,6 +226,8 @@ class RolloutManager:
                         self.rnn_start_states, rnn_states_cur_in):
                     torch.index_select(end_state, 2,
                         self.gather_indices, out=start_state[bptt_chunk])
+
+                    torch.cuda.synchronize()
 
             for slot in range(self.num_bptt_steps):
                 with profile('Policy Infer', gpu=True):
@@ -237,13 +242,13 @@ class RolloutManager:
                     with amp.enable():
                         torch.vmap(fpolicy_rollout,
                                    in_dims=self.vmap_in_dims_rollout)(
-                            self.policy_assignments,
-                            self.actions_out,
-                            self.log_probs_out,
-                            self.values_out,
-                            rnn_states_cur_out,
-                            rnn_states_cur_in,
-                            *self.obs_in,
+                            self.policy_assignments.squeeze(dim=1),
+                            self.actions_out.unsqueeze(dim=1),
+                            self.log_probs_out.unsqueeze(dim=1),
+                            self.values_out.unsqueeze(dim=1),
+                            tuple(r.unsqueeze(dim=3) for r in rnn_states_cur_out),
+                            tuple(r.unsqueeze(dim=3) for r in rnn_states_cur_in),
+                            *[o.unsqueeze(dim=1) for o in self.obs_in],
                         )
 
 
