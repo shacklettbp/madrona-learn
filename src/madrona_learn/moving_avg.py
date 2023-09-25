@@ -1,102 +1,93 @@
-import torch
-import torch.nn as nn
-
-from .amp import amp
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
 
 # Exponential Moving Average mean and variance estimator for
 # values and observations
 class EMANormalizer(nn.Module):
-    def __init__(self, decay, shape=[], eps=1e-5, disable=False):
-        super().__init__()
+    decay : jnp.float32
+    eps : jnp.float32 = 1e-5
+    disable : bool = False
 
-        self.disable = disable
-        if disable:
-            return
+    def _update_moving_avg(
+        self,
+        x,
+        input_dtype,
+        mu,
+        inv_sigma,
+        sigma,
+        mu_biased,
+        sigma_sq_biased,
+        N,
+    ):
+        one_minus_decay = jnp.float32(1) - self.decay
 
-        self.eps = eps
+        reduce_dtype = jnp.promote_types(input_dtype, jnp.float32)
+        x_f32 = jnp.asarray(x, reduce_dtype)
 
-        # Current parameter estimates
-        self.register_buffer("mu", torch.zeros(shape, dtype=torch.float32))
-        self.register_buffer("inv_sigma", torch.zeros(shape, dtype=torch.float32))
-        self.register_buffer("sigma", torch.zeros(shape, dtype=torch.float32))
+        N.value = N.value + 1
+        bias_correction = -jnp.expm1(N.value * jnp.log(self.decay))
 
-        # Intermediate values used to compute the moving average
-        # decay and one_minus_decay don't strictly need to be tensors, but it's
-        # critically important for floating point precision that
-        # one_minus_decay is computed in fp32 rather than fp64 to 
-        # match the bias_correction computation below
-        self.register_buffer("decay",
-                             torch.tensor(decay, dtype=torch.float32))
-        self.register_buffer("one_minus_decay", 1 - self.decay)
+        mu_biased.value = (mu_biased.value * self.decay +
+            x_f32.mean() * one_minus_decay)
 
-        self.register_buffer("mu_biased",
-                             torch.zeros(shape, dtype=torch.float32))
-        self.register_buffer("sigma_sq_biased",
-                             torch.zeros(shape, dtype=torch.float32))
-        self.register_buffer("N",
-                             torch.zeros([], dtype=torch.int64))
+        new_mu = mu_biased.value / bias_correction
 
-        nn.init.constant_(self.mu , 0)
-        nn.init.constant_(self.inv_sigma, 0)
-        nn.init.constant_(self.sigma, 0)
+        # prev_mu needs to be unbiased (bias_correction only accounts
+        # for the initial EMA with 0), since otherwise variance would
+        # be off by a squared factor.
+        # On the first iteration, simply treat x's variance as the 
+        # full estimate of variance
+        if self.is_initializing():
+            prev_mu = new_mu
+        else:
+            prev_mu = self.mu
 
-        nn.init.constant_(self.mu_biased, 0)
-        nn.init.constant_(self.sigma_sq_biased, 0)
-        nn.init.constant_(self.N, 0)
+        sigma_sq_new = torch.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
+        sigma_sq_biased.value = (sigma_sq_biased * self.decay +
+            sigma_sq_new * one_minus_decay)
 
-    def forward(self, x):
+        sigma_sq = sigma_sq_biased.value / bias_correction
+
+        # Write out new unbiased params
+        mu.value = new_mu
+        inv_sigma.value = lax.rsqrt(lax.max(sigma_sq, self.eps))
+        sigma.value = jnp.reciprocal(inv_sigma.value)
+
+    @nn.compact
+    def __call__(self, mode, x, train):
         if self.disable:
             return x 
 
-        with amp.disable():
-            if self.training:
-                x_f32 = x.to(dtype=torch.float32)
+        input_dtype = jnp.result_type(x)
+        dim = x.shape[-1]
 
-                self.N.add_(1)
-                bias_correction = -torch.expm1(self.N * torch.log(self.decay))
+        # Current parameter estimates
+        mu = self.variable("batch_stats", "mu",
+            lambda: jnp.zeros((dim,), jnp.float32))
+        inv_sigma = self.variable("batch_stats", "inv_sigma", 
+            lambda: jnp.zeros((dim,), jnp.float32))
+        sigma = self.variable("batch_stats", "sigma",
+            lambda: jnp.zeros((dim,), jnp.float32))
 
-                self.mu_biased.mul_(self.decay).addcmul_(
-                    x_f32.mean(),
-                    self.one_minus_decay)
+        # Intermediate values used to compute the moving average
+        mu_biased = self.variable("batch_stats", "mu_biased",
+            lambda: jnp.zeros((dim,), jnp.float32))
+        sigma_sq_biased = self.variable("batch_stats", "sigma_sq_biased",
+            lambda: jnp.zeros((dim,), jnp.float32))
 
-                new_mu = self.mu_biased / bias_correction
+        N = self.variable("batch_stats", "N",
+            lambda: jnp.zeros((), jnp.float32))
 
-                # prev_mu needs to be unbiased (bias_correction only accounts
-                # for the initial EMA with 0), since otherwise variance would
-                # be off by a squared factor.
-                # On the first iteration, simply treat x's variance as the 
-                # full estimate of variance
-                if self.N == 1:
-                    prev_mu = new_mu
-                else:
-                    prev_mu = self.mu
-
-                sigma_sq_new = torch.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
-
-                self.sigma_sq_biased.mul_(self.decay).addcmul_(
-                    sigma_sq_new,
-                    self.one_minus_decay)
-
-                sigma_sq = self.sigma_sq_biased / bias_correction
-
-                # Write out new unbiased params
-                self.mu = new_mu
-                self.inv_sigma = torch.rsqrt(torch.clamp(sigma_sq, min=self.eps))
-                self.sigma = torch.reciprocal(self.inv_sigma)
-
-            return torch.addcmul(
-                -self.mu * self.inv_sigma,
-                x,
-                self.inv_sigma,
-            ).to(dtype=x.dtype)
-
-    def invert(self, normalized_x):
-        if self.disable:
-            return normalized_x
-
-        with amp.disable():
-            return torch.addcmul(
-                self.mu,
-                normalized_x.to(dtype=torch.float32),
-                self.sigma,
-            ).to(dtype=normalized_x.dtype)
+        if mode == 'normalize':
+            if train:
+                self._update_moving_avg(self, x, input_dtype, mu, inv_sigma,
+                    sigma, mu_biased, sigma_sq_biased, N)
+            return ((x - jnp.asarray(mu.value, input_dtype)) *
+                    jnp.asarray(inv_sigma.value, input_dtype))
+        elif mode == 'invert':
+            return (x * jnp.asarray(sigma.value, input_dtype) +
+                    jnp.asarray(mu.value, input_dtype))
+        else:
+            raise Exception("Invalid mode")

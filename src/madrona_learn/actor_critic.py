@@ -1,6 +1,8 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+
 from dataclasses import dataclass
 from .action import DiscreteActionDistributions
 from .profile import profile

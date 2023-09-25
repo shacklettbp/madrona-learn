@@ -1,35 +1,39 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
 
 from .action import DiscreteActionDistributions
 from .actor_critic import ActorCritic, DiscreteActor, Critic
+from .amp import amp
 
 class MLP(nn.Module):
-    def __init__(self, input_dim, num_channels, num_layers):
-        super().__init__()
+    num_channels : int
+    num_layers : int
 
-        layers = [
-            nn.Linear(input_dim, num_channels),
-            nn.LayerNorm(num_channels),
-            nn.ReLU(),
-        ]
-        for i in range(num_layers - 1):
-            layers.append(nn.Linear(num_channels, num_channels))
-            layers.append(nn.LayerNorm(num_channels))
-            layers.append(nn.ReLU())
+    #    self.net = nn.Sequential(*layers)
 
-        self.net = nn.Sequential(*layers)
+    #    for layer in self.net:
+    #        if isinstance(layer, nn.Linear):
+    #            nn.init.kaiming_normal_(
+    #                layer.weight, nn.init.calculate_gain("relu"))
+    #            if layer.bias is not None:
+    #                nn.init.constant_(layer.bias, val=0)
 
-        for layer in self.net:
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(
-                    layer.weight, nn.init.calculate_gain("relu"))
-                if layer.bias is not None:
-                    nn.init.constant_(layer.bias, val=0)
+    #def forward(self, inputs):
+    #    return self.net(inputs)
 
-    def forward(self, inputs):
-        return self.net(inputs)
+    @nn.compact
+    def __call__(self, inputs):
+        x = inputs
+
+        for i in range(self.num_layers):
+            x = nn.Dense(self.num_channels, use_bias=True,
+                kernel_init=jax.nn.initializers.he_normal())(x)
+            x = nn.LayerNorm()(x)
+            x = nn.relu(x)
+
+        return x
 
 class LinearLayerDiscreteActor(DiscreteActor):
     def __init__(self, actions_num_buckets, in_channels):
