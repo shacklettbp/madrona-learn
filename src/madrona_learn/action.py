@@ -1,110 +1,79 @@
 import jax
+import jax.nn
 from jax import lax, random, numpy as jnp
 
 from dataclasses import dataclass
-
 from typing import List
-
-class DiscreteActionDistributions:
-    def __init__(self, actions_num_buckets, logits = None):
-        self.actions_num_buckets = actions_num_buckets
-
-        self.dists = []
-        cur_bucket_offset = 0
-
-        for num_buckets in self.actions_num_buckets:
-            self.dists.append(Categorical(logits = logits[
-                :, cur_bucket_offset:cur_bucket_offset + num_buckets],
-                validate_args=False))
-            cur_bucket_offset += num_buckets
-
-    def best(self, out):
-        actions = [dist.probs.argmax(dim=-1) for dist in self.dists]
-        torch.stack(actions, dim=1, out=out)
-
-    def sample(self, actions_out, log_probs_out):
-        actions = [dist.sample() for dist in self.dists]
-        log_probs = [dist.log_prob(action) for dist, action in zip(self.dists, actions)]
-
-        torch.stack(actions, dim=1, out=actions_out)
-        torch.stack(log_probs, dim=1, out=log_probs_out)
-
-    def action_stats(self, actions):
-        log_probs = []
-        entropies = []
-        for i, dist in enumerate(self.dists):
-            log_probs.append(dist.log_prob(actions[:, i]))
-            entropies.append(dist.entropy())
-
-        return torch.stack(log_probs, dim=1), torch.stack(entropies, dim=1)
-
-    def probs(self):
-        return [dist.probs for dist in self.dists]
 
 @dataclass
 class DiscreteActionDistributions:
     actions_num_buckets : List[int]
+    all_logits: jax.Array
 
-    def __init__(self, actions_num_buckets, logits = None):
-        self.actions_num_buckets = actions_num_buckets
-
-        self.dists = []
-        cur_bucket_offset = 0
-
-        for num_buckets in self.actions_num_buckets:
-            self.dists.append(Categorical(logits = logits[
-                :, cur_bucket_offset:cur_bucket_offset + num_buckets],
-                validate_args=False))
-            cur_bucket_offset += num_buckets
-
-    def _iter_dists(self, logits, cb):
+    def _iter_dists(self, cb):
         cur_bucket_offset = 0
         for num_buckets in self.actions_num_buckets:
-            cb(logits[:, cur_bucket_offset:cur_bucket_offset + num_buckets])
+            cb(self.all_logits[
+                :, cur_bucket_offset:cur_bucket_offset + num_buckets])
 
-    def sample(self, prng_key, all_logits):
-        actions = []
-        log_probs = []
+    def _compute_log_probs(self, logits, actions):
+        action_logits = logits[..., actions]
+        return (
+            action_logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True))
 
+    def sample(self, prng_key):
+        all_actions = []
+        all_log_probs = []
 
-        def sample_action(logits):
+        def sample_actions(logits):
             prng_key, rnd = random.split(prng_key)
 
-            action = random.categorical(prng_key, logits)
+            actions = random.categorical(prng_key, logits)
+            action_log_probs = self._compute_log_probs(logits, actions)
 
-            actions.append(action)
-            log_probs.append(
+            all_actions.append(actions)
+            all_log_probs.append(action_log_probs)
 
-        self.iter_dists(self, all_logits, sample_action)
+        self.iter_dists(sample_actions)
 
-        actions = jnp.stack(actions, axis=1)
-        log_probs = jnp.stack(log_probs, axis=1)
+        return (jnp.stack(all_actions, axis=1),
+                jnp.stack(all_log_probs, axis=1))
 
-        return actions, log_probs
-
-    def best(self, all_logits):
-        actions = []
+    def best(self):
+        all_actions = []
 
         def best_action(logits):
-            actions.append(jnp.argmax(logits))
+            all_actions.append(jnp.argmax(logits))
 
-        return jnp.stack(actions, axis=1)
+        self.iter_dists(best_action)
 
-    def sample(self, actions_out, log_probs_out):
-        actions = [dist.sample() for dist in self.dists]
-        log_probs = [dist.log_prob(action) for dist, action in zip(self.dists, actions)]
-
-        torch.stack(actions, dim=1, out=actions_out)
-        torch.stack(log_probs, dim=1, out=log_probs_out)
+        return jnp.stack(all_actions, axis=1)
 
     def action_stats(self, actions):
-        log_probs = []
-        entropies = []
-        for i, dist in enumerate(self.dists):
-            log_probs.append(dist.log_prob(actions[:, i]))
-            entropies.append(dist.entropy())
+        all_log_probs = []
+        all_entropies = []
 
-        return torch.stack(log_probs, dim=1), torch.stack(entropies, dim=1)
+        def compute_stats(logits):
+            log_probs = self._compute_log_probs(logits, actions)
+            p_logp = jnp.exp(log_probs) * log_probs
+            entropies = -p_logp.sum(axis=-1)
+
+            all_log_probs.append(log_probs)
+            all_entropies.append(entropies)
+
+        self.iter_dists(compute_stats)
+
+        return (jnp.stack(all_log_probs, axis=1),
+                jnp.stack(all_entropies, axis=1))
 
     def probs(self):
-        return [dist.probs for dist in self.dists]
+        all_probs = []
+
+        def compute_probs(logits):
+            log_probs = self._compute_log_probs(logits, actions)
+            probs = jnp.exp(log_probs)
+            all_probs.append(probs)
+
+        self.iter_dists(compute_probs)
+
+        return all_probs

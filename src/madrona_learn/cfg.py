@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-import torch
+import jax
+from jax import lax, random, numpy as jnp
 
 class AlgoConfig:
     def name(self):
@@ -45,8 +46,8 @@ class TrainConfig:
 @dataclass(frozen=True)
 class SimInterface:
     step: Callable
-    obs: List[torch.Tensor]
-    actions: torch.Tensor
-    dones: torch.Tensor
-    rewards: torch.Tensor
-    policy_assignments: Optional[torch.Tensor]
+    obs: List[jax.Array]
+    actions: jax.Array
+    dones: jax.Array
+    rewards: jax.Array
+    policy_assignments: Optional[jax.Array]

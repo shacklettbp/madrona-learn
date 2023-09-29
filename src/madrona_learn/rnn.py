@@ -1,12 +1,61 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
 
-from .habitat_rnn import FastLSTM
+__all__ = ["LSTM"]
 
-__all__ = ["LSTM", "FastLSTM"]
+class InterruptableLSTMCell(nn.OptimizedLSTMCell):
 
 class LSTM(nn.Module):
+    hidden_channels: int
+    num_layers: int = 1
+
+    def setup(self):
+        self.cells = [
+            nn.OptimizedLSTMCell(
+                features=hidden_channels,
+                kernel_init=jax.nn.initializers.orthogonal(),
+                recurrent_kernel_init=jax.nn.initializers.orthogonal(),
+                bias_init=jax.nn.initializers.constant(0),
+            ) for i in range(self.num_layers)
+
+    def __call__(self, in_features, cur_hidden):
+        in_features = in_features.view(1, *in_features.shape)
+
+        out, (new_h, new_c) = self.lstm(in_features,
+                                        (cur_hidden[0], cur_hidden[1]))
+
+        new_hidden = torch.stack([new_h, new_c], dim=0)
+
+        return out.view(*out.shape[1:]), new_hidden
+
+    def sequence(self, in_sequences, start_hidden, sequence_breaks):
+        seq_len = in_sequences.shape[0]
+
+        hidden_dim_per_layer = start_hidden.shape[-1]
+
+        zero_hidden = torch.zeros((2, self.num_layers, 1,
+                                   hidden_dim_per_layer),
+                                  device=start_hidden.device,
+                                  dtype=start_hidden.dtype)
+
+        out_sequences = []
+
+        cur_hidden = start_hidden
+        for i in range(seq_len):
+            cur_features = in_sequences[i]
+            cur_breaks = sequence_breaks[i]
+
+            out, new_hidden = self.forward(cur_features, cur_hidden)
+            out_sequences.append(out)
+
+            cur_hidden = torch.where(
+                cur_breaks.bool(), zero_hidden, new_hidden)
+
+        return torch.stack(out_sequences, dim=0)
+
+
     def __init__(self, in_channels, hidden_channels, num_layers=1):
         super().__init__()
 

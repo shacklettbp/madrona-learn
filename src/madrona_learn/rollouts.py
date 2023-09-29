@@ -1,7 +1,8 @@
-import torch
-from torch.func import stack_module_state, functional_call
-import numpy as np
-from time import time
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+
 from dataclasses import dataclass
 from typing import List, Optional, Callable
 from .amp import amp
@@ -13,29 +14,29 @@ from .training_state import PolicyLearningState
 
 @dataclass(frozen = True)
 class Rollouts:
-    obs: List[torch.Tensor]
-    actions: torch.Tensor
-    log_probs: torch.Tensor
-    dones: torch.Tensor
-    rewards: torch.Tensor
-    values: torch.Tensor
-    bootstrap_values: torch.Tensor
-    rnn_start_states: tuple[torch.Tensor, ...]
+    obs: List[jax.Array]
+    actions: jax.Array
+    log_probs: jax.Array
+    dones: jax.Array
+    rewards: jax.Array
+    values: jax.Array
+    bootstrap_values: jax.Array 
+    rnn_start_states: tuple[jax.Array, ...]
 
 
 class RolloutManager:
     def __init__(
             self,
-            dev : torch.device,
+            dev : jax.Device,
             sim : SimInterface,
             cfg : TrainConfig,
             icfg : InternalConfig,
             recurrent_cfg : RecurrentStateConfig,
         ):
-        cpu_dev = torch.device('cpu')
+        cpu_dev = jax.devices('cpu')[0]
 
         self.dev = dev
-        self.is_cpu_sim = sim.obs[0].device == cpu_dev
+        self.is_cpu_sim = sim.obs[0].device() == cpu_dev
 
         assert(sim.actions.shape[0] == icfg.rollout_batch_size)
 
@@ -50,8 +51,7 @@ class RolloutManager:
             for j in range(cfg.team_size):
                 gather_indices_tmp.append(world_base + j)
 
-        self.gather_indices = torch.tensor(gather_indices_tmp,
-            dtype=torch.long, device=dev)
+        self.gather_indices = jnp.array(gather_indices_tmp, dtype=jnp.int32)
 
         rnn_vmap = (2,) * len(recurrent_cfg.shapes)
         obs_vmap = (0,) * len(sim.obs)
@@ -68,12 +68,12 @@ class RolloutManager:
         self.vmap_in_dims_critic = tuple(self.vmap_in_dims_critic)
 
         if sim.policy_assignments != None:
-            assert(sim.policy_assignments.dtype == torch.long)
+            assert(sim.policy_assignments.dtype == jnp.int32)
 
             if self.is_cpu_sim:
-                self.policy_assignments = torch.zeros(
+                self.policy_assignments = jnp.zeros(
                     (icfg.rollout_batch_size, 1),
-                    dtype=torch.long, device=dev)
+                    dtype=jnp.int32)
             else:
                 self.policy_assignments = sim.policy_assignments
         else:
@@ -82,33 +82,49 @@ class RolloutManager:
                 policy_idx = i // elems_per_train_policy
                 policy_assignments_static.append([policy_idx])
 
-            self.policy_assignments = torch.tensor(policy_assignments_static,
-                dtype=torch.long, device=dev)
+            self.policy_assignments = jnp.array(
+                policy_assignments_static, dtype=jnp.int32)
 
-        self.actions = torch.zeros(
-            (self.num_bptt_chunks, self.num_bptt_steps,
-             icfg.num_train_agents, *sim.actions.shape[1:]),
-            dtype=sim.actions.dtype, device=cpu_dev)
+        with jax.default_device(cpu_dev):
+            self.actions = jnp.zeros(
+                (self.num_bptt_chunks, self.num_bptt_steps,
+                 icfg.num_train_agents, *sim.actions.shape[1:]),
+                dtype=sim.actions.dtype)
 
+            self.log_probs = torch.zeros(
+                self.actions.shape,
+                dtype=icfg.float_storage_type)
+
+            self.dones = torch.zeros(
+                (self.num_bptt_chunks, self.num_bptt_steps,
+                 icfg.num_train_agents, 1),
+                dtype=torch.bool)
+
+            self.rewards = torch.zeros(self.dones.shape,
+                dtype=icfg.float_storage_type)
+
+            self.values = torch.zeros(self.dones.shape,
+                dtype=icfg.float_storage_type)
+
+            self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
+                dtype=icfg.float_storage_type)
+
+        # Gather 
         self.actions_gather = torch.zeros(
             self.actions.shape[2:],
             dtype=sim.actions.dtype, device=dev)
-
-        self.log_probs = torch.zeros(
-            self.actions.shape,
-            dtype=icfg.float_storage_type, device=cpu_dev)
 
         self.log_probs_gather = torch.zeros(
             self.actions_gather.shape,
             dtype=icfg.float_storage_type, device=dev)
 
-        self.dones = torch.zeros(
-            (self.num_bptt_chunks, self.num_bptt_steps,
-             icfg.num_train_agents, 1),
-            dtype=torch.bool, device=cpu_dev)
+        self.values_gather = torch.zeros(
+            self.values.shape[2:],
+            dtype=icfg.float_storage_type, device=dev)
 
-        self.rewards = torch.zeros(self.dones.shape,
-            dtype=icfg.float_storage_type, device=cpu_dev)
+        self.bootstrap_values_gather = torch.zeros(
+            self.bootstrap_values.shape,
+            dtype=icfg.float_storage_type, device=dev)
 
         if not self.is_cpu_sim:
             self.dones_gather = torch.zeros(
@@ -118,20 +134,6 @@ class RolloutManager:
             self.rewards_gather = torch.zeros(
                 self.dones_gather.shape,
                 dtype=icfg.float_storage_type, device=dev)
-
-        self.values = torch.zeros(self.dones.shape,
-            dtype=icfg.float_storage_type, device=cpu_dev)
-
-        self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
-            dtype=icfg.float_storage_type, device=cpu_dev)
-
-        self.values_gather = torch.zeros(
-            self.values.shape[2:],
-            dtype=icfg.float_storage_type, device=dev)
-
-        self.bootstrap_values_gather = torch.zeros(
-            self.bootstrap_values.shape,
-            dtype=icfg.float_storage_type, device=dev)
 
         self.values_out = torch.zeros(sim.rewards.shape,
             dtype=amp.compute_dtype, device=cpu_dev)

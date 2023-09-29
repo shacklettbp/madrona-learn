@@ -2,6 +2,7 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from typing import List
 
 from .action import DiscreteActionDistributions
 from .actor_critic import ActorCritic, DiscreteActor, Critic
@@ -35,19 +36,22 @@ class MLP(nn.Module):
 
         return x
 
-class LinearLayerDiscreteActor(DiscreteActor):
-    def __init__(self, actions_num_buckets, in_channels):
-        total_action_dim = sum(actions_num_buckets)
-        impl = nn.Linear(in_channels, total_action_dim)
+class DenseLayerDiscreteActor(nn.Module):
+    actions_num_buckets : List[int]
 
-        super().__init__(actions_num_buckets, impl)
+    def setup(self):
+        total_action_dim = sum(self.actions_num_buckets)
+        self.impl = nn.Dense(total_action_dim, use_bias=True,
+            kernel_init=jax.nn.initializers.orthogonal(scale=0.01),
+            bias_init=jax.nn.initializers.constant(0))
 
-        nn.init.orthogonal_(self.impl.weight, gain=0.01)
-        nn.init.constant_(self.impl.bias, 0)
+    def __call__(self, features):
+        logits = self.impl(features)
+        return DiscreteActionDistributions(self.actions_num_buckets, logits)
 
-class LinearLayerCritic(Critic):
-    def __init__(self, in_channels):
-        super().__init__(nn.Linear(in_channels, 1))
-
-        nn.init.orthogonal_(self.impl.weight)
-        nn.init.constant_(self.impl.bias, 0)
+class DenseLayerCritic(nn.Module):
+    @nn.compact
+    def __call__(self, features):
+        return nn.Dense(1, use_bias=True,
+            kernel_init=jax.nn.initializers.orthogonal(),
+            bias_init=jax.nn.initialzers.constant(0))(features)
