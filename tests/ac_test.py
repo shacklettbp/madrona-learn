@@ -16,6 +16,9 @@ from madrona_learn.actor_critic import *
 from madrona_learn.models import *
 from madrona_learn.train_state import PolicyTrainState, HyperParams
 
+num_worlds = 16384
+num_iters = 10000
+
 def assert_valid_input(tensor):
     checkify.check(jnp.isnan(tensor).any() == False, "NaN!")
     checkify.check(jnp.isinf(tensor).any() == False, "Inf!")
@@ -144,7 +147,7 @@ def make_policy(num_obs_features,
 
 def fake_rollout_loop(state, prng_key, rnn_states, *obs):
     def iter(i, v):
-        nonlocal prng_key, rnn_states
+        prng_key, rnn_states = v
 
         prng_key, step_key = random.split(prng_key)
 
@@ -158,13 +161,15 @@ def fake_rollout_loop(state, prng_key, rnn_states, *obs):
             *obs,
         )
 
-    lax.fori_loop(0, 100, iter, None)
+        return prng_key, rnn_states
+
+    prng_key, rnn_states = lax.fori_loop(
+        0, num_iters, iter, (prng_key, rnn_states))
+
+    return rnn_states
 
 def test():
     policy = make_policy(5, 128, 256, 32)
-
-    num_worlds = 16384
-    num_iters = 1000
 
     prng_key = random.PRNGKey(5)
 
@@ -215,10 +220,12 @@ def test():
 
     start = time()
 
-    err, _ = rollout_loop_fn(state, prng_key, cur_rnn_states, *obs)
+    err, rnn_states = rollout_loop_fn(state, prng_key, cur_rnn_states, *obs)
     err.throw()
 
     end = time()
+
+    print(rnn_states)
     
     print(num_worlds * num_iters / (end - start))
 
