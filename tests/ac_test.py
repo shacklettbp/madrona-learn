@@ -3,13 +3,14 @@ from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
 
+import math
+
+
 from madrona_learn.models import MLP
-from madrona_learn.rnn import LSTM, FastLSTM
+from madrona_learn.rnn import LSTM
 from madrona_learn.moving_avg import EMANormalizer
 from madrona_learn.actor_critic import *
 from madrona_learn.models import *
-
-import math
 
 def assert_valid_input(tensor):
     assert(not jnp.isnan(tensor).any())
@@ -25,7 +26,8 @@ class ProcessObsCommon(nn.Module):
                  opponent_obs,
                  lidar,
                  alive,
-                 opponent_masks):
+                 opponent_masks,
+                 train):
         assert_valid_input(self_obs)
         assert_valid_input(teammate_obs)
         assert_valid_input(opponent_obs)
@@ -33,13 +35,13 @@ class ProcessObsCommon(nn.Module):
         assert_valid_input(alive)
         assert_valid_input(opponent_masks)
 
-        lidar_normalized = EMANormalizer(0.99999)(lidar)
+        lidar_normalized = EMANormalizer(0.99999)('normalize', train, lidar)
 
         lidar_processed = nn.Conv(
                 features=1,
-                kernel_size=self.num_lidar_samples,
-                padding='circular',
-            )(lidar_normalized.unsqueeze(axis=-1))
+                kernel_size=(self.num_lidar_samples,),
+                padding='CIRCULAR',
+            )(jnp.expand_dims(lidar_normalized, axis=-1))
 
         lidar_processed = lax.stop_gradient(lidar_processed.squeeze(axis=-1))
 
@@ -51,7 +53,7 @@ class ActorNet(nn.Module):
     num_mlp_channels: int
 
     @nn.compact
-    def __call__(self, obs_tensors):
+    def __call__(self, obs_tensors, train):
         self_obs, teammate_obs, opponent_obs, lidar_processed, alive, opponent_masks = \
             obs_tensors
         
@@ -64,7 +66,7 @@ class ActorNet(nn.Module):
             alive.reshape(alive.shape[0], -1),
         ], axis=1)
 
-        normalized = EMANormalizer(0.99999)(flattened)
+        normalized = EMANormalizer(0.99999)('normalize', train, flattened)
 
         features = jnp.concatenate([normalized, lidar_processed], axis=1)
         features = lax.stop_gradient(features)
@@ -79,36 +81,37 @@ class CriticNet(nn.Module):
     num_mlp_channels : int
 
     @nn.compact
-    def __call__(self, obs_tensors):
+    def __call__(self, obs_tensors, train):
         self_obs, teammate_obs, opponent_obs, lidar_processed, alive, opponent_masks = \
             obs_tensors
         
-        with torch.no_grad():
-            flattened = torch.cat([
-                self_obs.reshape(self_obs.shape[0], -1),
-                teammate_obs.reshape(teammate_obs.shape[0], -1),
-                opponent_obs.reshape(opponent_obs.shape[0], -1),
-                alive.reshape(alive.shape[0], -1),
-            ], dim=1)
+        flattened = torch.cat([
+            self_obs.reshape(self_obs.shape[0], -1),
+            teammate_obs.reshape(teammate_obs.shape[0], -1),
+            opponent_obs.reshape(opponent_obs.shape[0], -1),
+            alive.reshape(alive.shape[0], -1),
+        ], dim=1)
 
-            normalized = self.normalizer(flattened)
+        normalized = EMANormalizer(0.99999)('normalize', train, flattened)
 
-            features = jnp.concatenate([normalized, lidar_processed], axis=1)
-            features = lax.stop_gradient(features)
+        features = jnp.concatenate([normalized, lidar_processed], axis=1)
+        features = lax.stop_gradient(features)
 
         return MLP(
                 num_channels = self.num_mlp_channels,
                 num_layers = 2,
             )(features)
 
-def make_tdm_policy(num_obs_features, num_channels, num_lidar_samples):
+def make_policy(num_obs_features,
+                num_channels,
+                num_hidden_channels,
+                num_lidar_samples):
     obs_common = ProcessObsCommon(num_lidar_samples)
 
     actor_encoder = RecurrentBackboneEncoder(
         net = ActorNet(num_channels),
         rnn = LSTM(
-            in_channels = num_channels,
-            hidden_channels = num_channels,
+            hidden_channels = num_hidden_channels,
             num_layers = 1,
         ),
     )
@@ -116,8 +119,7 @@ def make_tdm_policy(num_obs_features, num_channels, num_lidar_samples):
     critic_encoder = RecurrentBackboneEncoder(
         net = CriticNet(num_channels),
         rnn = LSTM(
-            in_channels = num_channels,
-            hidden_channels = num_channels,
+            hidden_channels = num_hidden_channels,
             num_layers = 1,
         ),
     )
@@ -136,33 +138,55 @@ def make_tdm_policy(num_obs_features, num_channels, num_lidar_samples):
         critic = DenseLayerCritic(),
     )
 
-def fake_rollout_iter(policy, obs, rnn_states, step_key):
-    actions, log_probs, values, rnn_states = policy.rollout(
-        step_key, rnn_states, *obs)
+def fake_rollout_iter(policy, variables, step_key, rnn_states, obs):
+    actions, log_probs, values, rnn_states = policy.apply(variables,
+        step_key, rnn_states, *obs,
+        method='rollout')
 
     return rnn_states
 
-def fake_rollout_loop(policy, obs, rnn_states, prng_key):
+def fake_rollout_loop(policy, variables, prng_key, rnn_states, *obs):
     def iter(i, v):
+        nonlocal prng_key, rnn_states
+
         prng_key, step_key = random.split(prng_key)
-        rnn_states = fake_rollout_iter(policy, obs, rnn_states, step_key)
+        rnn_states = fake_rollout_iter(policy, variables, step_key,
+                                       rnn_states, obs)
 
     lax.fori_loop(0, 100, iter, None)
 
 def test():
-    policy = make_tdm_policy(5, 128, 32)
+    policy = make_policy(5, 128, 256, 32)
 
-    obs_input = jnp.zeros(1024, 5, dtype=jnp.float32)
-
-    cur_rnn_states = []
-    
-    for shape in policy.recurrent_cfg.shapes:
-        cur_rnn_states.append(jnp.zeros(
-            *shape[0:2], actions.shape[0], shape[2], dtype=jnp.float32))
+    num_worlds = 1024
 
     prng_key = random.PRNGKey(5)
 
-    fake_rollout_loop(policy, obs, cur_rnn_states, prng_key)
+    obs = [
+        jnp.zeros((num_worlds, 5), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 2), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 2), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 32), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 1), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 1), dtype=jnp.float32),
+    ]
+
+    dev = jax.devices()[0]
+
+    cur_rnn_states = policy.init_recurrent_state(
+        num_worlds, dev, jnp.float32)
+
+    prng_key, init_key = random.split(prng_key)
+    param_init_key, init_func_key = random.split(init_key)
+
+    variables = policy.init(
+        { 'params': param_init_key },
+        init_func_key,
+        cur_rnn_states,
+        *obs,
+        method='rollout')
+        
+    fake_rollout_loop(policy, variables, prng_key, cur_rnn_states, *obs)
 
 if __name__ == "__main__":
     test()

@@ -1,4 +1,6 @@
-import torch
+import jax
+from jax import lax, random, numpy as jnp
+
 from typing import Optional
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -9,7 +11,7 @@ __all__ = [ "amp" ]
 class AMPState:
     device_type: str
     enabled: bool
-    compute_dtype: torch.dtype
+    compute_dtype: jnp.dtype
 
     def __init__(self):
         pass

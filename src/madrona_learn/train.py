@@ -1,9 +1,8 @@
-import torch
-from torch import nn
-import torch.nn.functional as F
-import torch._dynamo
-from torch import optim
-from torch.func import vmap
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+
 from os import environ as env_vars
 from typing import Callable
 from dataclasses import dataclass

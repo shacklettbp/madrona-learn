@@ -5,7 +5,6 @@ from flax import linen as nn
 from typing import List
 
 from .action import DiscreteActionDistributions
-from .actor_critic import ActorCritic, DiscreteActor, Critic
 from .amp import amp
 
 class MLP(nn.Module):

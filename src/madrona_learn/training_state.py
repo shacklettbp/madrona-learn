@@ -1,4 +1,10 @@
-import torch
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+import flax.training.dynamic_scale
+import optax
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -16,9 +22,9 @@ class HyperParams:
 @dataclass
 class PolicyLearningState:
     policy: ActorCritic
-    optimizer : torch.optim.Optimizer
-    scheduler : Optional[torch.optim.lr_scheduler.LRScheduler]
-    scaler: Optional[torch.cuda.amp.GradScaler]
+    optimizer : optax.GradientTransformation
+    scheduler : Optional[optax.Schedule]
+    scaler: Optional[flax.training.dynamic_scale.DynamicScale]
     value_normalizer: EMANormalizer
 
 

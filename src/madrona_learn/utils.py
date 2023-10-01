@@ -1,4 +1,6 @@
-import torch
+import jax
+from jax import lax, random, numpy as jnp
+
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -14,7 +16,7 @@ class InternalConfig:
     num_train_agents : int
     num_train_seqs : int
     num_bptt_steps : int
-    float_storage_type : torch.dtype
+    float_storage_type : jnp.dtype
 
     def __init__(self, dev, cfg):
         self.rollout_batch_size = \

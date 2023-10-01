@@ -1,3 +1,8 @@
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+
 from dataclasses import dataclass
 from typing import List
 
@@ -7,34 +12,32 @@ from .moving_avg import EMANormalizer
 from .utils import DataclassProtocol
 from .rollouts import Rollouts
 
-import torch
-import torch.nn as nn
 
 @dataclass(frozen = True)
 class MiniBatch:
-    obs: List[torch.Tensor]
-    actions: torch.Tensor
-    log_probs: torch.Tensor
-    dones: torch.Tensor
-    rewards: torch.Tensor
-    values: torch.Tensor
-    advantages: torch.Tensor
-    rnn_start_states: tuple[torch.Tensor, ...]
+    obs: List[jax.Array]
+    actions: jax.Array
+    log_probs: jax.Array
+    dones: jax.Array
+    rewards: jax.Array
+    values: jax.Array
+    advantages: jax.Array
+    rnn_start_states: tuple[jax.Array, ...]
 
 
 @dataclass(frozen = True)
 class UpdateResult:
-    actions : torch.Tensor
-    rewards : torch.Tensor
-    values : torch.Tensor
-    advantages : torch.Tensor
-    bootstrap_values : torch.Tensor
+    actions : jax.Array
+    rewards : jax.Array
+    values : jax.Array
+    advantages : jax.Array
+    bootstrap_values : jax.Array
     algo_stats : DataclassProtocol
 
 
 def compute_advantages(cfg : TrainConfig,
                        value_normalizer : EMANormalizer,
-                       advantages_out : torch.Tensor,
+                       advantages_out : jax.Array,
                        rollouts : Rollouts):
     # This function is going to be operating in fp16 mode completely
     # when mixed precision is enabled since amp.compute_dtype is fp16
@@ -102,9 +105,11 @@ def _mb_slice_rnn(rnn_state, inds):
 
     return reshaped[:, :, inds, :] 
 
-def gather_minibatch(rollouts : Rollouts,
-                      advantages : torch.Tensor,
-                      inds : torch.Tensor):
+def gather_minibatch(
+    rollouts : Rollouts,
+    advantages : jax.Array,
+    inds : jax.Array
+):
     obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
     
     actions_slice = _mb_slice(rollouts.actions, inds)

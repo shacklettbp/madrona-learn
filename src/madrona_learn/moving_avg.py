@@ -10,7 +10,7 @@ class EMANormalizer(nn.Module):
     eps : jnp.float32 = 1e-5
     disable : bool = False
 
-    def _update_moving_avg(
+    def _update_stats(
         self,
         x,
         input_dtype,
@@ -56,7 +56,7 @@ class EMANormalizer(nn.Module):
         sigma.value = jnp.reciprocal(inv_sigma.value)
 
     @nn.compact
-    def __call__(self, mode, x, train):
+    def __call__(self, mode, update_stats, x):
         if self.disable:
             return x 
 
@@ -81,8 +81,8 @@ class EMANormalizer(nn.Module):
             lambda: jnp.zeros((), jnp.float32))
 
         if mode == 'normalize':
-            if train:
-                self._update_moving_avg(self, x, input_dtype, mu, inv_sigma,
+            if update_stats:
+                self._update_stats(self, x, input_dtype, mu, inv_sigma,
                     sigma, mu_biased, sigma_sq_biased, N)
             return ((x - jnp.asarray(mu.value, input_dtype)) *
                     jnp.asarray(inv_sigma.value, input_dtype))

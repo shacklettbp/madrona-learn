@@ -1,8 +1,11 @@
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen as nn
+import optax
+
 from dataclasses import dataclass
 from typing import List, Callable
-import torch
-from torch import nn
-import torch.nn.functional as F
 
 from .actor_critic import ActorCritic
 from .amp import amp
@@ -35,7 +38,7 @@ class PPOConfig(AlgoConfig):
         return "ppo"
 
     def setup(self,
-              dev: torch.device,
+              dev: jax.Device,
               cfg: TrainConfig,
               icfg: InternalConfig):
         return PPO(dev, cfg, icfg)
@@ -62,7 +65,7 @@ class PPOStats:
 def _ppo_update(cfg : TrainConfig,
                 mb : MiniBatch,
                 actor_critic : ActorCritic,
-                optimizer : torch.optim.Optimizer,
+                optimizer : optax.GradientTransformation,
                 value_normalizer : EMANormalizer,
             ):
     with amp.enable():
@@ -140,7 +143,7 @@ def _ppo(
         icfg : InternalConfig,
         sim : SimInterface,
         rollout_mgr : RolloutManager,
-        advantages : torch.Tensor,
+        advantages : jax.Array,
         ac_functional : Callable,
         policy_states : List[PolicyLearningState],
     ):
@@ -209,7 +212,7 @@ def _ensemble_ppo(cfg : TrainConfig,
                   icfg : InternalConfig,
                   sim : SimInterface,
                   rollout_mgr : RolloutManager,
-                  advantages : torch.Tensor,
+                  advantages : jax.Array,
                   policy_states : List[PolicyLearningState],
                  ):
     pass

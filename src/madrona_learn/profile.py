@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from time import time
-import torch
+import jax
 
 __all__ = [ "profile" ]
 
@@ -17,7 +17,7 @@ class DummyGPUEvent:
     def synchronize(self):
         pass
 
-if torch.cuda.is_available():
+if False:
     GPUTimingEvent = torch.cuda.Event
 else:
     GPUTimingEvent = DummyGPUEvent

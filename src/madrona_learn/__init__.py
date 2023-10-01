@@ -3,8 +3,7 @@ from madrona_learn.training_state import TrainingState
 from madrona_learn.cfg import TrainConfig, SimInterface
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
-        ActorCritic, DiscreteActor, Critic,
-        BackboneEncoder, RecurrentBackboneEncoder,
+        ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
         Backbone, BackboneShared, BackboneSeparate,
     )
 from madrona_learn.profile import profile
