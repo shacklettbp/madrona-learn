@@ -17,7 +17,7 @@ from madrona_learn.models import *
 from madrona_learn.train_state import PolicyTrainState, HyperParams
 
 num_worlds = 16384
-num_iters = 10000
+num_iters = 1000
 
 def assert_valid_input(tensor):
     checkify.check(jnp.isnan(tensor).any() == False, "NaN!")
@@ -145,26 +145,29 @@ def make_policy(num_obs_features,
         critic = DenseLayerCritic(),
     )
 
+def fake_rollout_iter(state, i, inputs):
+    prng_key, rnn_states, obs = inputs
+
+    prng_key, step_key = random.split(prng_key)
+
+    _, _, _, rnn_states = state.apply_fn(
+        {
+            'params': state.params,
+            'batch_stats': state.batch_stats,
+        },
+        step_key,
+        rnn_states,
+        *obs,
+        method='rollout',
+    )
+
+    return prng_key, rnn_states, obs
+
 def fake_rollout_loop(state, prng_key, rnn_states, *obs):
-    def iter(i, v):
-        prng_key, rnn_states = v
-
-        prng_key, step_key = random.split(prng_key)
-
-        _, _, _, rnn_states = state.apply_fn(
-            {
-                'params': state.params,
-                'batch_stats': state.batch_stats,
-            },
-            step_key,
-            rnn_states,
-            *obs,
-        )
-
-        return prng_key, rnn_states
-
-    prng_key, rnn_states = lax.fori_loop(
-        0, num_iters, iter, (prng_key, rnn_states))
+    prng_key, rnn_states, _ = lax.fori_loop(
+        0, num_iters,
+        partial(fake_rollout_iter, state),
+        (prng_key, rnn_states, obs))
 
     return rnn_states
 
@@ -204,7 +207,7 @@ def test():
     print(jax.tree_util.tree_map(jnp.shape, batch_stats))
 
     state = PolicyTrainState.create(
-        apply_fn = partial(policy.apply, method='rollout'),
+        apply_fn = policy.apply,
         params = params,
         tx = optax.adam(0.01),
         hyper_params = HyperParams(0, 0, 0),
