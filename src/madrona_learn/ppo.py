@@ -13,7 +13,7 @@ from .cfg import AlgoConfig, TrainConfig, SimInterface
 from .moving_avg import EMANormalizer
 from .rollouts import RolloutManager, Rollouts
 from .profile import profile
-from .training_state import HyperParams, PolicyLearningState
+from .train_state import HyperParams, PolicyTrainState
 
 from .algo_common import (
         MiniBatch, UpdateResult,
@@ -44,7 +44,6 @@ class PPOConfig(AlgoConfig):
         return PPO(dev, cfg, icfg)
 
 
-@dataclass
 class PPOHyperParams(HyperParams):
     clip_coef: float
     value_loss_coef: float
@@ -145,7 +144,7 @@ def _ppo(
         rollout_mgr : RolloutManager,
         advantages : jax.Array,
         ac_functional : Callable,
-        policy_states : List[PolicyLearningState],
+        policy_states : List[PolicyTrainState],
     ):
     with torch.no_grad():
         for state in policy_states:
@@ -213,7 +212,7 @@ def _ensemble_ppo(cfg : TrainConfig,
                   sim : SimInterface,
                   rollout_mgr : RolloutManager,
                   advantages : jax.Array,
-                  policy_states : List[PolicyLearningState],
+                  policy_states : List[PolicyTrainState],
                  ):
     pass
 
@@ -236,7 +235,7 @@ class PPO:
             sim : SimInterface,
             rollout_mgr : RolloutManager,
             ac_functional : Callable,
-            policy_states : List[PolicyLearningState],
+            policy_states : List[PolicyTrainState],
         ):
         return _ppo(cfg,
                     icfg,

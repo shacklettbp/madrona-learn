@@ -3,32 +3,35 @@ from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
 import flax.training.dynamic_scale
+import flax.training.train_state
 import optax
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any, Callable
 
 from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 
-@dataclass
-class HyperParams:
+
+class HyperParams(flax.struct.PyTreeNode):
     lr: float
     gamma: float
     gae_lambda: float
 
 
-@dataclass
-class PolicyLearningState:
-    policy: ActorCritic
-    optimizer : optax.GradientTransformation
-    scheduler : Optional[optax.Schedule]
+class PolicyTrainState(flax.training.train_state.TrainState):
+    hyper_params: HyperParams
+    batch_stats: flax.core.FrozenDict[str, Any] = flax.struct.field(
+        pytree_node=True)
+    scheduler: Optional[optax.Schedule]
     scaler: Optional[flax.training.dynamic_scale.DynamicScale]
-    value_normalizer: EMANormalizer
+    value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
+    value_normalize_stats: flax.core.FrozenDict[str, Any] = flax.struct.field(
+        pytree_node=True)
 
 
-class TrainingState:
+class TrainStateManager:
     def __init__(self, policy_states):
         self.policy_states = policy_states
 

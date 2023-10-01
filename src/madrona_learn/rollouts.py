@@ -10,7 +10,7 @@ from .cfg import SimInterface, TrainConfig
 from .actor_critic import ActorCritic, RecurrentStateConfig
 from .utils import InternalConfig
 from .profile import profile
-from .training_state import PolicyLearningState
+from .train_state import PolicyTrainState
 
 @dataclass(frozen = True)
 class Rollouts:
@@ -199,7 +199,7 @@ class RolloutManager:
             self,
             sim : SimInterface,
             ac_functional : Callable,
-            policies : List[PolicyLearningState],
+            policies : List[PolicyTrainState],
         ):
 
         policy_params, policy_buffers = stack_module_state(

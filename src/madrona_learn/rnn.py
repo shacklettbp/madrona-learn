@@ -7,7 +7,7 @@ from typing import Tuple
 
 __all__ = ["LSTM"]
 
-class MaskableLSTMCell(nn.RNNCellBase):
+class MultiLayerLSTMCell(nn.RNNCellBase):
     hidden_channels: int
     num_layers: int = 1
 
@@ -16,7 +16,6 @@ class MaskableLSTMCell(nn.RNNCellBase):
         self,
         carries: Tuple[jax.Array, jax.Array],
         inputs: jax.Array,
-        breaks: jax.Array,
     ) -> Tuple[jax.Array, jax.Array]:
         x = inputs
 
@@ -27,15 +26,12 @@ class MaskableLSTMCell(nn.RNNCellBase):
         in_c, in_h = carries
 
         for i in range(self.num_layers):
-            layer_masked_c = jnp.where(breaks, jnp.zeros(()), in_c[i])
-            layer_masked_h = jnp.where(breaks, jnp.zeros(()), in_h[i])
-
             (new_c, new_h), out = nn.OptimizedLSTMCell(
-                    features=hidden_channels,
+                    features=self.hidden_channels,
                     kernel_init=jax.nn.initializers.orthogonal(),
                     recurrent_kernel_init=jax.nn.initializers.orthogonal(),
                     bias_init=jax.nn.initializers.constant(0),
-                )((layer_masked_c, layer_masked_h), x)
+                )((in_c[i], in_h[i]), x)
             x = new_h
 
             all_c.append(new_c)
@@ -50,9 +46,7 @@ class LSTM(nn.Module):
     hidden_channels: int
     num_layers: int = 1
 
-    def setup(self):
-        self.cell = MaskableLSTMCell(self.hidden_channels, self.num_layers)
-
+    @nn.nowrap
     def init_recurrent_state(self, N, dev, dtype):
         c_states = []
         h_states = []
@@ -64,15 +58,37 @@ class LSTM(nn.Module):
             c_states.append(init_zeros)
             h_states.append(init_zeros)
 
-        return (c_states, h_states)
+        return c_states, h_states
 
-    def __call__(self, cur_hiddens, in_features, breaks, train):
-        new_hiddens, out = self.cell(cur_hiddens, in_features, breaks)
+    @nn.nowrap
+    def clear_recurrent_state(self, rnn_states, should_clear):
+        new_c_states = []
+        new_h_states = []
+
+        c_states, h_states = rnn_states
+
+        for i in range(self.num_layers):
+            layer_masked_c = jnp.where(
+                should_clear, jnp.zeros(()), c_states[i])
+            layer_masked_h = jnp.where(
+                should_clear, jnp.zeros(()), h_states[i])
+
+            new_c_states.append(layer_masked_c)
+            new_h_states.append(layer_masked_h)
+
+        return new_c_states, new_h_states
+
+    def setup(self):
+        self.cell = MultiLayerLSTMCell(self.hidden_channels, self.num_layers)
+
+    def __call__(self, cur_hiddens, in_features, train):
+        new_hiddens, out = self.cell(cur_hiddens, in_features)
         return out, new_hiddens
 
-    def sequence(self, start_hiddens, seq_x , seq_breaks, train):
-        def process_step(cell, carry, x, breaks):
-            carry, y = cell(carry, x, breaks)
+    def sequence(self, start_hiddens, seq_ends, seq_x, train):
+        def process_step(cell, carry, x, end):
+            carry, y = cell(carry, x)
+            carry = self.clear_recurrent_state(carry, end)
 
             return carry, y
 
@@ -87,6 +103,6 @@ class LSTM(nn.Module):
             split_rngs={ 'params': False },
         )
 
-        _, outputs = scan_txfm(self.cell, start_hiddens, seq_x, seq_breaks)
+        _, outputs = scan_txfm(self.cell, start_hiddens, seq_x, seq_ends)
 
         return outputs

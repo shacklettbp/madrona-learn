@@ -16,7 +16,7 @@ from .rollouts import RolloutManager, Rollouts
 from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
-from .training_state import PolicyLearningState, TrainingState
+from .train_state import PolicyTrainState, TrainStateManager
 from .utils import InternalConfig
 
 
@@ -28,7 +28,7 @@ def _update_loop(update_iter_fn : Callable,
                  sim : SimInterface,
                  rollout_mgr : RolloutManager,
                  ac_functional : Callable,
-                 training_state : TrainingState,
+                 train_state_mgr : TrainStateManager,
                  start_update_idx : int):
     for update_idx in range(start_update_idx, cfg.num_updates):
         update_start_time  = time()
@@ -40,7 +40,7 @@ def _update_loop(update_iter_fn : Callable,
                 sim,
                 rollout_mgr,
                 ac_functional,
-                training_state.policy_states,
+                train_state_mgr.policy_states,
             )
 
             gpu_sync_fn()
@@ -50,7 +50,7 @@ def _update_loop(update_iter_fn : Callable,
 
         update_end_time = time()
         update_time = update_end_time - update_start_time
-        user_cb(update_idx, update_time, update_result, training_state)
+        user_cb(update_idx, update_time, update_result, train_state_mgr)
 
 
 def _setup_new_policy(dev, policy_constructor, base_lr, value_norm_decay):
@@ -72,7 +72,7 @@ def _setup_new_policy(dev, policy_constructor, base_lr, value_norm_decay):
         value_norm_decay, disable=value_norm_disable)
     value_normalizer = value_normalizer.to(dev)
 
-    return PolicyLearningState(
+    return PolicyTrainState(
         policy = policy,
         optimizer = optimizer,
         scheduler = None,
@@ -92,7 +92,7 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
 
     meta_policy = policy_constructor().to('meta')
 
-    training_state = TrainingState([
+    train_state_mgr = TrainStateManager([
             _setup_new_policy(
                 dev,
                 policy_constructor,
@@ -103,11 +103,11 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
     )
 
     if restore_ckpt != None:
-        start_update_idx = training_state.load(restore_ckpt)
+        start_update_idx = train_state_mgr.load(restore_ckpt)
     else:
         start_update_idx = 0
 
-    policy_recurrent_cfg = training_state.policy_states[0].policy.recurrent_cfg
+    policy_recurrent_cfg = train_state_mgr.policy_states[0].policy.recurrent_cfg
 
     rollout_mgr = RolloutManager(dev, sim, cfg, icfg, policy_recurrent_cfg)
 
@@ -141,6 +141,6 @@ def train(dev, sim, cfg, policy_constructor, update_cb, restore_ckpt=None):
         sim=sim,
         rollout_mgr=rollout_mgr,
         ac_functional=meta_policy,
-        training_state=training_state,
+        train_state_mgr=train_state_mgr,
         start_update_idx=start_update_idx,
     )

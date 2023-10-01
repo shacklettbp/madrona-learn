@@ -51,6 +51,9 @@ class DenseLayerDiscreteActor(nn.Module):
 class DenseLayerCritic(nn.Module):
     @nn.compact
     def __call__(self, features):
-        return nn.Dense(1, use_bias=True,
-            kernel_init=jax.nn.initializers.orthogonal(),
-            bias_init=jax.nn.initialzers.constant(0))(features)
+        return nn.Dense(
+                1,
+                use_bias=True,
+                kernel_init=jax.nn.initializers.orthogonal(),
+                bias_init=jax.nn.initializers.constant(0),
+            )(features)

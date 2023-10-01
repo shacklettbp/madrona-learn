@@ -2,19 +2,23 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from jax.experimental import checkify
+import optax
 
 import math
-
+from functools import partial
+from time import time
 
 from madrona_learn.models import MLP
 from madrona_learn.rnn import LSTM
 from madrona_learn.moving_avg import EMANormalizer
 from madrona_learn.actor_critic import *
 from madrona_learn.models import *
+from madrona_learn.train_state import PolicyTrainState, HyperParams
 
 def assert_valid_input(tensor):
-    assert(not jnp.isnan(tensor).any())
-    assert(not jnp.isinf(tensor).any())
+    checkify.check(jnp.isnan(tensor).any() == False, "NaN!")
+    checkify.check(jnp.isinf(tensor).any() == False, "Inf!")
 
 class ProcessObsCommon(nn.Module):
     num_lidar_samples: int
@@ -85,12 +89,12 @@ class CriticNet(nn.Module):
         self_obs, teammate_obs, opponent_obs, lidar_processed, alive, opponent_masks = \
             obs_tensors
         
-        flattened = torch.cat([
+        flattened = jnp.concatenate([
             self_obs.reshape(self_obs.shape[0], -1),
             teammate_obs.reshape(teammate_obs.shape[0], -1),
             opponent_obs.reshape(opponent_obs.shape[0], -1),
             alive.reshape(alive.shape[0], -1),
-        ], dim=1)
+        ], axis=1)
 
         normalized = EMANormalizer(0.99999)('normalize', train, flattened)
 
@@ -138,27 +142,29 @@ def make_policy(num_obs_features,
         critic = DenseLayerCritic(),
     )
 
-def fake_rollout_iter(policy, variables, step_key, rnn_states, obs):
-    actions, log_probs, values, rnn_states = policy.apply(variables,
-        step_key, rnn_states, *obs,
-        method='rollout')
-
-    return rnn_states
-
-def fake_rollout_loop(policy, variables, prng_key, rnn_states, *obs):
+def fake_rollout_loop(state, prng_key, rnn_states, *obs):
     def iter(i, v):
         nonlocal prng_key, rnn_states
 
         prng_key, step_key = random.split(prng_key)
-        rnn_states = fake_rollout_iter(policy, variables, step_key,
-                                       rnn_states, obs)
+
+        _, _, _, rnn_states = state.apply_fn(
+            {
+                'params': state.params,
+                'batch_stats': state.batch_stats,
+            },
+            step_key,
+            rnn_states,
+            *obs,
+        )
 
     lax.fori_loop(0, 100, iter, None)
 
 def test():
     policy = make_policy(5, 128, 256, 32)
 
-    num_worlds = 1024
+    num_worlds = 16384
+    num_iters = 1000
 
     prng_key = random.PRNGKey(5)
 
@@ -172,6 +178,7 @@ def test():
     ]
 
     dev = jax.devices()[0]
+    print(dev)
 
     cur_rnn_states = policy.init_recurrent_state(
         num_worlds, dev, jnp.float32)
@@ -185,8 +192,35 @@ def test():
         cur_rnn_states,
         *obs,
         method='rollout')
-        
-    fake_rollout_loop(policy, variables, prng_key, cur_rnn_states, *obs)
+
+    params = variables['params']
+    batch_stats = variables['batch_stats']
+    print(jax.tree_util.tree_map(jnp.shape, params))
+    print(jax.tree_util.tree_map(jnp.shape, batch_stats))
+
+    state = PolicyTrainState.create(
+        apply_fn = partial(policy.apply, method='rollout'),
+        params = params,
+        tx = optax.adam(0.01),
+        hyper_params = HyperParams(0, 0, 0),
+        batch_stats = batch_stats,
+        scheduler = None,
+        scaler = None,
+        value_normalize_fn = None,
+        value_normalize_stats = {},
+    )
+
+
+    rollout_loop_fn = jax.jit(checkify.checkify(fake_rollout_loop))
+
+    start = time()
+
+    err, _ = rollout_loop_fn(state, prng_key, cur_rnn_states, *obs)
+    err.throw()
+
+    end = time()
+    
+    print(num_worlds * num_iters / (end - start))
 
 if __name__ == "__main__":
     test()
