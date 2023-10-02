@@ -31,9 +31,8 @@ class PolicyTrainState(flax.training.train_state.TrainState):
         pytree_node=True)
 
 
-class TrainStateManager:
-    def __init__(self, policy_states):
-        self.policy_states = policy_states
+class TrainStateManager(flax.struct.PyTreeNode):
+    train_states: PolicyTrainState = flax.struct.field(pytree_node=True)
 
     def save(self, update_idx, path):
         def get_scheduler_state(learning_state):
