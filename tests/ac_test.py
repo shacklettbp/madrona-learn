@@ -17,8 +17,11 @@ from madrona_learn.models import *
 from madrona_learn.train_state import PolicyTrainState, HyperParams
 
 num_worlds = 16384
-num_iters = 1000
+num_iters = 5000
 num_policies = 32
+
+num_mlp_layers=4
+fwd_dtype=jnp.float16
 
 def assert_valid_input(tensor):
     checkify.check(jnp.isnan(tensor).any() == False, "NaN!")
@@ -61,6 +64,7 @@ class ProcessObsCommon(nn.Module):
 
 class ActorNet(nn.Module):
     num_mlp_channels: int
+    dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, obs_tensors, train):
@@ -82,13 +86,15 @@ class ActorNet(nn.Module):
         features = lax.stop_gradient(features)
 
         return MLP(
-                num_channels = self.num_mlp_channels,
-                num_layers = 4,
+                num_channels=self.num_mlp_channels,
+                num_layers=num_mlp_layers,
+                dtype=self.dtype,
             )(features)
 
 
 class CriticNet(nn.Module):
     num_mlp_channels : int
+    dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, obs_tensors, train):
@@ -109,28 +115,32 @@ class CriticNet(nn.Module):
 
         return MLP(
                 num_channels = self.num_mlp_channels,
-                num_layers = 4,
+                num_layers = num_mlp_layers,
+                dtype = self.dtype,
             )(features)
 
 def make_policy(num_obs_features,
                 num_channels,
                 num_hidden_channels,
-                num_lidar_samples):
+                num_lidar_samples,
+                dtype):
     obs_common = ProcessObsCommon(num_lidar_samples)
 
     actor_encoder = RecurrentBackboneEncoder(
-        net = ActorNet(num_channels),
+        net = ActorNet(num_channels, dtype=dtype),
         rnn = LSTM(
             hidden_channels = num_hidden_channels,
             num_layers = 1,
+            dtype = dtype,
         ),
     )
 
     critic_encoder = RecurrentBackboneEncoder(
-        net = CriticNet(num_channels),
+        net = CriticNet(num_channels, dtype=dtype),
         rnn = LSTM(
             hidden_channels = num_hidden_channels,
             num_layers = 1,
+            dtype = dtype,
         ),
     )
 
@@ -144,8 +154,9 @@ def make_policy(num_obs_features,
         backbone = backbone,
         actor = DenseLayerDiscreteActor(
             [4, 8, 5, 5, 2, 2],
+            dtype=dtype,
         ),
-        critic = DenseLayerCritic(),
+        critic = DenseLayerCritic(dtype=dtype),
     )
 
 def policy_infer_rollout(state, prng_key, rnn_states, obs):
@@ -257,24 +268,23 @@ def setup_new_policy(policy, prng_key, fake_inputs):
     )
 
 def test():
-    policy = make_policy(5, 256, 512, 32)
+    policy = make_policy(5, 256, 512, 32, fwd_dtype)
 
     prng_key = random.PRNGKey(5)
 
     obs = [
-        jnp.zeros((num_worlds, 5), dtype=jnp.float32),
-        jnp.zeros((num_worlds, 2), dtype=jnp.float32),
-        jnp.zeros((num_worlds, 2), dtype=jnp.float32),
-        jnp.zeros((num_worlds, 32), dtype=jnp.float32),
-        jnp.zeros((num_worlds, 1), dtype=jnp.float32),
-        jnp.zeros((num_worlds, 1), dtype=jnp.float32),
+        jnp.zeros((num_worlds, 5), dtype=fwd_dtype),
+        jnp.zeros((num_worlds, 2), dtype=fwd_dtype),
+        jnp.zeros((num_worlds, 2), dtype=fwd_dtype),
+        jnp.zeros((num_worlds, 32), dtype=fwd_dtype),
+        jnp.zeros((num_worlds, 1), dtype=fwd_dtype),
+        jnp.zeros((num_worlds, 1), dtype=fwd_dtype),
     ]
 
     dev = jax.devices()[0]
     print(dev)
 
-    cur_rnn_states = policy.init_recurrent_state(
-        num_worlds, dev, jnp.float32)
+    cur_rnn_states = policy.init_recurrent_state(num_worlds)
 
     prng_key, init_key = random.split(prng_key)
 

@@ -9,7 +9,8 @@ __all__ = ["LSTM"]
 
 class MultiLayerLSTMCell(nn.RNNCellBase):
     hidden_channels: int
-    num_layers: int = 1
+    num_layers: int
+    dtype: jnp.dtype
 
     @nn.compact
     def __call__(
@@ -31,6 +32,7 @@ class MultiLayerLSTMCell(nn.RNNCellBase):
                     kernel_init=jax.nn.initializers.orthogonal(),
                     recurrent_kernel_init=jax.nn.initializers.orthogonal(),
                     bias_init=jax.nn.initializers.constant(0),
+                    dtype=self.dtype,
                 )((in_c[i], in_h[i]), x)
             x = new_h
 
@@ -44,15 +46,15 @@ class MultiLayerLSTMCell(nn.RNNCellBase):
 
 class LSTM(nn.Module):
     hidden_channels: int
-    num_layers: int = 1
+    num_layers: int
+    dtype: jnp.dtype
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
+    def init_recurrent_state(self, N):
         c_states = []
         h_states = []
 
-        with jax.default_device(dev):
-            init_zeros = jnp.zeros((N, self.hidden_channels), dtype)
+        init_zeros = jnp.zeros((N, self.hidden_channels), self.dtype)
 
         for i in range(self.num_layers):
             c_states.append(init_zeros)
@@ -79,7 +81,8 @@ class LSTM(nn.Module):
         return new_c_states, new_h_states
 
     def setup(self):
-        self.cell = MultiLayerLSTMCell(self.hidden_channels, self.num_layers)
+        self.cell = MultiLayerLSTMCell(
+            self.hidden_channels, self.num_layers, self.dtype)
 
     def __call__(self, cur_hiddens, in_features, train):
         new_hiddens, out = self.cell(cur_hiddens, in_features)

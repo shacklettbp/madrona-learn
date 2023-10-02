@@ -39,8 +39,13 @@ class ActorCritic(nn.Module):
     critic : nn.Module
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
-        return self.backbone.init_recurrent_state(N, dev, dtype)
+    def init_recurrent_state(self, N):
+        return self.backbone.init_recurrent_state(N)
+
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
+        return self.backbone.clear_recurrent_state(
+            recurrent_states, should_clear)
 
     def setup(self):
         pass
@@ -107,7 +112,11 @@ class BackboneEncoder(nn.Module):
     net : nn.Module
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
+    def init_recurrent_state(self, N):
+        return ()
+
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
         return ()
 
     def setup(self):
@@ -131,8 +140,13 @@ class RecurrentBackboneEncoder(nn.Module):
     rnn : nn.Module
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
-        return self.rnn.init_recurrent_state(N, dev, dtype)
+    def init_recurrent_state(self, N):
+        return self.rnn.init_recurrent_state(N)
+
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
+        return self.rnn.clear_recurrent_state(
+            recurrent_states, should_clear)
 
     def setup(self):
         pass
@@ -168,8 +182,13 @@ class BackboneShared(Backbone):
     encoder : nn.Module
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
-        return self.encoder.init_recurrent_state(N, dev, dtype)
+    def init_recurrent_state(self, N):
+        return self.encoder.init_recurrent_state(N)
+
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
+        return self.encoder.clear_recurrent_state(
+            recurrent_states, should_clear)
 
     def setup(self):
         pass
@@ -209,11 +228,16 @@ class BackboneSeparate(Backbone):
     critic_encoder : nn.Module
 
     @nn.nowrap
-    def init_recurrent_state(self, N, dev, dtype):
-        rnn_states = tuple(enc.init_recurrent_state(N, dev, dtype) for enc in
-            (self.actor_encoder, self.critic_encoder))
+    def init_recurrent_state(self, N):
+        return (self.actor_encoder.init_recurrent_state(N),
+                self.critic_encoder.init_recurrent_state(N))
 
-        return rnn_states
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
+        return (self.actor_encoder.clear_recurrent_state(recurrent_states[0],
+                                                         should_clear),
+                self.critic_encoder.clear_recurrent_state(recurrent_states[1],
+                                                         should_clear))
 
     def setup(self):
         pass
