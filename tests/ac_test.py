@@ -83,7 +83,7 @@ class ActorNet(nn.Module):
 
         return MLP(
                 num_channels = self.num_mlp_channels,
-                num_layers = 2,
+                num_layers = 4,
             )(features)
 
 
@@ -109,7 +109,7 @@ class CriticNet(nn.Module):
 
         return MLP(
                 num_channels = self.num_mlp_channels,
-                num_layers = 2,
+                num_layers = 4,
             )(features)
 
 def make_policy(num_obs_features,
@@ -189,8 +189,6 @@ def policy_infer_sort(
     sorted_obs = jax.tree_map(
         lambda x: rebatch(jnp.take(x, sort_idxs, 0)), obs)
 
-    print(jax.tree_map(jnp.shape, sorted_rnn_states))
-
     rollout_vec = jax.vmap(policy_infer_rollout, in_axes=(0, 0, 0, 0))
     sample_keys = random.split(prng_key, num_policies)
 
@@ -259,7 +257,7 @@ def setup_new_policy(policy, prng_key, fake_inputs):
     )
 
 def test():
-    policy = make_policy(5, 128, 256, 32)
+    policy = make_policy(5, 256, 512, 32)
 
     prng_key = random.PRNGKey(5)
 
@@ -307,8 +305,6 @@ def test():
 
     end = time()
 
-    print(rnn_states)
-    
     print(num_worlds * num_iters / (end - start))
 
 if __name__ == "__main__":
