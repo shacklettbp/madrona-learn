@@ -17,8 +17,8 @@ from madrona_learn.models import *
 from madrona_learn.train_state import PolicyTrainState, HyperParams
 
 num_worlds = 16384
-num_iters = 5000
-num_policies = 32
+num_iters = 1000
+num_policies = 128
 
 num_mlp_layers=4
 fwd_dtype=jnp.float16
@@ -48,19 +48,68 @@ class ProcessObsCommon(nn.Module):
 
         lidar_normalized = EMANormalizer(0.99999)('normalize', train, lidar)
 
-        #lidar_processed = nn.Conv(
-        #        features=1,
-        #        kernel_size=(self.num_lidar_samples,),
-        #        padding='CIRCULAR',
-        #    )(jnp.expand_dims(lidar_normalized, axis=-1))
+        lidar_processed = nn.Conv(
+                features=1,
+                kernel_size=(self.num_lidar_samples,),
+                padding='CIRCULAR',
+            )(jnp.expand_dims(lidar_normalized, axis=-1))
         
-
-        #lidar_processed = lax.stop_gradient(lidar_processed.squeeze(axis=-1))
-        lidar_processed = lidar_normalized
+        lidar_processed = lidar_processed.squeeze(axis=-1)
 
         return (self_obs, teammate_obs, opponent_obs, lidar_processed,
                 alive, opponent_masks)
 
+
+class FeatureEmbedNet(nn.Module):
+    num_embed_channels: int
+    dtype: jnp.dtype
+
+    @nn.compact
+    def __call__(self, unnormalized_inputs, normalized_inputs, train):
+        flattened = [ x.reshape(x.shape[0], -1) for x in unnormalized_inputs ]
+
+        combined = jnp.concatenate(flattened, axis=-1)
+        normalized_combined = EMANormalizer(0.99999)('normalize', train, combined)
+
+        embed_inputs = list(normalized_inputs)
+        cur_offset = 0
+        for x in flattened:
+            num_features = x.shape[-1]
+            embed_inputs.append(normalized_combined[
+                :, cur_offset:cur_offset + num_features])
+            print(embed_inputs[-1].shape)
+            cur_offset += num_features
+
+        embedded = []
+        for x in embed_inputs:
+            embedding = nn.Dense(
+                    self.num_embed_channels,
+                    use_bias=True,
+                    kernel_init=jax.nn.initializers.orthogonal(),
+                    bias_init=jax.nn.initializers.constant(0),
+                    dtype=self.dtype,
+                )(x)
+
+            embedded.append(embedding)
+
+        embedded = jnp.stack(embedded, axis=1)
+
+        attended = nn.SelfAttention(
+                num_heads=2,
+                qkv_features=self.num_embed_channels,
+                out_features=self.num_embed_channels,
+                dtype=self.dtype,
+            )(embedded)
+
+        attended = nn.Dense(
+                self.num_embed_channels,
+                dtype=self.dtype,
+            )(attended)
+
+        out = attended + embedded
+        out = out.mean(axis=1)
+
+        return out
 
 class ActorNet(nn.Module):
     num_mlp_channels: int
@@ -73,24 +122,15 @@ class ActorNet(nn.Module):
         
         opponent_obs_masked = opponent_obs * opponent_masks
 
-        flattened = jnp.concatenate([
-            self_obs.reshape(self_obs.shape[0], -1),
-            teammate_obs.reshape(teammate_obs.shape[0], -1),
-            opponent_obs_masked.reshape(opponent_obs_masked.shape[0], -1),
-            alive.reshape(alive.shape[0], -1),
-        ], axis=-1)
-
-        normalized = EMANormalizer(0.99999)('normalize', train, flattened)
-
-        features = jnp.concatenate([normalized, lidar_processed], axis=1)
-        features = lax.stop_gradient(features)
+        embedded = FeatureEmbedNet(self.num_mlp_channels // 2, self.dtype)(
+            (self_obs, teammate_obs, opponent_obs_masked, alive),
+            (lidar_processed,), train)
 
         return MLP(
                 num_channels=self.num_mlp_channels,
                 num_layers=num_mlp_layers,
                 dtype=self.dtype,
-            )(features)
-
+            )(embedded)
 
 class CriticNet(nn.Module):
     num_mlp_channels : int
@@ -100,27 +140,19 @@ class CriticNet(nn.Module):
     def __call__(self, obs_tensors, train):
         self_obs, teammate_obs, opponent_obs, lidar_processed, alive, opponent_masks = \
             obs_tensors
-        
-        flattened = jnp.concatenate([
-            self_obs.reshape(self_obs.shape[0], -1),
-            teammate_obs.reshape(teammate_obs.shape[0], -1),
-            opponent_obs.reshape(opponent_obs.shape[0], -1),
-            alive.reshape(alive.shape[0], -1),
-        ], axis=1)
 
-        normalized = EMANormalizer(0.99999)('normalize', train, flattened)
 
-        features = jnp.concatenate([normalized, lidar_processed], axis=1)
-        features = lax.stop_gradient(features)
+        embedded = FeatureEmbedNet(self.num_mlp_channels, self.dtype)(
+            (self_obs, teammate_obs, opponent_obs, alive),
+            (lidar_processed,), train)
 
         return MLP(
                 num_channels = self.num_mlp_channels,
                 num_layers = num_mlp_layers,
                 dtype = self.dtype,
-            )(features)
+            )(embedded)
 
-def make_policy(num_obs_features,
-                num_channels,
+def make_policy(num_channels,
                 num_hidden_channels,
                 num_lidar_samples,
                 dtype):
@@ -268,7 +300,7 @@ def setup_new_policy(policy, prng_key, fake_inputs):
     )
 
 def test():
-    policy = make_policy(5, 256, 512, 32, fwd_dtype)
+    policy = make_policy(512, 512, 32, fwd_dtype)
 
     prng_key = random.PRNGKey(5)
 
