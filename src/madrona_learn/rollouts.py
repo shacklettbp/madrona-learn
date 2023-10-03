@@ -5,12 +5,11 @@ from flax import linen as nn
 
 from dataclasses import dataclass
 from typing import List, Optional, Callable
-from .amp import amp
 from .cfg import SimInterface, TrainConfig
 from .actor_critic import ActorCritic, RecurrentStateConfig
 from .utils import InternalConfig
 from .profile import profile
-from .train_state import PolicyTrainState
+from .train_state import TrainStateManager, PolicyTrainState
 
 @dataclass(frozen = True)
 class Rollouts:
@@ -27,11 +26,11 @@ class Rollouts:
 class RolloutManager:
     def __init__(
             self,
-            dev : jax.Device,
-            sim : SimInterface,
-            cfg : TrainConfig,
-            icfg : InternalConfig,
-            recurrent_cfg : RecurrentStateConfig,
+            dev: jax.Device,
+            sim: SimInterface,
+            cfg: TrainConfig,
+            icfg: InternalConfig,
+            recurrent_cfg: RecurrentStateConfig,
         ):
         cpu_dev = jax.devices('cpu')[0]
 
@@ -136,7 +135,7 @@ class RolloutManager:
                 dtype=icfg.float_storage_type, device=dev)
 
         self.values_out = torch.zeros(sim.rewards.shape,
-            dtype=amp.compute_dtype, device=cpu_dev)
+            dtype=float_dtype, device=cpu_dev)
 
         if self.is_cpu_sim:
             self.actions_out = torch.zeros(sim.actions.shape,
@@ -198,8 +197,7 @@ class RolloutManager:
     def collect(
             self,
             sim : SimInterface,
-            ac_functional : Callable,
-            policies : List[PolicyTrainState],
+            train_state_mgr: TrainStateManager,
         ):
 
         policy_params, policy_buffers = stack_module_state(

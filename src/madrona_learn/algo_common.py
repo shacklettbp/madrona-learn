@@ -6,7 +6,6 @@ from flax import linen as nn
 from dataclasses import dataclass
 from typing import List
 
-from .amp import amp
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
 from .utils import DataclassProtocol
@@ -136,4 +135,3 @@ def gather_minibatch(
         advantages=advantages_slice,
         rnn_start_states=rnn_starts_slice,
     )
-

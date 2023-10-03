@@ -18,7 +18,7 @@ class InternalConfig:
     num_bptt_steps : int
     float_storage_type : jnp.dtype
 
-    def __init__(self, dev, cfg):
+    def __init__(self, dev, cfg, float_compute_type):
         self.rollout_batch_size = \
             cfg.num_teams * cfg.team_size * cfg.num_worlds
 
@@ -29,7 +29,7 @@ class InternalConfig:
         self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks
         self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
 
-        if dev.type == 'cuda':
-            self.float_storage_type = torch.float16
+        if float_compute_type == jnp.bfloat16:
+            self.float_storage_type = jnp.bfloat16
         else:
-            self.float_storage_type = torch.bfloat16
+            self.float_storage_type = jnp.float16

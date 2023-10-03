@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import List, Callable
 
 from .actor_critic import ActorCritic
-from .amp import amp
 from .cfg import AlgoConfig, TrainConfig, SimInterface
 from .moving_avg import EMANormalizer
 from .rollouts import RolloutManager, Rollouts

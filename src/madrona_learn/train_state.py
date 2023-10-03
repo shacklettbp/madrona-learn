@@ -9,10 +9,8 @@ import optax
 from dataclasses import dataclass
 from typing import Optional, Any, Callable
 
-from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
-
 
 class HyperParams(flax.struct.PyTreeNode):
     lr: float

@@ -5,7 +5,6 @@ from flax import linen as nn
 from typing import List
 
 from .action import DiscreteActionDistributions
-from .amp import amp
 
 class MLP(nn.Module):
     num_channels: int
