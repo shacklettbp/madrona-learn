@@ -13,7 +13,6 @@ from pathlib import Path
 
 from .cfg import TrainConfig, SimInterface
 from .rollouts import RolloutManager, Rollouts
-from .amp import amp 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
 from .train_state import PolicyTrainState, TrainStateManager

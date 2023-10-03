@@ -10,10 +10,9 @@ from madrona_learn.profile import profile
 import madrona_learn.models
 import madrona_learn.rnn
 from madrona_learn.ppo import PPOConfig
-from madrona_learn.amp import amp
 
 __all__ = [
-        "train", "TrainStateManager", "models", "rnn", "amp",
+        "train", "TrainStateManager", "models", "rnn",
         "TrainConfig", "SimInterface",
         "DiscreteActionDistributions",
         "ActorCritic", "DiscreteActor", "Critic",

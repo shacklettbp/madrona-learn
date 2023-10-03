@@ -18,7 +18,7 @@ from madrona_learn.train_state import PolicyTrainState, HyperParams
 
 num_worlds = 16384
 num_iters = 1000
-num_policies = 128
+num_policies = 32
 
 num_mlp_layers=4
 fwd_dtype=jnp.float16
