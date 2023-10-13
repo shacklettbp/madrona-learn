@@ -70,10 +70,10 @@ class LSTM(nn.Module):
         c_states, h_states = rnn_states
 
         for i in range(self.num_layers):
-            layer_masked_c = jnp.where(
-                should_clear, jnp.zeros(()), c_states[i])
-            layer_masked_h = jnp.where(
-                should_clear, jnp.zeros(()), h_states[i])
+            layer_masked_c = jnp.where(should_clear,
+                jnp.zeros((), dtype=c_states[i].dtype), c_states[i])
+            layer_masked_h = jnp.where(should_clear,
+                jnp.zeros((), dtype=h_states[i].dtype), h_states[i])
 
             new_c_states.append(layer_masked_c)
             new_h_states.append(layer_masked_h)

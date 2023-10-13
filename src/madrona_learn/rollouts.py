@@ -2,364 +2,360 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
-from typing import List, Optional, Callable
-from .cfg import SimInterface, TrainConfig
-from .actor_critic import ActorCritic, RecurrentStateConfig
-from .utils import InternalConfig
+from typing import List, Optional, Callable, Any
+from functools import partial
+
+from .cfg import TrainConfig
+from .actor_critic import ActorCritic
+from .algo_common import InternalConfig
 from .profile import profile
 from .train_state import TrainStateManager, PolicyTrainState
+from .utils import TypedShape
 
-@dataclass(frozen = True)
-class Rollouts:
-    obs: List[jax.Array]
-    actions: jax.Array
-    log_probs: jax.Array
-    dones: jax.Array
-    rewards: jax.Array
-    values: jax.Array
-    bootstrap_values: jax.Array 
-    rnn_start_states: tuple[jax.Array, ...]
+class RolloutState(flax.struct.PyTreeNode):
+    step_fn: Callable = flax.struct.field(pytree_node=False)
+    prng_key: random.PRNGKey
+    sim_data: FrozenDict
+    reorder_idxs: Optional[jax.Array]
+    rnn_states: Any
+
+    @staticmethod
+    def create(
+        step_fn,
+        prng_key,
+        sim_data,
+        rnn_states
+    ):
+        if 'policy_assignments' in sim_data:
+            policy_assignments = sim_data['policy_assignments']
+            reorder_idxs = jnp.argsort(policy_assignments)
+        else:
+            reorder_idxs = None
+
+        return RolloutState(
+            step_fn = step_fn,
+            prng_key = prng_key,
+            sim_data = frozen_dict.freeze(sim_data),
+            reorder_idxs = reorder_idxs,
+            rnn_states = rnn_states,
+        )
+
+    def update(
+        self,
+        prng_key=None,
+        sim_data=None,
+        rnn_states=None,
+        reorder_idxs=None
+    ):
+        return RolloutState(
+            step_fn = self.step_fn,
+            prng_key = prng_key if prng_key != None else self.prng_key,
+            sim_data = sim_data if sim_data != None else self.sim_data,
+            reorder_idxs = (
+                reorder_idxs if reorder_idxs != None else self.reorder_idxs),
+            rnn_states = rnn_states if rnn_states != None else self.rnn_states,
+        )
 
 
-class RolloutManager:
+class RolloutStore(flax.struct.PyTreeNode):
+    data : FrozenDict
+
+    @staticmethod
+    def create_from_tree(typed_shapes : FrozenDict):
+        data = jax.tree_map(
+            lambda x: jnp.empty(x.shape, x.dtype), typed_shapes)
+        return RolloutStore(
+            data = data,
+        )
+
+    def save(self, k, indices, values):
+        def save_leaf(store, v): 
+            return store.at[indices].set(v)
+
+        updated = jax.tree_map(save_leaf, self.data[k], values)
+
+        return RolloutStore(data = self.data.copy({k: updated}))
+
+
+class RolloutExecutor:
     def __init__(
-            self,
-            dev: jax.Device,
-            sim: SimInterface,
-            cfg: TrainConfig,
-            icfg: InternalConfig,
-            recurrent_cfg: RecurrentStateConfig,
-        ):
+        self,
+        cfg: TrainConfig,
+        icfg: InternalConfig,
+        policy: ActorCritic,
+        init_rollout_state: RolloutState
+    ):
         cpu_dev = jax.devices('cpu')[0]
 
-        self.dev = dev
-        self.is_cpu_sim = sim.obs[0].device() == cpu_dev
+        self._num_bptt_chunks = cfg.num_bptt_chunks
+        self._num_bptt_steps = icfg.num_bptt_steps
+        self._num_train_policies = cfg.pbt_ensemble_size
+        self._num_rollout_policies = \
+            cfg.pbt_ensemble_size * cfg.pbt_history_len
+        self._float_dtype = icfg.float_storage_type
 
-        assert(sim.actions.shape[0] == icfg.rollout_batch_size)
+        typed_shapes = {}
 
-        self.num_bptt_chunks = cfg.num_bptt_chunks
-        self.num_bptt_steps = icfg.num_bptt_steps
+        sim_data = init_rollout_state.sim_data
+        
+        self._is_dynamic_policy_assignment = \
+            init_rollout_state.reorder_idxs != None
+        assert(sim_data['actions'].shape[0] == icfg.rollout_batch_size)
 
-        agents_per_world = cfg.num_teams * cfg.team_size
+        def get_typed_shape(x):
+            return TypedShape(x.shape, x.dtype)
 
-        gather_indices_tmp = []
-        for i in range(cfg.num_worlds):
-            world_base = agents_per_world * i
-            for j in range(cfg.team_size):
-                gather_indices_tmp.append(world_base + j)
+        typed_shapes['obs'] = jax.tree_map(get_typed_shape, sim_data['obs'])
 
-        self.gather_indices = jnp.array(gather_indices_tmp, dtype=jnp.int32)
+        typed_shapes['actions'] = TypedShape(
+            sim_data['actions'].shape, sim_data['actions'].dtype)
 
-        rnn_vmap = (2,) * len(recurrent_cfg.shapes)
-        obs_vmap = (0,) * len(sim.obs)
+        typed_shapes['log_probs'] = TypedShape(
+            typed_shapes['actions'].shape, self._float_dtype)
 
-        self.vmap_in_dims_rollout = (
-                0, 0, 0, 0, rnn_vmap, rnn_vmap, *obs_vmap
+        typed_shapes['rewards'] = TypedShape(
+            sim_data['rewards'].shape, self._float_dtype)
+
+        typed_shapes['dones'] = TypedShape(
+            sim_data['dones'].shape, jnp.bool_)
+
+        typed_shapes['values'] = TypedShape(
+            typed_shapes['rewards'].shape, self._float_dtype)
+
+        def convert_per_step_shapes(x):
+            if jnp.issubdtype(x.dtype, jnp.floating):
+                dtype = self._float_dtype
+            else:
+                dtype = x.dtype
+
+            return TypedShape((
+                    self._num_bptt_chunks,
+                    self._num_bptt_steps,
+                    self._num_train_policies,
+                    icfg.train_agents_per_policy,
+                    *x.shape[1:],
+                ), dtype=dtype)
+
+        typed_shapes = jax.tree_map(convert_per_step_shapes, typed_shapes)
+
+        typed_shapes['bootstrap_values'] = TypedShape(
+            typed_shapes['values'].shape[2:],
+            self._float_dtype)
+
+        typed_shapes['rnn_start_states'] = jax.tree_map(
+            lambda x: TypedShape((
+                    self._num_bptt_chunks,
+                    self._num_train_policies,
+                    icfg.train_agents_per_policy,
+                    *x.shape[2:],
+                ), x.dtype),
+            init_rollout_state.rnn_states)
+
+        self._store_typed_shape_tree = frozen_dict.freeze(typed_shapes)
+
+        def infer_wrapper(method, state, *args):
+            return state.apply_fn(
+                {
+                    'params': state.params,
+                    'batch_stats': state.batch_stats,
+                },
+                *args,
+                train=False,
+                method=method,
             )
 
-        self.vmap_in_dims_critic = (
-                0, 0, 0, 0, rnn_vmap, rnn_vmap, *obs_vmap
-            )
+        self._rollout_fn = jax.vmap(
+            partial(infer_wrapper, 'rollout'))
 
-        self.vmap_in_dims_rollout = tuple(self.vmap_in_dims_rollout)
-        self.vmap_in_dims_critic = tuple(self.vmap_in_dims_critic)
+        self._critic_fn = jax.vmap(
+            partial(infer_wrapper, 'critic_only'))
 
-        if sim.policy_assignments != None:
-            assert(sim.policy_assignments.dtype == jnp.int32)
+        def rnn_reset_fn(rnn_states, should_clear):
+            return policy.clear_recurrent_state(rnn_states, should_clear)
 
-            if self.is_cpu_sim:
-                self.policy_assignments = jnp.zeros(
-                    (icfg.rollout_batch_size, 1),
-                    dtype=jnp.int32)
+        self._rnn_reset_fn = jax.vmap(rnn_reset_fn)
+
+    def _slice_train_policy_data(self, data):
+        return jax.tree_map(lambda x: x[0:self._num_train_policies], data)
+
+    def _group_into_policy_batches(self, args):
+        def rebatch(x):
+            return x.reshape(self._num_rollout_policies, -1, *x.shape[1:])
+
+        return jax.tree_map(rebatch, args)
+
+    def _reorder_into_policy_batches(self, args, sort_idxs):
+        reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
+        return self._group_into_policy_batches(reordered)
+
+    def _rollout_infer(self, train_states, rollout_state):
+        next_key, step_key = random.split(rollout_state.prng_key)
+        sample_keys = random.split(step_key, self._num_rollout_policies)
+
+        rnn_states = rollout_state.rnn_states
+        obs = rollout_state.sim_data['obs']
+
+        def convert_float_ob(o):
+            if jnp.issubdtype(o.dtype, jnp.floating):
+                return jnp.asarray(o, dtype=self._float_dtype)
             else:
-                self.policy_assignments = sim.policy_assignments
+                return o
+
+        obs = jax.tree_map(convert_float_ob, obs)
+
+        if self._is_dynamic_policy_assignment:
+            # Sort policy assignments
+            sorted_obs = self._reorder_into_policy_batches(
+                obs, rollout_state.reorder_idxs)
+
+            actions, log_probs, values, rnn_states = \
+                self._rollout_fn(train_states, sample_keys, rnn_states, obs)
+
+            # flatten policy dim for simulator input & reverse sort
+            sim_actions = actions.reshape(-1, *x.shape[2:])
+            unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
+            sim_actions = jnp.take(sim_actions, unsort_idxs, 0)
         else:
-            policy_assignments_static = []
-            for i in range(icfg.rollout_batch_size):
-                policy_idx = i // elems_per_train_policy
-                policy_assignments_static.append([policy_idx])
+            sorted_obs = self._group_into_policy_batches(obs)
 
-            self.policy_assignments = jnp.array(
-                policy_assignments_static, dtype=jnp.int32)
+            actions, log_probs, values, rnn_states = \
+                self._rollout_fn(train_states, sample_keys, rnn_states, sorted_obs)
 
-        with jax.default_device(cpu_dev):
-            self.actions = jnp.zeros(
-                (self.num_bptt_chunks, self.num_bptt_steps,
-                 icfg.num_train_agents, *sim.actions.shape[1:]),
-                dtype=sim.actions.dtype)
+            # flatten policy dim for simulator input
+            sim_actions = actions.reshape(-1, *actions.shape[2:])
 
-            self.log_probs = torch.zeros(
-                self.actions.shape,
-                dtype=icfg.float_storage_type)
+        # FIXME
+        sim_data_actions_set = rollout_state.sim_data.copy({
+            'actions': rollout_state.sim_data['actions'].at[:].set(sim_actions)
+        })
 
-            self.dones = torch.zeros(
-                (self.num_bptt_chunks, self.num_bptt_steps,
-                 icfg.num_train_agents, 1),
-                dtype=torch.bool)
+        rollout_state = rollout_state.update(
+            prng_key = next_key,
+            rnn_states = rnn_states,
+            sim_data = sim_data_actions_set,
+        )
 
-            self.rewards = torch.zeros(self.dones.shape,
-                dtype=icfg.float_storage_type)
+        save_data = FrozenDict(
+            obs = sorted_obs,
+            actions = actions,
+            log_probs =  log_probs,
+            values = values,
+        )
 
-            self.values = torch.zeros(self.dones.shape,
-                dtype=icfg.float_storage_type)
+        save_data = self._slice_train_policy_data(save_data)
 
-            self.bootstrap_values = torch.zeros((icfg.num_train_agents, 1),
-                dtype=icfg.float_storage_type)
+        return rollout_state, save_data
 
-        # Gather 
-        self.actions_gather = torch.zeros(
-            self.actions.shape[2:],
-            dtype=sim.actions.dtype, device=dev)
+    def _critic_infer(self, train_states, rollout_state):
+        rnn_states = rollout_state.rnn_states
+        obs = rollout_state.sim_data['obs']
 
-        self.log_probs_gather = torch.zeros(
-            self.actions_gather.shape,
-            dtype=icfg.float_storage_type, device=dev)
+        if self._is_dynamic_policy_assignment:
+            sorted_obs = self._reorder_into_policy_batches(
+                obs, rollout_state.reorder_idxs)
 
-        self.values_gather = torch.zeros(
-            self.values.shape[2:],
-            dtype=icfg.float_storage_type, device=dev)
-
-        self.bootstrap_values_gather = torch.zeros(
-            self.bootstrap_values.shape,
-            dtype=icfg.float_storage_type, device=dev)
-
-        if not self.is_cpu_sim:
-            self.dones_gather = torch.zeros(
-                self.dones.shape[2:],
-                dtype=torch.bool, device=dev)
-
-            self.rewards_gather = torch.zeros(
-                self.dones_gather.shape,
-                dtype=icfg.float_storage_type, device=dev)
-
-        self.values_out = torch.zeros(sim.rewards.shape,
-            dtype=float_dtype, device=cpu_dev)
-
-        if self.is_cpu_sim:
-            self.actions_out = torch.zeros(sim.actions.shape,
-                dtype=sim.actions.dtype, device=dev)
+            values, _ = self._critic_fn(train_states, rnn_states, sorted_obs)
         else:
-            self.actions_out = sim.actions
+            obs = self._group_into_policy_batches(obs)
+            values, _= self._critic_fn(train_states, rnn_states, obs)
 
-        self.log_probs_out = torch.zeros(self.actions_out.shape,
-            dtype=icfg.float_storage_type, device=dev)
+        return self._slice_train_policy_data(values)
 
-        self.obs = []
-        self.obs_in = []
-        self.obs_gather = []
+    def _step_rollout_state(self, rollout_state):
+        step_fn = rollout_state.step_fn
+        sim_data = rollout_state.sim_data
 
-        for obs_tensor in sim.obs:
-            self.obs.append(torch.zeros(
-                (self.num_bptt_chunks, self.num_bptt_steps,
-                 icfg.num_train_agents, *obs_tensor.shape[1:]),
-                dtype=obs_tensor.dtype, device=cpu_dev))
+        with profile('Simulator Step'):
+            sim_data = step_fn(sim_data)
 
-            if self.is_cpu_sim:
-                self.obs_in.append(torch.zeros(obs_tensor.shape, 
-                    dtype=obs_tensor.dtype, device=dev))
-            else:
-                self.obs_in.append(obs_tensor)
+        rnn_states = rollout_state.rnn_states
+        dones = rollout_state.sim_data['dones']
+        rewards = rollout_state.sim_data['rewards']
 
-                self.obs_gather.append(torch.zeros(
-                    (icfg.num_train_agents, *obs_tensor.shape[1:]),
-                    dtype=obs_tensor.dtype, device=dev))
+        dones = jnp.asarray(dones, dtype=jnp.bool_)
+        rewards = jnp.asarray(rewards, dtype=self._float_dtype)
 
-        self.rnn_end_states = []
-        self.rnn_alt_states = []
-        self.rnn_start_states = []
-        for rnn_state_shape in recurrent_cfg.shapes:
-            # expand shape to batch size
-            batched_state_shape = (*rnn_state_shape[0:2],
-                icfg.rollout_batch_size, rnn_state_shape[2])
+        if self._is_dynamic_policy_assignment:
+            reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
+            dones, rewards = self._reorder_into_policy_batches(
+                (dones, rewards), reorder_idxs)
+        else:
+            reorder_idxs = None
+            dones, rewards = self._group_into_policy_batches((dones, rewards))
 
-            rnn_end_state = torch.zeros(
-                batched_state_shape, dtype=amp.compute_dtype, device=dev)
-            rnn_alt_state = torch.zeros_like(rnn_end_state)
+        rnn_states = self._rnn_reset_fn(rnn_states, dones)
 
-            self.rnn_end_states.append(rnn_end_state)
-            self.rnn_alt_states.append(rnn_alt_state)
+        rollout_state = rollout_state.update(
+            sim_data = step_fn(sim_data),
+            reorder_idxs = reorder_idxs,
+            rnn_states = rnn_states,
+        )
 
-            bptt_starts_shape = (
-                self.num_bptt_chunks, *rnn_state_shape[0:2],
-                icfg.num_train_agents, rnn_state_shape[2])
+        save_data = FrozenDict(
+            dones = dones,
+            rewards = rewards,
+        )
 
-            rnn_start_state = torch.zeros(
-                bptt_starts_shape, dtype=amp.compute_dtype, device=dev)
+        save_data = self._slice_train_policy_data(save_data)
 
-            self.rnn_start_states.append(rnn_start_state)
-
-        self.rnn_end_states = tuple(self.rnn_end_states)
-        self.rnn_alt_states = tuple(self.rnn_alt_states)
-        self.rnn_start_states = tuple(self.rnn_start_states)
+        return rollout_state, save_data
 
     def collect(
-            self,
-            sim : SimInterface,
-            train_state_mgr: TrainStateManager,
-        ):
+        self,
+        rollout_state: RolloutState,
+        train_state_mgr: TrainStateManager,
+    ):
+        def rollout_iter(bptt_step, inputs):
+            rollout_state, rollout_store, bptt_chunk = inputs
 
-        policy_params, policy_buffers = stack_module_state(
-            [ state.policy for state in policies ])
+            with profile('Policy Infer', gpu=True):
+                rollout_state, pre_step_save_data = self._rollout_infer(
+                    train_state_mgr.train_states, rollout_state)
 
-        def fpolicy_rollout(policy_idx, *args):
-            indexed_params = { k: v.index_select(dim=0, index=policy_idx) for k, v in policy_params.items() }
-            indexed_buffers = { k: v.index_select(dim=0, index=policy_idx) for k, v in policy_buffers.items() }
+            with profile('Pre Step Rollout Store'):
+                for k in ['obs', 'actions', 'log_probs', 'values']:
+                    rollout_store = rollout_store.save(
+                        k, (bptt_chunk, bptt_step), pre_step_save_data[k])
 
-            return functional_call(ac_functional,
-                (indexed_params, indexed_buffers),
-                ('rollout', *args))
+            with profile('Rollout Step'):
+                rollout_state, post_step_save_data = self._step_rollout_state(
+                    rollout_state)
 
-        def fpolicy_critic(policy_idx, *args):
-            return functional_call(ac_functional,
-                (policy_params[policy_idx], policy_buffers[policy_idx]),
-                ('critic', *args))
+            with profile('Post Step Rollout Store'):
+                for k in ['rewards', 'dones']:
+                    rollout_store = rollout_store.save(
+                        k, (bptt_chunk, bptt_step), post_step_save_data[k])
 
-        rnn_states_cur_in = self.rnn_end_states
-        rnn_states_cur_out = self.rnn_alt_states
+            return rollout_state, rollout_store, bptt_chunk
 
-        for bptt_chunk in range(self.num_bptt_chunks):
+        def iter_bptt_chunk(bptt_chunk, inputs):
+            rollout_state, rollout_store = inputs
+
             with profile("Cache RNN state"):
-                # Cache starting RNN state for this chunk
-                for start_state, end_state in zip(
-                        self.rnn_start_states, rnn_states_cur_in):
-                    torch.index_select(end_state, 2,
-                        self.gather_indices, out=start_state[bptt_chunk])
+                rollout_store = rollout_store.save('rnn_start_states',
+                    bptt_chunk, rollout_state.rnn_states)
 
-                    torch.cuda.synchronize()
+            rollout_state, rollout_store, _ = lax.fori_loop(
+                0, self._num_bptt_steps, rollout_iter,
+                (rollout_state, rollout_store, bptt_chunk))
 
-            for slot in range(self.num_bptt_steps):
-                with profile('Policy Infer', gpu=True):
-                    if self.is_cpu_sim:
-                        # Copy observations to GPU
-                        for sim_ob, policy_in in zip(sim.obs, self.obs_in):
-                            policy_in.copy_(sim_ob, non_blocking=True)
+            return rollout_state, rollout_store
 
-                        if sim.policy_assignments != None:
-                            self.policy_assignments.copy_(sim.policy_assignments)
+        rollout_store = RolloutStore.create_from_tree(
+            self._store_typed_shape_tree)
 
-                    with amp.enable():
-                        torch.vmap(fpolicy_rollout,
-                                   in_dims=self.vmap_in_dims_rollout)(
-                            self.policy_assignments.squeeze(dim=1),
-                            self.actions_out.unsqueeze(dim=1),
-                            self.log_probs_out.unsqueeze(dim=1),
-                            self.values_out.unsqueeze(dim=1),
-                            tuple(r.unsqueeze(dim=3) for r in rnn_states_cur_out),
-                            tuple(r.unsqueeze(dim=3) for r in rnn_states_cur_in),
-                            *[o.unsqueeze(dim=1) for o in self.obs_in],
-                        )
+        rollout_state, rollout_store = lax.fori_loop(
+            0, self._num_bptt_chunks, iter_bptt_chunk,
+            (rollout_state, rollout_store))
 
+        with profile("Bootstrap Values"):
+            bootstrap_values = self._critic_infer(
+                train_state_mgr.train_states, rollout_state)
 
-                    rnn_states_cur_in, rnn_states_cur_out = \
-                        rnn_states_cur_out, rnn_states_cur_in
+            rollout_store = rollout_store.save('bootstrap_values',
+                slice(None), bootstrap_values)
 
-                with profile('Pre Step Rollout Store'):
-                    cur_obs_store = [obs[bptt_chunk, slot] for obs in self.obs]
-                    cur_actions_store = self.actions[bptt_chunk, slot]
-                    cur_log_probs_store = self.log_probs[bptt_chunk, slot]
-                    cur_values_store = self.values[bptt_chunk, slot]
-                    
-                    if self.is_cpu_sim:
-                        for sim_ob, store_ob in zip(sim.obs, cur_obs_store):
-                            torch.index_select(sim_ob, 0, self.gather_indices,
-                                               out=store_ob)
-                    else:
-                        for sim_ob, gather_ob, store_ob in zip(
-                                self.obs_in, self.obs_gather, cur_obs_store):
-                            torch.index_select(sim_ob, 0, self.gather_indices,
-                                               out=gather_ob)
-                            store_ob.copy_(gather_ob, non_blocking=True)
-
-                    torch.index_select(self.actions_out, 0, self.gather_indices,
-                                       out=self.actions_gather)
-                    cur_actions_store.copy_(self.actions_gather, non_blocking=True)
-
-                    torch.index_select(self.log_probs_out, 0, self.gather_indices,
-                                       out=self.log_probs_gather)
-                    cur_log_probs_store.copy_(self.log_probs_gather, non_blocking=True)
-
-                    torch.index_select(self.values_out, 0, self.gather_indices,
-                                       out=self.values_gather)
-                    cur_values_store.copy_(self.values_gather, non_blocking=True)
-
-                with profile('Simulator Step'):
-                    if self.is_cpu_sim:
-                        # This isn't non-blocking because if the sim is running in
-                        # CPU mode, the copy needs to be finished before sim.step()
-                        # FIXME: proper pytorch <-> madrona cuda stream integration
-
-                        sim.actions.copy_(self.actions_out)
-
-                    sim.step()
-
-                with profile('Post Step Rollout Store'):
-                    cur_rewards_store = self.rewards[bptt_chunk, slot]
-                    cur_dones_store = self.dones[bptt_chunk, slot]
-
-                    if self.is_cpu_sim:
-                        torch.index_select(sim.rewards, 0, self.gather_indices,
-                                           out=cur_rewards_store)
-
-                        torch.index_select(sim.dones, 0, self.gather_indices,
-                                           out=cur_dones_store)
-                    else:
-                        torch.index_select(sim.rewards, 0, self.gather_indices,
-                                           out=self.rewards_gather)
-                        cur_rewards_store.copy_(self.rewards_gather)
-
-                        torch.index_select(sim.dones, 0, self.gather_indices,
-                                           out=self.dones_gather)
-                        cur_dones_store.copy_(self.dones_gather)
-
-                    for rnn_states in rnn_states_cur_in:
-                        rnn_states.masked_fill_(sim.dones, 0)
-
-                profile.gpu_measure(sync=True)
-
-        # rnn_hidden_cur_in and rnn_hidden_cur_out are flipped after each
-        # iter so rnn_hidden_cur_in is the final output
-        self.rnn_end_states = rnn_states_cur_in
-        self.rnn_alt_states = rnn_states_cur_out
-
-        with amp.enable(), profile("Bootstrap Values"):
-            if self.is_cpu_sim:
-                for sim_ob, policy_in in zip(sim.obs, self.obs_in):
-                    policy_in.copy_(sim_ob, non_blocking=True)
-
-                if sim.policy_assignments != None:
-                    self.policy_assignments.copy_(sim.policy_assignments)
-
-            # FIXME: this only needs to call the trained policy critics,
-            # would eliminate second gather
-            torch.vmap(fpolicy_critic, in_dims=self.vmap_in_dims_critic)(
-                       self.policy_assignments,
-                       self.values_out,
-                       None,
-                       self.rnn_end_states,
-                       *self.obs_in,
-                   )
-
-            if self.is_cpu_sim:
-                torch.index_select(self.values_out, 0, self.gather_indices,
-                                   out=self.bootstrap_values)
-            else:
-                torch.index_select(self.values_out, 0, self.gather_indices,
-                                   out=self.bootstrap_values_gather)
-                self.bootstrap_values.copy_(self.bootstrap_values_gather)
-
-        # Right now this just returns the rollout manager's pointers,
-        # but in the future could return only one set of buffers from a
-        # double buffered store, etc
-
-        return Rollouts(
-            obs = self.obs,
-            actions = self.actions,
-            log_probs = self.log_probs,
-            dones = self.dones,
-            rewards = self.rewards,
-            values = self.values,
-            bootstrap_values = self.bootstrap_values,
-            rnn_start_states = self.rnn_start_states,
-        )
+        return rollout_state, rollout_store

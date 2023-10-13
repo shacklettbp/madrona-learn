@@ -5,20 +5,19 @@ from flax import linen as nn
 import optax
 
 from dataclasses import dataclass
-from typing import List, Callable
+from typing import List, Callable, Dict
 
 from .actor_critic import ActorCritic
-from .cfg import AlgoConfig, TrainConfig, SimInterface
+from .cfg import AlgoConfig, TrainConfig
 from .moving_avg import EMANormalizer
-from .rollouts import RolloutManager, Rollouts
+from .rollouts import RolloutExecutor
 from .profile import profile
 from .train_state import HyperParams, PolicyTrainState
 
 from .algo_common import (
-        MiniBatch, UpdateResult,
+        InternalConfig, MiniBatch, UpdateResult,
         compute_advantages, compute_action_scores, gather_minibatch
     )
-from .utils import InternalConfig
 
 __all__ = [ "PPOConfig" ]
 
@@ -137,21 +136,21 @@ def _ppo_update(cfg : TrainConfig,
 
 
 def _ppo(
-        cfg : TrainConfig,
-        icfg : InternalConfig,
-        sim : SimInterface,
-        rollout_mgr : RolloutManager,
-        advantages : jax.Array,
-        ac_functional : Callable,
-        policy_states : List[PolicyTrainState],
-    ):
+    cfg: TrainConfig,
+    icfg: InternalConfig,
+    sim_data: Dict,
+    rollout_exec: RolloutExecutor,
+    advantages: jax.Array,
+    ac_functional: Callable,
+    policy_states: List[PolicyTrainState],
+):
     with torch.no_grad():
         for state in policy_states:
             state.policy.eval()
             state.value_normalizer.eval()
 
         with profile('Collect Rollouts'):
-            rollouts = rollout_mgr.collect(sim, ac_functional, policy_states)
+            rollouts = rollout_exec.collect(sim, ac_functional, policy_states)
     
         # Engstrom et al suggest recomputing advantages after every epoch
         # but that's pretty annoying for a recurrent policy since values
@@ -206,13 +205,14 @@ def _ppo(
     )
 
 
-def _ensemble_ppo(cfg : TrainConfig,
-                  icfg : InternalConfig,
-                  sim : SimInterface,
-                  rollout_mgr : RolloutManager,
-                  advantages : jax.Array,
-                  policy_states : List[PolicyTrainState],
-                 ):
+def _ensemble_ppo(
+    cfg: TrainConfig,
+    icfg: InternalConfig,
+    sim_data: Dict,
+    rollout_exec: RolloutExecutor,
+    advantages: jax.Array,
+    policy_states: List[PolicyTrainState],
+):
     pass
 
 
@@ -231,15 +231,15 @@ class PPO:
             self,
             cfg: TrainConfig,
             icfg: InternalConfig,
-            sim : SimInterface,
-            rollout_mgr : RolloutManager,
-            ac_functional : Callable,
-            policy_states : List[PolicyTrainState],
+            sim_data: Dict,
+            rollout_exec: RolloutExecutor,
+            ac_functional: Callable,
+            policy_states: List[PolicyTrainState],
         ):
         return _ppo(cfg,
                     icfg,
-                    sim,
-                    rollout_mgr,
+                    sim_data,
+                    rollout_exec,
                     self.advantages,
                     ac_functional,
                     policy_states)

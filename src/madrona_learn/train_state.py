@@ -20,17 +20,15 @@ class HyperParams(flax.struct.PyTreeNode):
 
 class PolicyTrainState(flax.training.train_state.TrainState):
     hyper_params: HyperParams
-    batch_stats: flax.core.FrozenDict[str, Any] = flax.struct.field(
-        pytree_node=True)
+    batch_stats: flax.core.FrozenDict[str, Any]
     scheduler: Optional[optax.Schedule]
     scaler: Optional[flax.training.dynamic_scale.DynamicScale]
     value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
-    value_normalize_stats: flax.core.FrozenDict[str, Any] = flax.struct.field(
-        pytree_node=True)
+    value_normalize_vars: flax.core.FrozenDict[str, Any]
 
 
 class TrainStateManager(flax.struct.PyTreeNode):
-    train_states: PolicyTrainState = flax.struct.field(pytree_node=True)
+    train_states: PolicyTrainState
 
     def save(self, update_idx, path):
         def get_scheduler_state(learning_state):

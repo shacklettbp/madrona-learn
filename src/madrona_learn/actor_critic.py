@@ -10,27 +10,22 @@ from .profile import profile
 
 class Backbone(nn.Module):
     def _flatten_obs_sequence(self, obs):
-        return [o.view(-1, *o.shape[2:]) for o in obs]
+        return jax.tree_map(lambda o: o.reshape(-1, *o.shape[2:]), obs)
 
-    def forward(self, rnn_states_in, *obs_in):
+    def forward(self, rnn_states_in, obs_in):
         raise NotImplementedError
 
-    def fwd_actor_only(self, rnn_states_out, rnn_states_in, *obs_in):
+    def fwd_actor_only(self, rnn_states_out, rnn_states_in, obs_in):
         raise NotImplementedError
 
-    def fwd_critic_only(self, rnn_states_out, rnn_states_in, *obs_in):
+    def fwd_critic_only(self, rnn_states_out, rnn_states_in, obs_in):
         raise NotImplementedError
 
-    def fwd_rollout(self, rnn_states_out, rnn_states_in, *obs_in):
+    def fwd_rollout(self, rnn_states_out, rnn_states_in, obs_in):
         raise NotImplementedError
 
-    def fwd_sequence(self, rnn_start_states, dones, *obs_in):
+    def fwd_sequence(self, rnn_start_states, dones, obs_in):
         raise NotImplementedError
-
-
-class RecurrentStateConfig:
-    def __init__(self, shapes):
-        self.shapes = shapes
 
 
 class ActorCritic(nn.Module):
@@ -50,31 +45,31 @@ class ActorCritic(nn.Module):
     def setup(self):
         pass
 
-    def debug(self, rnn_states, *obs, train=False):
+    def debug(self, rnn_states, obs, train=False):
         actor_features, critic_features, new_rnn_states = self.backbone(
-            rnn_states, *obs)
+            rnn_states, obs)
 
         action_dists = self.actor(actor_features)
         values = self.critic(critic_features)
 
         return action_dists, values, new_rnn_states
 
-    def actor_only(self, rnn_states_in, *obs_in, train=False):
+    def actor_only(self, rnn_states_in, obs_in, train=False):
         actor_features, rnn_states_out = self.backbone.actor_only(
-                rnn_states_in, *obs_in, train=train)
+                rnn_states_in, obs_in, train=train)
 
         action_dists = self.actor(actor_features, train=train)
         return action_dists.best(), rnn_states_out
 
-    def critic_only(self, rnn_states_in, *obs_in, train=False):
+    def critic_only(self, rnn_states_in, obs_in, train=False):
         critic_features, rnn_states_out = self.backbone.critic_only(
-            rnn_states_in, *obs_in, train=train)
+            rnn_states_in, obs_in, train=train)
         values = self.critic(critic_features, train=train)
         return values, rnn_states_out
 
-    def rollout(self, prng_key, rnn_states_in, *obs_in, train=False):
+    def rollout(self, prng_key, rnn_states_in, obs_in, train=False):
         actor_features, critic_features, rnn_states_out = self.backbone(
-            rnn_states_in, *obs_in, train=train)
+            rnn_states_in, obs_in, train=train)
 
         action_dists = self.actor(actor_features)
         actions, log_probs = action_dists.sample(prng_key)
@@ -87,11 +82,11 @@ class ActorCritic(nn.Module):
             rnn_states,
             sequence_breaks,
             rollout_actions,
-            *obs,
+            obs,
             train=True,
         ):
         actor_features, critic_features = self.backbone.sequence(
-            rnn_states, sequence_breaks, *obs, train=train)
+            rnn_states, sequence_breaks, obs, train=train)
 
         action_dists = self.actor(actor_features, train=train)
         values = self.critic(critic_features, train=train)
@@ -122,18 +117,18 @@ class BackboneEncoder(nn.Module):
     def setup(self):
         self.rnn_state_shape = None
 
-    def __call__(self, rnn_states, *inputs, train):
-        features = self.net(*inputs)
+    def __call__(self, rnn_states, inputs, train):
+        features = self.net(inputs)
         return features, None
 
     def sequence(
         self,
         rnn_start_states,
         sequence_ends,
-        *flattened_inputs,
+        flattened_inputs,
         train,
     ):
-        return self.net(*flattened_inputs, train=train)
+        return self.net(flattened_inputs, train=train)
 
 class RecurrentBackboneEncoder(nn.Module):
     net : nn.Module
@@ -165,7 +160,7 @@ class RecurrentBackboneEncoder(nn.Module):
         *flattened_inputs,
         train
     ):
-        features = self.net(*flattened_inputs, train=train)
+        features = self.net(flattened_inputs, train=train)
         features_seq = features.reshape(
             *sequence_ends.shape[0:2], *features.shape[1:])
 
@@ -193,28 +188,28 @@ class BackboneShared(Backbone):
     def setup(self):
         pass
 
-    def _rollout_common(self, rnn_states_in, *obs_in, train):
-        processed = self.prefix(*obs_in, train=train)
+    def _rollout_common(self, rnn_states_in, obs_in, train):
+        processed = self.prefix(obs_in, train=train)
 
         features, rnn_states_out = self.encoder(
-            rnn_states_in, processed_obs, train=train)
+            rnn_states_in, processed, train=train)
 
         return features, rnn_states_out
 
-    def __call__(self, rnn_states_in, *obs_in, train):
+    def __call__(self, rnn_states_in, obs_in, train):
         features, rnn_states_out = self._rollout_common(
-            rnn_states_in, *obs_in, train)
+            rnn_states_in, obs_in, train)
         return features, features, rnn_states_out
 
-    def actor_only(self, rnn_states_in, *obs_in, train):
-        return self._rollout_common(rnn_states_in, *obs_in, train)
+    def actor_only(self, rnn_states_in, obs_in, train):
+        return self._rollout_common(rnn_states_in, obs_in, train)
 
-    def critic_only(self, rnn_states_in, *obs_in, train):
-        return self._rollout_common(rnn_states_in, *obs_in, train)
+    def critic_only(self, rnn_states_in, obs_in, train):
+        return self._rollout_common(rnn_states_in, obs_in, train)
 
-    def sequence(self, rnn_start_states, sequence_ends, *obs_in, train):
+    def sequence(self, rnn_start_states, sequence_ends, obs_in, train):
         flattened_obs = self._flatten_obs_sequence(obs_in)
-        processed_obs = self.prefix(*flattened_obs, train=train)
+        processed_obs = self.prefix(flattened_obs, train=train)
         
         features = self.encoder.sequence(
             rnn_start_states, sequence_ends, processed_obs, train=train)
@@ -242,8 +237,8 @@ class BackboneSeparate(Backbone):
     def setup(self):
         pass
 
-    def __call__(self, rnn_states_in, *obs_in, train):
-        processed = self.prefix(*obs_in, train=train)
+    def __call__(self, rnn_states_in, obs_in, train):
+        processed = self.prefix(obs_in, train=train)
 
         actor_features, actor_rnn_out = self.actor_encoder(
             rnn_states_in[0], processed, train=train)
@@ -252,25 +247,25 @@ class BackboneSeparate(Backbone):
 
         return actor_features, critic_features, (actor_rnn_out, critic_rnn_out)
 
-    def actor_only(self, rnn_states_in, *obs_in):
-        processed = self.prefix(*obs_in, train=train)
+    def actor_only(self, rnn_states_in, obs_in, train):
+        processed = self.prefix(obs_in, train=train)
 
         features, rnn_states_out = self.actor_encoder(
             rnn_states_in[0], processed, train=train)
 
         return features, (rnn_states_out, rnn_states_in[1])
 
-    def critic_only(self, rnn_states_in, *obs_in):
-        processed = self.prefix(*obs_in, train=train)
+    def critic_only(self, rnn_states_in, obs_in, train):
+        processed = self.prefix(obs_in, train=train)
 
         features, rnn_states_out = self.critic_encoder(
             rnn_states_in[1], processed, train=train)
 
         return features, (rnn_states_in[0], rnn_states_out)
 
-    def sequence(self, rnn_start_states, sequence_ends, *obs_in):
+    def sequence(self, rnn_start_states, sequence_ends, obs_in, train):
         flattened_obs = self._flatten_obs_sequence(obs_in)
-        processed = self.prefix(*flattened_obs, train=train)
+        processed = self.prefix(flattened_obs, train=train)
         
         actor_features = self.actor_encoder.sequence(
             rnn_start_states[0], sequence_ends, processed, train=train)

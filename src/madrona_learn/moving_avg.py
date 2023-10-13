@@ -6,9 +6,9 @@ from flax import linen as nn
 # Exponential Moving Average mean and variance estimator for
 # values and observations
 class EMANormalizer(nn.Module):
-    decay : jnp.float32
-    eps : jnp.float32 = 1e-5
-    disable : bool = False
+    decay: jnp.float32
+    eps: jnp.float32 = 1e-5
+    disable: bool = False
 
     def _update_stats(
         self,

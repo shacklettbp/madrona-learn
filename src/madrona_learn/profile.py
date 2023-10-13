@@ -116,6 +116,9 @@ class Profiler:
 
     @contextmanager
     def __call__(self, name, gpu=False):
+        yield
+        return
+
         if self.disabled:
             try:
                 yield

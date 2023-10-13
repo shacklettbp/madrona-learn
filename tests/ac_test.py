@@ -27,6 +27,25 @@ def assert_valid_input(tensor):
     checkify.check(jnp.isnan(tensor).any() == False, "NaN!")
     checkify.check(jnp.isinf(tensor).any() == False, "Inf!")
 
+def inplace_test():
+    a = jnp.array([5, 0, 0], jnp.int32)
+    #ext = jax.dlpack.to_dlpack(a)
+    #a = jax.dlpack.from_dlpack(ext)
+    print(a)
+
+    def f(a, b):
+        return a.at[:].set(b * 2)
+
+    f = jax.jit(f, donate_argnums=0)
+    rnd = random.randint(random.PRNGKey(5), (3,), 0, 10, jnp.int32)
+    lowered = f.lower(a, rnd)
+    print(lowered.as_text())
+
+    ptr1 = a.unsafe_buffer_pointer()
+    b = f(a, rnd)
+    ptr2 = b.unsafe_buffer_pointer()
+    assert(ptr1 == ptr2)
+
 class ProcessObsCommon(nn.Module):
     num_lidar_samples: int
 
@@ -350,4 +369,5 @@ def test():
     print(num_worlds * num_iters / (end - start))
 
 if __name__ == "__main__":
+    inplace_test()
     test()

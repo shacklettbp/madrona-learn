@@ -20,6 +20,7 @@ class TrainConfig:
     algo: AlgoConfig
     num_bptt_chunks: int
     gamma: float
+    seed: int
     gae_lambda: float = 1.0
     team_size: int = 1
     num_teams: int = 1
@@ -42,12 +43,3 @@ class TrainConfig:
                 rep += f"\n  {k}: {v}" 
 
         return rep
-
-@dataclass(frozen=True)
-class SimInterface:
-    step: Callable
-    obs: List[jax.Array]
-    actions: jax.Array
-    dones: jax.Array
-    rewards: jax.Array
-    policy_assignments: Optional[jax.Array]

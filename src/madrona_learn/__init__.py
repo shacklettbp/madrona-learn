@@ -1,6 +1,6 @@
-from madrona_learn.train import train
+from madrona_learn.train import train, init
 from madrona_learn.train_state import TrainStateManager
-from madrona_learn.cfg import TrainConfig, SimInterface
+from madrona_learn.cfg import TrainConfig
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
         ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
@@ -12,7 +12,7 @@ import madrona_learn.rnn
 from madrona_learn.ppo import PPOConfig
 
 __all__ = [
-        "train", "TrainStateManager", "models", "rnn",
+        "train", "init", "TrainStateManager", "models", "rnn",
         "TrainConfig", "SimInterface",
         "DiscreteActionDistributions",
         "ActorCritic", "DiscreteActor", "Critic",

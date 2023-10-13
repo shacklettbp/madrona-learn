@@ -4,12 +4,44 @@ import flax
 from flax import linen as nn
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
 from .utils import DataclassProtocol
-from .rollouts import Rollouts
+
+@dataclass
+class InternalConfig:
+    rollout_batch_size: int
+    rollout_agents_per_policy: int
+    rollout_batch_size_per_policy: int
+    num_train_agents: int
+    train_agents_per_policy: int
+    num_train_seqs: int
+    num_bptt_steps: int
+    float_storage_type : jnp.dtype
+
+    def __init__(self, dev, cfg):
+        self.rollout_batch_size = \
+            cfg.num_teams * cfg.team_size * cfg.num_worlds
+
+        assert(cfg.num_worlds % cfg.pbt_ensemble_size == 0)
+
+        self.rollout_agents_per_policy = self.rollout_batch_size // (
+            cfg.pbt_ensemble_size * cfg.pbt_history_len)
+
+        self.num_train_agents = cfg.team_size * cfg.num_worlds
+        self.train_agents_per_policy = \
+            self.num_train_agents // cfg.pbt_ensemble_size
+
+        assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
+        self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks
+        self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
+
+        if dev.platform == 'cpu' and cfg.mixed_precision:
+            self.float_storage_type = jnp.bfloat16
+        else:
+            self.float_storage_type = jnp.float16
 
 
 @dataclass(frozen = True)
@@ -37,7 +69,7 @@ class UpdateResult:
 def compute_advantages(cfg : TrainConfig,
                        value_normalizer : EMANormalizer,
                        advantages_out : jax.Array,
-                       rollouts : Rollouts):
+                       rollouts : Dict):
     # This function is going to be operating in fp16 mode completely
     # when mixed precision is enabled since amp.compute_dtype is fp16
     # even though there is no autocast here. Unclear if this is desirable or
@@ -105,7 +137,7 @@ def _mb_slice_rnn(rnn_state, inds):
     return reshaped[:, :, inds, :] 
 
 def gather_minibatch(
-    rollouts : Rollouts,
+    rollouts : Dict,
     advantages : jax.Array,
     inds : jax.Array
 ):
