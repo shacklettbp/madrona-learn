@@ -59,6 +59,15 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states if rnn_states != None else self.rnn_states,
         )
 
+class RolloutData(flax.struct.PyTreeNode):
+    data: FrozenDict
+
+    def all(self):
+        return self.data
+
+    def minibatch(self, indices):
+        return jax.tree_map(lambda x: jnp.take(x, indices, 0), self.data)
+
 class RolloutStore(flax.struct.PyTreeNode):
     data : FrozenDict
 
@@ -347,9 +356,9 @@ class RolloutExecutor:
 
         rnn_start_states = jax.tree_map(reorder_rnn_data, rnn_start_states)
             
-        return rollouts.copy({
+        return RolloutData(data = rollouts.copy({
             'rnn_start_states': rnn_start_states,
-        })
+        }))
 
     def collect(
         self,

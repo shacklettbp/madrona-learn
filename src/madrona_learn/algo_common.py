@@ -49,18 +49,6 @@ class InternalConfig:
 
 
 @dataclass(frozen = True)
-class MiniBatch:
-    obs: List[jax.Array]
-    actions: jax.Array
-    log_probs: jax.Array
-    dones: jax.Array
-    rewards: jax.Array
-    values: jax.Array
-    advantages: jax.Array
-    rnn_start_states: tuple[jax.Array, ...]
-
-
-@dataclass(frozen = True)
 class UpdateStats:
     actions : jax.Array
     rewards : jax.Array

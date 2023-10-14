@@ -13,14 +13,14 @@ from .cfg import AlgoConfig, TrainConfig
 from .moving_avg import EMANormalizer
 from .profile import profile
 from .train_state import HyperParams, PolicyTrainState
+from .rollouts import RolloutData
 
 from .algo_common import (
-        InternalConfig, MiniBatch, UpdateStats,
-        compute_advantages, 
-        compute_returns,
-        normalize_advantages,
-        gather_minibatch
-    )
+    InternalConfig, UpdateStats,
+    compute_advantages, 
+    compute_returns,
+    normalize_advantages,
+)
 
 __all__ = [ "PPOConfig" ]
 
@@ -67,7 +67,7 @@ class PPOStats:
 
 
 def _ppo_update(cfg : TrainConfig,
-                mb : MiniBatch,
+                mb : FrozenDict[str, Any],
                 actor_critic : ActorCritic,
                 optimizer : optax.GradientTransformation,
                 value_normalizer : EMANormalizer,
@@ -146,68 +146,40 @@ def _ppo(
     cfg: TrainConfig,
     icfg: InternalConfig,
     train_state: PolicyTrainState,
-    rollout_data: FrozenDict[str, Any],
+    rollout_data: RolloutData,
 ):
-    return train_state, None
-
-    self.advantages = torch.zeros(
-            (cfg.num_bptt_chunks,
-             icfg.num_bptt_steps,
-             icfg.num_train_agents,
-             1),
-            dtype=icfg.float_storage_type, device=dev)
-
-
-    with torch.no_grad():
-        for state in policy_states:
-            state.policy.eval()
-            state.value_normalizer.eval()
-
-        with profile('Collect Rollouts'):
-            rollouts = rollout_exec.collect(sim, ac_functional, policy_states)
+    print(rollout_data.all()['advantages'])
     
-        # Engstrom et al suggest recomputing advantages after every epoch
-        # but that's pretty annoying for a recurrent policy since values
-        # need to be recomputed. https://arxiv.org/abs/2005.12729
-        with profile('Compute Advantages'):
-            compute_advantages(cfg,
-                               value_normalizer,
-                               advantages,
-                               rollouts)
-    
-    for state in policy_states:
-        state.policy.train()
-        state.value_normalizer.train()
+    aggregate_stats = PPOStats()
+    num_stats = 0
 
-    with profile('PPO'):
-        aggregate_stats = PPOStats()
-        num_stats = 0
+    for epoch in range(cfg.algo.num_epochs):
+        mb_rnd, train_state = train_state.gen_update_rnd()
 
-        for epoch in range(cfg.algo.num_epochs):
-            for inds in torch.randperm(icfg.num_train_seqs).chunk(
-                    cfg.algo.num_mini_batches):
-                with torch.no_grad(), profile('Gather Minibatch', gpu=True):
-                    mb = gather_minibatch(rollouts, advantages, inds)
-                cur_stats = _ppo_update(cfg,
-                                        mb,
-                                        actor_critic,
-                                        optimizer,
-                                        value_normalizer)
+        for inds in torch.randperm(icfg.num_train_seqs).chunk(
+                cfg.algo.num_mini_batches):
+            with torch.no_grad(), profile('Gather Minibatch', gpu=True):
+                mb = gather_minibatch(rollouts, advantages, inds)
+            cur_stats = _ppo_update(cfg,
+                                    mb,
+                                    actor_critic,
+                                    optimizer,
+                                    value_normalizer)
 
-                with torch.no_grad():
-                    num_stats += 1
-                    aggregate_stats.loss += (cur_stats.loss - aggregate_stats.loss) / num_stats
-                    aggregate_stats.action_loss += (
-                        cur_stats.action_loss - aggregate_stats.action_loss) / num_stats
-                    aggregate_stats.value_loss += (
-                        cur_stats.value_loss - aggregate_stats.value_loss) / num_stats
-                    aggregate_stats.entropy_loss += (
-                        cur_stats.entropy_loss - aggregate_stats.entropy_loss) / num_stats
-                    aggregate_stats.returns_mean += (
-                        cur_stats.returns_mean - aggregate_stats.returns_mean) / num_stats
-                    # FIXME
-                    aggregate_stats.returns_stddev += (
-                        cur_stats.returns_stddev - aggregate_stats.returns_stddev) / num_stats
+            with torch.no_grad():
+                num_stats += 1
+                aggregate_stats.loss += (cur_stats.loss - aggregate_stats.loss) / num_stats
+                aggregate_stats.action_loss += (
+                    cur_stats.action_loss - aggregate_stats.action_loss) / num_stats
+                aggregate_stats.value_loss += (
+                    cur_stats.value_loss - aggregate_stats.value_loss) / num_stats
+                aggregate_stats.entropy_loss += (
+                    cur_stats.entropy_loss - aggregate_stats.entropy_loss) / num_stats
+                aggregate_stats.returns_mean += (
+                    cur_stats.returns_mean - aggregate_stats.returns_mean) / num_stats
+                # FIXME
+                aggregate_stats.returns_stddev += (
+                    cur_stats.returns_stddev - aggregate_stats.returns_stddev) / num_stats
 
     return UpdateStats(
         actions = rollouts.actions.view(-1, *rollouts.actions.shape[2:]),

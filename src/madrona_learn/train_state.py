@@ -29,6 +29,43 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
     scaler: Optional[flax.training.dynamic_scale.DynamicScale]
+    update_prng_key: random.PRNGKey
+
+    def update(
+        self,
+        params=None,
+        batch_stats=None,
+        value_normalize_vars=None,
+        hyper_params=None,
+        tx=None,
+        opt_state=None,
+        scheduler=None,
+        scaler=None,
+        update_prng_key=None,
+    ):
+        return PolicyTrainState(
+            apply_fn = self.apply_fn,
+            params = params if params != None else self.params,
+            batch_stats = (
+                batch_stats if batch_stats != None else self.batch_stats),
+            value_normalize_fn = self.value_normalize_fn,
+            value_normalize_vars = (
+                value_normalize_vars if value_normalize_vars != None else
+                    self.value_normalize_vars),
+            hyper_params = (
+                hyper_params if hyper_params != None else self.hyper_params),
+            tx = tx if tx != None else self.tx,
+            opt_state = opt_state if opt_state != None else self.opt_state,
+            scheduler = scheduler if scheduler != None else self.scheduler,
+            scaler = scaler if scaler != None else self.scaler,
+            update_prng_key = (
+                update_prng_key if update_prng_key != None else 
+                    self.update_prng_key),
+        )
+
+    def gen_update_rnd(self):
+        rnd, next_key = random.split(self.update_prng_key)
+        return rnd, self.update(update_prng_key=next_key)
 
 
 class TrainStateManager(flax.struct.PyTreeNode):

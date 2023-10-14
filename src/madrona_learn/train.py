@@ -81,7 +81,7 @@ def _setup_value_normalizer(cfg, rng_key, fake_values):
     return value_normalizer.apply, value_normalizer_vars
 
 def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
-    model_init_rng, value_norm_rng = random.split(prng_key, 2)
+    model_init_rng, value_norm_rng, update_rng = random.split(prng_key, 3)
     fake_outs, variables = policy.init_with_output(
         model_init_rng, random.PRNGKey(0), rnn_states, obs,
         method='rollout')
@@ -117,6 +117,7 @@ def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
         opt_state = opt_state,
         scheduler = None,
         scaler = scaler,
+        update_prng_key = update_rng,
     )
 
 def _setup_train_states(policy, cfg, icfg, base_init_rng, rollout_state):
