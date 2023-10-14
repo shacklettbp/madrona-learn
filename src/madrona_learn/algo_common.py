@@ -2,6 +2,7 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from flax.core import FrozenDict
 
 from dataclasses import dataclass
 from typing import List, Dict
@@ -38,10 +39,13 @@ class InternalConfig:
         self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks
         self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
 
-        if dev.platform == 'cpu' and cfg.mixed_precision:
-            self.float_storage_type = jnp.bfloat16
+        if cfg.mixed_precision:
+            if dev.platform == 'gpu':
+                self.float_storage_type = jnp.float16
+            else:
+                self.float_storage_type = jnp.bfloat16
         else:
-            self.float_storage_type = jnp.float16
+            self.float_storage_type = jnp.float32
 
 
 @dataclass(frozen = True)
@@ -57,7 +61,7 @@ class MiniBatch:
 
 
 @dataclass(frozen = True)
-class UpdateResult:
+class UpdateStats:
     actions : jax.Array
     rewards : jax.Array
     values : jax.Array
@@ -66,58 +70,107 @@ class UpdateResult:
     algo_stats : DataclassProtocol
 
 
-def compute_advantages(cfg : TrainConfig,
-                       value_normalizer : EMANormalizer,
-                       advantages_out : jax.Array,
-                       rollouts : Dict):
-    # This function is going to be operating in fp16 mode completely
-    # when mixed precision is enabled since amp.compute_dtype is fp16
-    # even though there is no autocast here. Unclear if this is desirable or
-    # even beneficial for performance.
+def compute_returns(cfg: TrainConfig,
+                    rollouts: FrozenDict):
+    num_chunks, steps_per_chunk, P, B = rollouts['dones'].shape[0:4]
 
-    num_chunks, steps_per_chunk, N = rollouts.dones.shape[0:3]
     T = num_chunks * steps_per_chunk
+    N = P * B
 
-    seq_dones = rollouts.dones.view(T, N, 1)
-    seq_rewards = rollouts.rewards.view(T, N, 1)
-    seq_values = rollouts.values.view(T, N, 1)
-    seq_advantages_out = advantages_out.view(T, N, 1)
+    seq_dones, seq_rewards = jax.tree_map(
+        lambda x: x.shape(T, N, 1), (rollouts['dones'], rollouts['rewards']))
 
-    next_advantage = 0.0
-    next_values = value_normalizer.invert(rollouts.bootstrap_values)
-    for i in reversed(range(cfg.steps_per_update)):
-        cur_dones = seq_dones[i].to(dtype=amp.compute_dtype)
-        cur_rewards = seq_rewards[i].to(dtype=amp.compute_dtype)
-        cur_values = seq_values[i].to(dtype=amp.compute_dtype)
+    bootstrap_values = rollouts['bootstrap_values']
+    bootstrap_values = bootstrap_values.reshape(-1, 1)
 
-        next_valid = 1.0 - cur_dones
+    returns = jnp.empty_like(seq_rewards)
+    zero = jnp.zeros((), dtype=seq_rewards.dtype)
+
+    def return_step(i_fwd, inputs):
+        i = T - 1 - i_fwd
+        next_return, returns = inputs
+
+        cur_dones = seq_dones[i]
+        cur_rewards = seq_rewards[i]
+
+        next_return = jnp.where(cur_dones, zero, next_return)
+
+        cur_return = cur_rewards + cfg.gamma * next_return
+
+        returns = returns.at[i].set(cur_return)
+
+        return cur_return, returns
+
+    next_return, returns = lax.fori_loop(
+        0, T, return_step, (bootstrap_values, returns))
+
+    returns = returns.reshape(num_chunks, steps_per_chunk, P, B)
+
+    return rollouts.copy({
+        'returns': returns
+    })
+
+def compute_advantages(cfg: TrainConfig,
+                       rollouts: FrozenDict):
+    num_chunks, steps_per_chunk, P, B = rollouts['dones'].shape[0:4]
+
+    T = num_chunks * steps_per_chunk
+    N = P * B
+
+    seq_dones, seq_rewards, seq_values = jax.tree_map(
+        lambda x: x.reshape(T, N, 1),
+        (rollouts['dones'], rollouts['rewards'], rollouts['values']))
+
+    bootstrap_values = rollouts['bootstrap_values']
+    bootstrap_values = bootstrap_values.reshape(-1, 1)
+
+    advantages = jnp.empty_like(seq_rewards)
+
+    zero = jnp.zeros((), dtype=seq_rewards.dtype)
+
+    def advantage_step(i_fwd, inputs):
+        i = T - 1 - i_fwd
+        next_advantage, next_values, advantages = inputs
+
+        cur_dones = seq_dones[i]
+        cur_rewards = seq_rewards[i]
+        cur_values = seq_values[i]
+
+        next_values = jnp.where(cur_dones, zero, next_values)
+        next_advantage = jnp.where(cur_dones, zero, next_advantage)
 
         # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-        td_err = (cur_rewards + 
-            cfg.gamma * next_valid * next_values - cur_values)
+        td_err = cur_rewards + cfg.gamma * next_values - cur_values
 
         # A_t = sum (gamma * lambda)^(l - 1) * delta_l (EQ 16 GAE)
         #     = delta_t + gamma * lambda * A_t+1
-        cur_advantage = (td_err +
-            cfg.gamma * cfg.gae_lambda * next_valid * next_advantage)
+        cur_advantage = td_err + cfg.gamma * cfg.gae_lambda * next_advantage
 
-        seq_advantages_out[i] = cur_advantage
+        advantages = advantages.at[i].set(cur_advantage)
 
-        next_advantage = cur_advantage
-        next_values = cur_values
+        return cur_advantage, cur_values, advantages
 
+    next_advantage, next_values, advantages = lax.fori_loop(
+        0, T, advantage_step,
+        (jnp.zeros_like(bootstrap_values), bootstrap_values, advantages))
 
-def compute_action_scores(cfg, advantages):
+    advantages = advantages.reshape(num_chunks, steps_per_chunk, P, B, 1)
+
+    return rollouts.copy({
+        'advantages': advantages
+    })
+
+def normalize_advantages(cfg, advantages):
     if not cfg.normalize_advantages:
         return advantages
     else:
-        # Unclear from docs if var_mean is safe under autocast
-        with amp.disable():
-            var, mean = torch.var_mean(advantages.to(dtype=torch.float32))
-            action_scores = advantages - mean
-            action_scores.mul_(torch.rsqrt(var.clamp(min=1e-5)))
+       mean = jnp.mean(advantages, dtype=jnp.float32)
+       var = jnp.var(advantages, dtype=jnp.float32)
 
-            return action_scores.to(dtype=amp.compute_dtype)
+       mean = jnp.asarray(mean, dtype=advantages.dtype)
+       var = jnp.asarray(var, dtype=advantages.dtype)
+
+       return (advantages - mean) * jnp.rsqrt(jnp.clip(var, min=1e-5))
 
 
 def _mb_slice(tensor, inds):

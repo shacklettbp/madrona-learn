@@ -44,7 +44,7 @@ class EMANormalizer(nn.Module):
         else:
             prev_mu = self.mu
 
-        sigma_sq_new = torch.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
+        sigma_sq_new = jnp.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
         sigma_sq_biased.value = (sigma_sq_biased * self.decay +
             sigma_sq_new * one_minus_decay)
 

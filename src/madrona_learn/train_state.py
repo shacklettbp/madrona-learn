@@ -18,13 +18,17 @@ class HyperParams(flax.struct.PyTreeNode):
     gae_lambda: float
 
 
-class PolicyTrainState(flax.training.train_state.TrainState):
-    hyper_params: HyperParams
+class PolicyTrainState(flax.struct.PyTreeNode):
+    apply_fn: Callable = flax.struct.field(pytree_node=False)
+    params: flax.core.FrozenDict[str, Any]
     batch_stats: flax.core.FrozenDict[str, Any]
-    scheduler: Optional[optax.Schedule]
-    scaler: Optional[flax.training.dynamic_scale.DynamicScale]
     value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
     value_normalize_vars: flax.core.FrozenDict[str, Any]
+    hyper_params: HyperParams
+    tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
+    opt_state: optax.OptState
+    scheduler: Optional[optax.Schedule]
+    scaler: Optional[flax.training.dynamic_scale.DynamicScale]
 
 
 class TrainStateManager(flax.struct.PyTreeNode):

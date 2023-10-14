@@ -2,44 +2,51 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from flax.core import FrozenDict
 import optax
 
 from dataclasses import dataclass
-from typing import List, Callable, Dict
+from typing import List, Callable, Dict, Any
 
 from .actor_critic import ActorCritic
 from .cfg import AlgoConfig, TrainConfig
 from .moving_avg import EMANormalizer
-from .rollouts import RolloutExecutor
 from .profile import profile
 from .train_state import HyperParams, PolicyTrainState
 
 from .algo_common import (
-        InternalConfig, MiniBatch, UpdateResult,
-        compute_advantages, compute_action_scores, gather_minibatch
+        InternalConfig, MiniBatch, UpdateStats,
+        compute_advantages, 
+        compute_returns,
+        normalize_advantages,
+        gather_minibatch
     )
 
 __all__ = [ "PPOConfig" ]
 
 @dataclass(frozen=True)
 class PPOConfig(AlgoConfig):
+    num_epochs: int
     num_mini_batches: int
     clip_coef: float
     value_loss_coef: float
     entropy_coef: float
     max_grad_norm: float
-    num_epochs: int = 1
     clip_value_loss: bool = False
     adaptive_entropy: bool = True
+    use_advantage: bool = True
 
     def name(self):
         return "ppo"
 
-    def setup(self,
-              dev: jax.Device,
-              cfg: TrainConfig,
-              icfg: InternalConfig):
-        return PPO(dev, cfg, icfg)
+    def update_fn(self):
+        return _ppo
+
+    def finalize_rollouts_fn(self):
+        if self.use_advantage:
+            return compute_advantages
+        else:
+            return compute_returns
 
 
 class PPOHyperParams(HyperParams):
@@ -138,12 +145,19 @@ def _ppo_update(cfg : TrainConfig,
 def _ppo(
     cfg: TrainConfig,
     icfg: InternalConfig,
-    sim_data: Dict,
-    rollout_exec: RolloutExecutor,
-    advantages: jax.Array,
-    ac_functional: Callable,
-    policy_states: List[PolicyTrainState],
+    train_state: PolicyTrainState,
+    rollout_data: FrozenDict[str, Any],
 ):
+    return train_state, None
+
+    self.advantages = torch.zeros(
+            (cfg.num_bptt_chunks,
+             icfg.num_bptt_steps,
+             icfg.num_train_agents,
+             1),
+            dtype=icfg.float_storage_type, device=dev)
+
+
     with torch.no_grad():
         for state in policy_states:
             state.policy.eval()
@@ -195,7 +209,7 @@ def _ppo(
                     aggregate_stats.returns_stddev += (
                         cur_stats.returns_stddev - aggregate_stats.returns_stddev) / num_stats
 
-    return UpdateResult(
+    return UpdateStats(
         actions = rollouts.actions.view(-1, *rollouts.actions.shape[2:]),
         rewards = rollouts.rewards.view(-1, *rollouts.rewards.shape[2:]),
         values = rollouts.values.view(-1, *rollouts.values.shape[2:]),
@@ -203,43 +217,3 @@ def _ppo(
         bootstrap_values = rollouts.bootstrap_values,
         algo_stats = aggregate_stats,
     )
-
-
-def _ensemble_ppo(
-    cfg: TrainConfig,
-    icfg: InternalConfig,
-    sim_data: Dict,
-    rollout_exec: RolloutExecutor,
-    advantages: jax.Array,
-    policy_states: List[PolicyTrainState],
-):
-    pass
-
-
-class PPO:
-    def __init__(self, dev, cfg, icfg):
-        assert(icfg.num_train_seqs % cfg.algo.num_mini_batches == 0)
-
-        self.advantages = torch.zeros(
-            (cfg.num_bptt_chunks,
-             icfg.num_bptt_steps,
-             icfg.num_train_agents,
-             1),
-            dtype=icfg.float_storage_type, device=dev)
-
-    def __call__(
-            self,
-            cfg: TrainConfig,
-            icfg: InternalConfig,
-            sim_data: Dict,
-            rollout_exec: RolloutExecutor,
-            ac_functional: Callable,
-            policy_states: List[PolicyTrainState],
-        ):
-        return _ppo(cfg,
-                    icfg,
-                    sim_data,
-                    rollout_exec,
-                    self.advantages,
-                    ac_functional,
-                    policy_states)
