@@ -144,7 +144,8 @@ def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
         update_prng_key = update_rng,
     )
 
-def _setup_train_states(policy, cfg, icfg, base_init_rng, rollout_state):
+def _setup_train_states(policy, cfg, icfg, base_init_rng,
+                        rollout_state, checkify_errors):
     setup_new_policies = jax.vmap(
         partial(_setup_new_policy, policy, cfg), in_axes=(0, 0, 0))
 
@@ -154,7 +155,8 @@ def _setup_train_states(policy, cfg, icfg, base_init_rng, rollout_state):
             *x.shape[1:],
         ), rollout_state.sim_data['obs'])
 
-    setup_new_policies = jax.jit(checkify.checkify(setup_new_policies))
+    setup_new_policies = jax.jit(
+        checkify.checkify(setup_new_policies, errors=checkify_errors))
 
     init_rngs = random.split(base_init_rng, cfg.pbt_ensemble_size)
 
@@ -171,13 +173,23 @@ def init(mem_fraction):
 
 def _train_impl(cfg, icfg, sim_data, sim_step,
                 policy, iter_cb, metrics_cfg, restore_ckpt):
+    checkify_errors = checkify.user_checks
+    if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
+            env_vars['MADRONA_LEARN_FULL_CHECKIFY'] == '1':
+        checkify_errors |= (
+            checkify.float_checks |
+            checkify.nan_checks |
+            checkify.div_checks |
+            checkify.index_checks
+        )
+
     rollout_rnd, init_rnd = random.split(random.PRNGKey(cfg.seed))
 
     def init_rnn_states():
         def init(arg):
             return policy.init_recurrent_state(icfg.rollout_agents_per_policy)
 
-        return jax.vmap(init)(jnp.empty(
+        return jax.vmap(init)(jnp.zeros(
             cfg.pbt_ensemble_size * cfg.pbt_history_len))
 
     rnn_states = jax.jit(init_rnn_states)()
@@ -190,7 +202,7 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
     )
 
     train_state_mgr = _setup_train_states(
-        policy, cfg, icfg, init_rnd, rollout_state)
+        policy, cfg, icfg, init_rnd, rollout_state, checkify_errors)
 
     if restore_ckpt != None:
         start_update_idx = train_state_mgr.load(restore_ckpt)
@@ -222,7 +234,9 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
         )
 
     update_loop_wrapper = jax.jit(
-        checkify.checkify(update_loop_wrapper), donate_argnums=[0, 1])
+        checkify.checkify(update_loop_wrapper, errors=checkify_errors),
+        donate_argnums=[0, 1])
+
     lowered_update_loop = update_loop_wrapper.lower(
         rollout_state, train_state_mgr)
 
