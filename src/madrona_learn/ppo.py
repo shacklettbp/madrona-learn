@@ -36,7 +36,6 @@ class PPOConfig(AlgoConfig):
     max_grad_norm: float
     clip_value_loss: bool = False
     huber_value_loss: bool = True
-    adaptive_entropy: bool = True
     use_advantage: bool = True
 
     def name(self):

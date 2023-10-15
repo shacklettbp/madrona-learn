@@ -24,8 +24,8 @@ from .profile import profile
 def train(
     dev: jax.Device,
     cfg: TrainConfig,
-    sim_data: FrozenDict,
     sim_step: Callable,
+    init_sim_data: FrozenDict,
     policy: ActorCritic,
     iter_cb: Callable,
     metrics_cfg: CustomMetricConfig,
@@ -35,7 +35,7 @@ def train(
     icfg = InternalConfig(dev, cfg)
 
     with jax.default_device(dev):
-        _train_impl(cfg, icfg, sim_data, sim_step,
+        _train_impl(cfg, icfg, sim_step, init_sim_data,
                     policy, iter_cb, metrics_cfg, restore_ckpt)
 
 def _update_loop(
@@ -171,7 +171,7 @@ def init(mem_fraction):
     #jax.config.update("jax_numpy_rank_promotion", "raise")
     jax.config.update("jax_numpy_dtype_promotion", "strict")
 
-def _train_impl(cfg, icfg, sim_data, sim_step,
+def _train_impl(cfg, icfg, sim_step, init_sim_data,
                 policy, iter_cb, metrics_cfg, restore_ckpt):
     checkify_errors = checkify.user_checks
     if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
@@ -197,8 +197,8 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
     rollout_state = RolloutState.create(
         step_fn = sim_step,
         prng_key = rollout_rnd,
-        sim_data = sim_data,
         rnn_states = rnn_states,
+        init_sim_data = init_sim_data,
     )
 
     train_state_mgr = _setup_train_states(
@@ -208,8 +208,6 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
         start_update_idx = train_state_mgr.load(restore_ckpt)
     else:
         start_update_idx = 0
-
-    mapped = jax.tree_map(lambda x: x, rollout_state)
 
     rollout_exec = RolloutExecutor(
         cfg,

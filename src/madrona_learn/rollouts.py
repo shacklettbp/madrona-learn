@@ -18,45 +18,47 @@ from .utils import TypedShape
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
     prng_key: random.PRNGKey
+    rnn_states: Any
     sim_data: FrozenDict
     reorder_idxs: Optional[jax.Array]
-    rnn_states: Any
 
     @staticmethod
     def create(
         step_fn,
         prng_key,
-        sim_data,
-        rnn_states
+        rnn_states,
+        init_sim_data,
     ):
-        if 'policy_assignments' in sim_data:
-            policy_assignments = sim_data['policy_assignments']
+        if 'policy_assignments' in init_sim_data:
+            policy_assignments = init_sim_data['policy_assignments']
             reorder_idxs = jnp.argsort(policy_assignments)
         else:
             reorder_idxs = None
 
+        sim_data = jax.tree_map(jnp.copy, init_sim_data)
+
         return RolloutState(
             step_fn = step_fn,
             prng_key = prng_key,
+            rnn_states = rnn_states,
             sim_data = frozen_dict.freeze(sim_data),
             reorder_idxs = reorder_idxs,
-            rnn_states = rnn_states,
         )
 
     def update(
         self,
         prng_key=None,
-        sim_data=None,
         rnn_states=None,
+        sim_data=None,
         reorder_idxs=None
     ):
         return RolloutState(
             step_fn = self.step_fn,
             prng_key = prng_key if prng_key != None else self.prng_key,
+            rnn_states = rnn_states if rnn_states != None else self.rnn_states,
             sim_data = sim_data if sim_data != None else self.sim_data,
             reorder_idxs = (
                 reorder_idxs if reorder_idxs != None else self.reorder_idxs),
-            rnn_states = rnn_states if rnn_states != None else self.rnn_states,
         )
 
 
@@ -273,8 +275,11 @@ class RolloutExecutor:
             sim_actions = actions.reshape(-1, *actions.shape[2:])
 
         # FIXME
+        inplace_updated_actions = \
+            rollout_state.sim_data['actions'].at[:].set(sim_actions)
+
         sim_data_actions_set = rollout_state.sim_data.copy({
-            'actions': rollout_state.sim_data['actions'].at[:].set(sim_actions)
+            'actions': inplace_updated_actions,
         })
 
         rollout_state = rollout_state.update(
@@ -315,7 +320,7 @@ class RolloutExecutor:
         sim_data = rollout_state.sim_data
 
         with profile('Simulator Step'):
-            sim_data = step_fn(sim_data)
+            sim_data = frozen_dict.freeze(step_fn(sim_data))
 
         rnn_states = rollout_state.rnn_states
         dones = rollout_state.sim_data['dones']
