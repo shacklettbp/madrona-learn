@@ -63,12 +63,12 @@ class DiscreteActionDistributions:
         def compute_stats(logits, actions):
             log_probs = self._compute_log_probs(logits, actions)
             p_logp = jnp.exp(log_probs) * log_probs
-            entropies = -p_logp.sum(axis=-1)
+            entropies = -p_logp.sum(axis=-1, keepdims=True)
 
             all_log_probs.append(log_probs)
             all_entropies.append(entropies)
 
-        self._iter_dists(compute_stats, actions)
+        self._iter_dists(compute_stats, all_actions)
 
         return (jnp.concatenate(all_log_probs, axis=-1),
                 jnp.concatenate(all_entropies, axis=-1))

@@ -2,7 +2,7 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
-from flax.core import FrozenDict
+from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
 from typing import List, Dict
@@ -18,7 +18,7 @@ class InternalConfig:
     rollout_batch_size_per_policy: int
     num_train_agents: int
     train_agents_per_policy: int
-    num_train_seqs: int
+    num_train_seqs_per_policy: int
     num_bptt_steps: int
     float_storage_type : jnp.dtype
 
@@ -36,7 +36,9 @@ class InternalConfig:
             self.num_train_agents // cfg.pbt_ensemble_size
 
         assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
-        self.num_train_seqs = self.num_train_agents * cfg.num_bptt_chunks
+        self.num_train_seqs_per_policy = \
+            self.train_agents_per_policy * cfg.num_bptt_chunks
+
         self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
 
         if cfg.mixed_precision:
@@ -47,16 +49,90 @@ class InternalConfig:
         else:
             self.float_storage_type = jnp.float32
 
+class Metric(flax.struct.PyTreeNode):
+    mean: jnp.float32
+    stddev: jnp.float32
+    min: jnp.float32
+    max: jnp.float32
 
-@dataclass(frozen = True)
-class UpdateStats:
-    actions : jax.Array
-    rewards : jax.Array
-    values : jax.Array
-    advantages : jax.Array
-    bootstrap_values : jax.Array
-    algo_stats : DataclassProtocol
 
+class TrainingMetrics(flax.struct.PyTreeNode):
+    metrics: FrozenDict[str, Metric]
+    count: jnp.int32
+
+    @staticmethod
+    def create(metric_names):
+        init_metrics = {}
+        for name in metric_names:
+            init_metrics[name] = Metric(
+                mean = jnp.float32(0),
+                stddev = jnp.float32(0),
+                min = jnp.float32(jnp.finfo(jnp.float32).max),
+                max = jnp.float32(jnp.finfo(jnp.float32).min),
+            )
+
+        return TrainingMetrics(
+            metrics = frozen_dict.freeze(init_metrics),
+            count = 0,
+        )
+
+    def record(self, data):
+        def compute_metric(x):
+            mean = jnp.mean(x, dtype=jnp.float32)
+            stddev = jnp.std(x, dtype=jnp.float32)
+            min = jnp.asarray(jnp.min(x), dtype=jnp.float32)
+            max = jnp.asarray(jnp.max(x), dtype=jnp.float32)
+
+            return Metric(mean, stddev, min, max)
+
+        merged_metrics = {}
+        for k in data.keys():
+            old_metric = self.metrics[k]
+            new_metric = compute_metric(data[k])
+
+            merged_metrics[k] = Metric(
+                mean = (old_metric.mean +
+                    (new_metric.mean - old_metric.mean) / self.count),
+                stddev = (old_metric.stddev +
+                    (new_metric.stddev - old_metric.stddev) / self.count),
+                min = jnp.minimum(old_metric.min, new_metric.min),
+                max = jnp.maximum(old_metric.max, new_metric.max),
+            )
+
+        return TrainingMetrics(
+            metrics = self.metrics.copy(merged_metrics),
+            count = self.count,
+        )
+
+    def increment_count(self):
+        return TrainingMetrics(
+            metrics = self.metrics,
+            count = self.count + 1,
+        )
+
+    def __repr__(self):
+        rep = "TrainingMetrics:\n"
+
+        def comma_separate(v):
+            r = []
+
+            for i in range(v.shape[0]):
+                r.append(f"{float(v[i]): .3e}")
+
+            return ", ".join(r)
+
+        for k, v in self.metrics.items():
+            rep += f"    {k}:\n"
+            rep += f"        Mean: "
+            rep += comma_separate(v.mean) + "\n"
+            rep += f"        Std:  "
+            rep += comma_separate(v.stddev) + "\n"
+            rep += f"        Min:  "
+            rep += comma_separate(v.min) + "\n"
+            rep += f"        Max:  "
+            rep += comma_separate(v.max) + "\n"
+
+        return rep
 
 def compute_returns(cfg: TrainConfig,
                     rollouts: FrozenDict):
@@ -158,53 +234,4 @@ def normalize_advantages(cfg, advantages):
        mean = jnp.asarray(mean, dtype=advantages.dtype)
        var = jnp.asarray(var, dtype=advantages.dtype)
 
-       return (advantages - mean) * jnp.rsqrt(jnp.clip(var, min=1e-5))
-
-
-def _mb_slice(tensor, inds):
-    # Tensors come from the rollout manager as (C, T, N, ...)
-    # Want to select mb from C * N and keep sequences of length T
-
-    return tensor.transpose(0, 1).reshape(
-        tensor.shape[1], tensor.shape[0] * tensor.shape[2], *tensor.shape[3:])[:, inds, ...]
-
-def _mb_slice_rnn(rnn_state, inds):
-    # RNN state comes from the rollout manager as (C, :, :, N, :)
-    # Want to select minibatch from C * N and keep sequences of length T
-
-    reshaped = rnn_state.permute(1, 2, 0, 3, 4).reshape(
-        rnn_state.shape[1], rnn_state.shape[2], -1, rnn_state.shape[4])
-
-    return reshaped[:, :, inds, :] 
-
-def gather_minibatch(
-    rollouts : Dict,
-    advantages : jax.Array,
-    inds : jax.Array
-):
-    obs_slice = tuple(_mb_slice(obs, inds) for obs in rollouts.obs)
-    
-    actions_slice = _mb_slice(rollouts.actions, inds)
-    log_probs_slice = _mb_slice(rollouts.log_probs, inds).to(
-        dtype=amp.compute_dtype)
-    dones_slice = _mb_slice(rollouts.dones, inds)
-    rewards_slice = _mb_slice(rollouts.rewards, inds).to(
-        dtype=amp.compute_dtype)
-    values_slice = _mb_slice(rollouts.values, inds).to(
-        dtype=amp.compute_dtype)
-    advantages_slice = _mb_slice(advantages, inds).to(
-        dtype=amp.compute_dtype)
-
-    rnn_starts_slice = tuple(
-        _mb_slice_rnn(state, inds) for state in rollouts.rnn_start_states)
-
-    return MiniBatch(
-        obs=obs_slice,
-        actions=actions_slice,
-        log_probs=log_probs_slice,
-        dones=dones_slice,
-        rewards=rewards_slice,
-        values=values_slice,
-        advantages=advantages_slice,
-        rnn_start_states=rnn_starts_slice,
-    )
+       return (advantages - mean) * lax.rsqrt(jnp.clip(var, a_min=1e-5))

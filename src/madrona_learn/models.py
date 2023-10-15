@@ -108,7 +108,6 @@ class EgocentricSelfAttentionNet(nn.Module):
                     kernel_init=jax.nn.initializers.orthogonal(),
                     bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
-                    name=f"embed_{jax.tree_util.keystr(keypath)}"
                 )(x)
 
             embedded.append(embedding)

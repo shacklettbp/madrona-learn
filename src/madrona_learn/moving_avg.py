@@ -13,7 +13,6 @@ class EMANormalizer(nn.Module):
     def _update_stats(
         self,
         x,
-        input_dtype,
         mu,
         inv_sigma,
         sigma,
@@ -22,9 +21,7 @@ class EMANormalizer(nn.Module):
         N,
     ):
         one_minus_decay = jnp.float32(1) - self.decay
-
-        reduce_dtype = jnp.promote_types(input_dtype, jnp.float32)
-        x_f32 = jnp.asarray(x, reduce_dtype)
+        x_f32 = jnp.asarray(x, jnp.float32)
 
         N.value = N.value + 1
         bias_correction = -jnp.expm1(N.value * jnp.log(self.decay))
@@ -39,13 +36,10 @@ class EMANormalizer(nn.Module):
         # be off by a squared factor.
         # On the first iteration, simply treat x's variance as the 
         # full estimate of variance
-        if self.is_initializing():
-            prev_mu = new_mu
-        else:
-            prev_mu = self.mu
+        prev_mu = jnp.where(N.value == 0, new_mu, mu.value)
 
         sigma_sq_new = jnp.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
-        sigma_sq_biased.value = (sigma_sq_biased * self.decay +
+        sigma_sq_biased.value = (sigma_sq_biased.value * self.decay +
             sigma_sq_new * one_minus_decay)
 
         sigma_sq = sigma_sq_biased.value / bias_correction
@@ -82,7 +76,7 @@ class EMANormalizer(nn.Module):
 
         if mode == 'normalize':
             if update_stats:
-                self._update_stats(self, x, input_dtype, mu, inv_sigma,
+                self._update_stats(x, mu, inv_sigma,
                     sigma, mu_biased, sigma_sq_biased, N)
             return ((x - jnp.asarray(mu.value, input_dtype)) *
                     jnp.asarray(inv_sigma.value, input_dtype))

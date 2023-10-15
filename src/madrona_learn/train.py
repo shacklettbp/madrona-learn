@@ -4,6 +4,7 @@ from jax.experimental import checkify
 import flax
 from flax import linen as nn
 from flax.training.dynamic_scale import DynamicScale
+from flax.core import FrozenDict
 import optax
 
 from os import environ as env_vars
@@ -12,18 +13,36 @@ from functools import partial
 from typing import List, Optional, Dict, Callable
 from time import time
 
-from .cfg import TrainConfig
+from .cfg import TrainConfig, CustomMetricConfig
 from .rollouts import RolloutExecutor, RolloutState
 from .actor_critic import ActorCritic
-from .algo_common import InternalConfig
+from .algo_common import InternalConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import HyperParams, PolicyTrainState, TrainStateManager
 from .profile import profile
 
+def train(
+    dev: jax.Device,
+    cfg: TrainConfig,
+    sim_data: FrozenDict,
+    sim_step: Callable,
+    policy: ActorCritic,
+    iter_cb: Callable,
+    metrics_cfg: CustomMetricConfig,
+    restore_ckpt: str =None,
+):
+    print(cfg)
+    icfg = InternalConfig(dev, cfg)
+
+    with jax.default_device(dev):
+        _train_impl(cfg, icfg, sim_data, sim_step,
+                    policy, iter_cb, metrics_cfg, restore_ckpt)
+
 def _update_loop(
     algo_update_fn: Callable,
-    user_cb: Callable,
+    iter_cb: Callable,
     cfg: TrainConfig,
+    metrics_cfg: CustomMetricConfig,
     icfg: InternalConfig,
     rollout_state: RolloutState,
     rollout_exec: RolloutExecutor,
@@ -31,11 +50,16 @@ def _update_loop(
     start_update_idx: int,
 ):
     def algo_wrapper(train_state, rollout_data):
+        metrics = TrainingMetrics.create(
+            cfg.algo.metrics() + metrics_cfg.custom_metrics)
+
         return algo_update_fn(
             cfg, 
             icfg,
             train_state,
             rollout_data,
+            metrics_cfg.cb,
+            metrics,
         )
 
     algo_wrapper = jax.vmap(algo_wrapper, in_axes=(0, 0))
@@ -52,16 +76,16 @@ def _update_loop(
                     rollout_state, train_state_mgr)
 
             with profile('Optimize'):
-                updated_train_states, update_stats = algo_wrapper(
+                updated_train_states, metrics = algo_wrapper(
                     train_state_mgr.train_states, rollout_data)
 
-                train_state_mgr = TrainStateManager(
-                    train_states = updated_train_states)
+        train_state_mgr = TrainStateManager(
+            train_states = updated_train_states)
             
         #update_end_time = time()
         update_end_time = 0
         update_time = update_end_time - update_start_time
-        user_cb(update_idx, update_time, update_stats, train_state_mgr)
+        iter_cb(update_idx, update_time, metrics, train_state_mgr)
 
         return rollout_state, train_state_mgr
 
@@ -78,7 +102,7 @@ def _setup_value_normalizer(cfg, rng_key, fake_values):
     value_normalizer_vars = value_normalizer.init(
         rng_key, 'normalize', False, fake_values)
 
-    return value_normalizer.apply, value_normalizer_vars
+    return value_normalizer.apply, value_normalizer_vars['batch_stats']
 
 def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
     model_init_rng, value_norm_rng, update_rng = random.split(prng_key, 3)
@@ -89,7 +113,7 @@ def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
     params = variables['params']
     batch_stats = variables['batch_stats']
 
-    value_norm_fn, value_norm_vars = _setup_value_normalizer(
+    value_norm_fn, value_norm_stats = _setup_value_normalizer(
         cfg, value_norm_rng, fake_outs[2])
 
     hyper_params = HyperParams(
@@ -111,7 +135,7 @@ def _setup_new_policy(policy, cfg, prng_key, rnn_states, obs):
         params = params,
         batch_stats = batch_stats,
         value_normalize_fn = value_norm_fn,
-        value_normalize_vars = value_norm_vars,
+        value_normalize_stats = value_norm_stats,
         hyper_params = hyper_params,
         tx = optimizer,
         opt_state = opt_state,
@@ -146,7 +170,7 @@ def init(mem_fraction):
     jax.config.update("jax_numpy_dtype_promotion", "strict")
 
 def _train_impl(cfg, icfg, sim_data, sim_step,
-                policy, update_cb, restore_ckpt):
+                policy, iter_cb, metrics_cfg, restore_ckpt):
     rollout_rnd, init_rnd = random.split(random.PRNGKey(cfg.seed))
 
     def init_rnn_states():
@@ -187,8 +211,9 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
     def update_loop_wrapper(rollout_state, train_state_mgr):
         return _update_loop(
             algo_update_fn = algo_update_fn,
-            user_cb = update_cb,
+            iter_cb = iter_cb,
             cfg = cfg,
+            metrics_cfg = metrics_cfg,
             icfg = icfg,
             rollout_state = rollout_state,
             rollout_exec = rollout_exec,
@@ -210,11 +235,3 @@ def _train_impl(cfg, icfg, sim_data, sim_step,
     err, (rollout_state, train_state_mgr) = compiled_update_loop(
         rollout_state, train_state_mgr)
     err.throw()
-
-def train(dev, cfg, sim_data, sim_step, policy, update_cb, restore_ckpt=None):
-    print(cfg)
-    icfg = InternalConfig(dev, cfg)
-
-    with jax.default_device(dev):
-        _train_impl(cfg, icfg, sim_data, sim_step,
-                    policy, update_cb, restore_ckpt)

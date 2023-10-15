@@ -43,3 +43,9 @@ class TrainConfig:
                 rep += f"\n  {k}: {v}" 
 
         return rep
+
+
+@dataclass(frozen = True)
+class CustomMetricConfig:
+    cb: Callable
+    custom_metrics: List[str]

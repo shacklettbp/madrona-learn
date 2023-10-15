@@ -23,7 +23,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     params: flax.core.FrozenDict[str, Any]
     batch_stats: flax.core.FrozenDict[str, Any]
     value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
-    value_normalize_vars: flax.core.FrozenDict[str, Any]
+    value_normalize_stats: flax.core.FrozenDict[str, Any]
     hyper_params: HyperParams
     tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     opt_state: optax.OptState
@@ -35,7 +35,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
         self,
         params=None,
         batch_stats=None,
-        value_normalize_vars=None,
+        value_normalize_stats=None,
         hyper_params=None,
         tx=None,
         opt_state=None,
@@ -49,9 +49,9 @@ class PolicyTrainState(flax.struct.PyTreeNode):
             batch_stats = (
                 batch_stats if batch_stats != None else self.batch_stats),
             value_normalize_fn = self.value_normalize_fn,
-            value_normalize_vars = (
-                value_normalize_vars if value_normalize_vars != None else
-                    self.value_normalize_vars),
+            value_normalize_stats = (
+                value_normalize_stats if value_normalize_stats != None else
+                    self.value_normalize_stats),
             hyper_params = (
                 hyper_params if hyper_params != None else self.hyper_params),
             tx = tx if tx != None else self.tx,

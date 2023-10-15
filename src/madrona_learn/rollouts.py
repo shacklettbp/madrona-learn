@@ -59,14 +59,26 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states if rnn_states != None else self.rnn_states,
         )
 
+
 class RolloutData(flax.struct.PyTreeNode):
-    data: FrozenDict
+    data: FrozenDict[str, Any]
 
     def all(self):
         return self.data
 
     def minibatch(self, indices):
-        return jax.tree_map(lambda x: jnp.take(x, indices, 0), self.data)
+        mb = jax.tree_map(lambda x: jnp.take(x, indices, 0), self.data)
+
+        mb, rnn_start_states = mb.pop('rnn_start_states')
+        mb_per_step, bootstrap_values = mb.pop('bootstrap_values')
+
+        mb = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1), mb)
+
+        return mb.copy({
+            'rnn_start_states': rnn_start_states,
+            'bootstrap_values': bootstrap_values,
+        })
+
 
 class RolloutStore(flax.struct.PyTreeNode):
     data : FrozenDict
@@ -89,7 +101,6 @@ class RolloutStore(flax.struct.PyTreeNode):
 
 
 class RolloutExecutor:
-
     def __init__(
         self,
         cfg: TrainConfig,
@@ -182,7 +193,7 @@ class RolloutExecutor:
                 'rollout', state, sample_keys, rnn_states, obs)
 
             values = state.value_normalize_fn(
-                state.value_normalize_vars,
+                { 'batch_stats': state.value_normalize_stats },
                 mode='invert',
                 update_stats=False,
                 x=values,
@@ -195,7 +206,7 @@ class RolloutExecutor:
                 'critic_only', state, rnn_states, obs)
 
             return state.value_normalize_fn(
-                state.value_normalize_vars,
+                { 'batch_stats': state.value_normalize_stats },
                 mode='invert',
                 update_stats=False,
                 x=values,
@@ -344,11 +355,17 @@ class RolloutExecutor:
         rollouts, rnn_start_states = rollouts.pop('rnn_start_states')
         rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
 
+        # Per Step rollouts reshaped / transposed as follows:
+        # [C, T / C, P, B, ...] => [P, B * C, T / C, ...]
+
         def reorder_seq_data(x):
             t = x.transpose(2, 0, 3, 1, *range(4, len(x.shape)))
             return t.reshape(t.shape[0], -1, *t.shape[3:])
 
         rollouts = jax.tree_map(reorder_seq_data, rollouts)
+
+        # RNN states reshaped / transposed as follows:
+        # [C, P, B, ...] => [P, C * B, ...]
 
         def reorder_rnn_data(x):
             t = x.transpose(1, 0, 2, *range(3, len(x.shape)))
@@ -356,9 +373,12 @@ class RolloutExecutor:
 
         rnn_start_states = jax.tree_map(reorder_rnn_data, rnn_start_states)
             
-        return RolloutData(data = rollouts.copy({
-            'rnn_start_states': rnn_start_states,
-        }))
+        return RolloutData(
+            data = rollouts.copy({
+                'rnn_start_states': rnn_start_states,
+                'bootstrap_values': bootstrap_values,
+            }),
+        )
 
     def collect(
         self,

@@ -92,7 +92,7 @@ class ActorCritic(nn.Module):
         values = self.critic(critic_features, train=train)
 
         T, N = rollout_actions.shape[0:2]
-        flattened_actions = rollout_actions.view(
+        flattened_actions = rollout_actions.reshape(
             T * N, *rollout_actions.shape[2:])
 
         log_probs, entropies = action_dists.action_stats(flattened_actions)
