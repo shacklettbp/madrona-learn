@@ -137,6 +137,7 @@ def _ppo_update(
         return loss, (
             ac_mutable_out['batch_stats'],
             value_norm_mutable_out['batch_stats'],
+            loss,
             action_loss,
             value_loss,
             entropy_loss,
@@ -166,14 +167,15 @@ def _ppo_update(
             new_params = jax.tree_map(where_finite, new_params, params)
             new_opt_state = jax.tree_map(where_finite, new_opt_state, opt_state)
 
-        (loss, (
+        (
             new_ac_batch_stats,
             new_vn_batch_stats,
+            combined_loss,
             action_loss,
             value_loss,
             entropy_loss,
             returns,
-        )) = aux
+        ) = aux[1]
 
         state = state.update(
             params = new_params,
@@ -184,7 +186,7 @@ def _ppo_update(
         )
 
     metrics = metrics.record({
-        'loss': loss,
+        'loss': combined_loss,
         'action_loss': action_loss,
         'value_loss': value_loss,
         'entropy_loss': entropy_loss,
