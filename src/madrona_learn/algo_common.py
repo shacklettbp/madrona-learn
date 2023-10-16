@@ -9,6 +9,7 @@ from typing import List, Dict
 
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
+from .train_state import HyperParams
 from .utils import DataclassProtocol
 
 @dataclass

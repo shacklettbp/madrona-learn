@@ -41,7 +41,7 @@ class RolloutState(flax.struct.PyTreeNode):
             step_fn = step_fn,
             prng_key = prng_key,
             rnn_states = rnn_states,
-            sim_data = frozen_dict.freeze(sim_data),
+            sim_data = sim_data,
             reorder_idxs = reorder_idxs,
         )
 

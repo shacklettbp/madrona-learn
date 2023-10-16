@@ -1,8 +1,9 @@
 import jax
 from jax import lax, random, numpy as jnp
+from jax.experimental import checkify
 import flax
 from flax import linen as nn
-import flax.training.dynamic_scale
+from flax.training.dynamic_scale import DynamicScale
 import flax.training.train_state
 from flax.training import orbax_utils
 import optax
@@ -10,6 +11,7 @@ import orbax.checkpoint
 
 from dataclasses import dataclass
 from typing import Optional, Any, Callable
+from functools import partial
 
 from .actor_critic import ActorCritic
 from .moving_avg import EMANormalizer
@@ -18,6 +20,8 @@ class HyperParams(flax.struct.PyTreeNode):
     lr: float
     gamma: float
     gae_lambda: float
+    normalize_values: bool
+    value_normalizer_decay: float
 
 
 class PolicyTrainState(flax.struct.PyTreeNode):
@@ -30,7 +34,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
-    scaler: Optional[flax.training.dynamic_scale.DynamicScale]
+    scaler: Optional[DynamicScale]
     update_prng_key: random.PRNGKey
 
     def update(
@@ -83,12 +87,17 @@ class TrainStateManager(flax.struct.PyTreeNode):
         save_args = orbax_utils.save_args_from_target(ckpt)
         checkpointer.save(path, ckpt, save_args=save_args)
 
-    @staticmethod
-    def load(path):
+    def load(self, path):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        loaded = checkpointer.restore(path)
 
-        self.train_states = loaded['train_states']
+        restore_desc = {
+            'train_states': self.train_states,
+        }
+        
+        print(restore_desc)
+
+        loaded = checkpointer.restore(path, item=restore_desc)
+        print(loaded)
 
         return TrainStateManager(
             train_states = loaded['train_states'],
@@ -99,8 +108,113 @@ class TrainStateManager(flax.struct.PyTreeNode):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         loaded = checkpointer.restore(path)
 
-        loaded = torch.load(path)
         return {
-            'params': loaded['train_states'][policy_idx].params,
-            'batch_stats': loaded['train_states'][policy_idx].batch_stats,
+            'params': jax.tree_map(lambda x: x[policy_idx],
+                                   loaded['train_states'].params),
+            'batch_stats': jax.tree_map(lambda x: x[policy_idx],
+                                        loaded['train_states'].batch_stats),
         }
+
+    @staticmethod
+    def create(
+        policy,
+        hyper_params,
+        mixed_precision,
+        num_policies,
+        batch_size_per_policy,
+        base_init_rng,
+        example_obs,
+        example_rnn_states,
+        checkify_errors,
+    ):
+        train_states = _setup_train_states(policy, hyper_params,
+            mixed_precision, num_policies, batch_size_per_policy,
+            base_init_rng, example_obs, example_rnn_states, checkify_errors)
+
+        return TrainStateManager(train_states=train_states)
+
+def _setup_value_normalizer(hyper_params, rng_key, fake_values):
+    value_norm_decay = (hyper_params.value_normalizer_decay 
+                        if hyper_params.normalize_values else 1.0)
+
+    value_normalizer = EMANormalizer(
+        value_norm_decay, disable=not hyper_params.normalize_values)
+
+    value_normalizer_vars = value_normalizer.init(
+        rng_key, 'normalize', False, fake_values)
+
+    return value_normalizer.apply, value_normalizer_vars['batch_stats']
+
+def _setup_new_policy(
+    policy,
+    hyper_params,
+    mixed_precision,
+    prng_key,
+    rnn_states,
+    obs,
+):
+    model_init_rng, value_norm_rng, update_rng = random.split(prng_key, 3)
+    fake_outs, variables = policy.init_with_output(
+        model_init_rng, random.PRNGKey(0), rnn_states, obs,
+        method='rollout')
+
+    params = variables['params']
+    batch_stats = variables['batch_stats']
+
+    value_norm_fn, value_norm_stats = _setup_value_normalizer(
+        hyper_params, value_norm_rng, fake_outs[2])
+
+    optimizer = optax.adam(learning_rate=hyper_params.lr)
+    opt_state = optimizer.init(params)
+
+    if mixed_precision:
+        scaler = DynamicScale()
+    else:
+        scaler = None
+
+    return PolicyTrainState(
+        apply_fn = policy.apply,
+        params = params,
+        batch_stats = batch_stats,
+        value_normalize_fn = value_norm_fn,
+        value_normalize_stats = value_norm_stats,
+        hyper_params = hyper_params,
+        tx = optimizer,
+        opt_state = opt_state,
+        scheduler = None,
+        scaler = scaler,
+        update_prng_key = update_rng,
+    )
+
+def _setup_train_states(
+    policy,
+    hyper_params,
+    mixed_precision,
+    num_policies,
+    batch_size_per_policy,
+    base_init_rng,
+    example_obs,
+    example_rnn_states,
+    checkify_errors,
+):
+    setup_new_policy = partial(_setup_new_policy,
+        policy, hyper_params, mixed_precision)
+
+    setup_new_policies = jax.vmap(setup_new_policy)
+
+    obs = jax.tree_map(lambda x: x.reshape(
+            num_policies,
+            batch_size_per_policy,
+            *x.shape[1:],
+        ), example_obs)
+
+    setup_new_policies = jax.jit(
+        checkify.checkify(setup_new_policies, errors=checkify_errors))
+
+    init_rngs = random.split(base_init_rng, num_policies)
+
+    err, train_states = setup_new_policies(
+        init_rngs, example_rnn_states, obs)
+    err.throw()
+
+    return train_states
