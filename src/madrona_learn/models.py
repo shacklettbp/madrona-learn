@@ -13,7 +13,7 @@ class MLP(nn.Module):
     dtype: jnp.dtype
 
     @nn.compact
-    def __call__(self, inputs):
+    def __call__(self, inputs, train):
         x = inputs
 
         for i in range(self.num_layers):
@@ -24,7 +24,8 @@ class MLP(nn.Module):
                     bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                 )(x)
-            x = nn.LayerNorm(dtype=self.dtype)(x)
+            with jax.numpy_dtype_promotion('standard'):
+                x = nn.LayerNorm(dtype=self.dtype)(x)
             x = nn.relu(x)
 
         return x
