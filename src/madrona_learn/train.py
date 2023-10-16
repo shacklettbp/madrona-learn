@@ -3,7 +3,6 @@ from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
 import flax
 from flax import linen as nn
-from flax.training.dynamic_scale import DynamicScale
 from flax.core import frozen_dict, FrozenDict
 import optax
 
@@ -148,7 +147,7 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
     rollout_exec = RolloutExecutor(
         cfg,
         icfg,
-        policy,
+        train_state_mgr,
         rollout_state,
     )
 

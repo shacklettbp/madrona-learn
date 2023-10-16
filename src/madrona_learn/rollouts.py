@@ -13,7 +13,7 @@ from .actor_critic import ActorCritic
 from .algo_common import InternalConfig
 from .profile import profile
 from .train_state import TrainStateManager, PolicyTrainState
-from .utils import TypedShape
+from .utils import TypedShape, make_pbt_reorder_funcs
 
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
@@ -107,7 +107,7 @@ class RolloutExecutor:
         self,
         cfg: TrainConfig,
         icfg: InternalConfig,
-        policy: ActorCritic,
+        train_state_mgr: TrainStateManager,
         init_rollout_state: RolloutState,
     ):
         cpu_dev = jax.devices('cpu')[0]
@@ -214,14 +214,16 @@ class RolloutExecutor:
                 x=values,
             )
 
-        def rnn_reset_fn(rnn_states, should_clear):
-            return policy.clear_recurrent_state(rnn_states, should_clear)
-
         self._rollout_fn = jax.vmap(rollout_fn_wrapper)
         self._critic_fn = jax.vmap(critic_fn_wrapper)
-        self._rnn_reset_fn = jax.vmap(rnn_reset_fn)
+        self._rnn_reset_fn = jax.vmap(
+            train_state_mgr.train_states.rnn_reset_fn)
         self._finalize_rollouts_fn = partial(
             cfg.algo.finalize_rollouts_fn(), cfg)
+
+        self._prep_data_for_policy, self._prep_data_for_sim = \
+            make_pbt_reorder_funcs(self._is_dynamic_policy_assignment,
+                                   self._num_rollout_policies)
 
     def _canonicalize_float_dtypes(self, xs):
         def canonicalize(x):
@@ -235,16 +237,6 @@ class RolloutExecutor:
     def _slice_train_policy_data(self, data):
         return jax.tree_map(lambda x: x[0:self._num_train_policies], data)
 
-    def _group_into_policy_batches(self, args):
-        def rebatch(x):
-            return x.reshape(self._num_rollout_policies, -1, *x.shape[1:])
-
-        return jax.tree_map(rebatch, args)
-
-    def _reorder_into_policy_batches(self, args, sort_idxs):
-        reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
-        return self._group_into_policy_batches(reordered)
-
     def _rollout_infer(self, train_states, rollout_state):
         next_key, step_key = random.split(rollout_state.prng_key)
         sample_keys = random.split(step_key, self._num_rollout_policies)
@@ -253,33 +245,16 @@ class RolloutExecutor:
         obs = rollout_state.sim_data['obs']
         obs = self._canonicalize_float_dtypes(obs)
 
-        if self._is_dynamic_policy_assignment:
-            # Sort policy assignments
-            sorted_obs = self._reorder_into_policy_batches(
-                obs, rollout_state.reorder_idxs)
+        policy_obs = self._prep_data_for_policy(
+            obs, rollout_state.reorder_idxs)
+        actions, log_probs, values, rnn_states = \
+            self._rollout_fn(train_states, sample_keys, rnn_states, policy_obs)
 
-            actions, log_probs, values, rnn_states = \
-                self._rollout_fn(train_states, sample_keys, rnn_states, obs)
-
-            # flatten policy dim for simulator input & reverse sort
-            sim_actions = actions.reshape(-1, *x.shape[2:])
-            unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
-            sim_actions = jnp.take(sim_actions, unsort_idxs, 0)
-        else:
-            sorted_obs = self._group_into_policy_batches(obs)
-
-            actions, log_probs, values, rnn_states = \
-                self._rollout_fn(train_states, sample_keys, rnn_states, sorted_obs)
-
-            # flatten policy dim for simulator input
-            sim_actions = actions.reshape(-1, *actions.shape[2:])
-
-        # FIXME
-        inplace_updated_actions = \
-            rollout_state.sim_data['actions'].at[:].set(sim_actions)
+        sim_actions = self._prep_data_for_sim(
+            actions, rollout_state.reorder_idxs)
 
         sim_data_actions_set = rollout_state.sim_data.copy({
-            'actions': inplace_updated_actions,
+            'actions': sim_actions,
         })
 
         rollout_state = rollout_state.update(
@@ -289,9 +264,9 @@ class RolloutExecutor:
         )
 
         save_data = FrozenDict(
-            obs = sorted_obs,
+            obs = policy_obs,
             actions = actions,
-            log_probs =  log_probs,
+            log_probs = log_probs,
             values = values,
         )
 
@@ -304,38 +279,32 @@ class RolloutExecutor:
         obs = rollout_state.sim_data['obs']
         obs = self._canonicalize_float_dtypes(obs)
 
-        if self._is_dynamic_policy_assignment:
-            sorted_obs = self._reorder_into_policy_batches(
-                obs, rollout_state.reorder_idxs)
-
-            values = self._critic_fn(train_states, rnn_states, sorted_obs)
-        else:
-            obs = self._group_into_policy_batches(obs)
-            values = self._critic_fn(train_states, rnn_states, obs)
+        policy_obs = self._prep_data_for_policy(obs, rollout_state.reorder_idxs)
+        values = self._critic_fn(train_states, rnn_states, policy_obs)
 
         return self._slice_train_policy_data(values)
 
     def _step_rollout_state(self, rollout_state):
         step_fn = rollout_state.step_fn
         sim_data = rollout_state.sim_data
+        rnn_states = rollout_state.rnn_states
 
         with profile('Simulator Step'):
             sim_data = frozen_dict.freeze(step_fn(sim_data))
 
-        rnn_states = rollout_state.rnn_states
-        dones = rollout_state.sim_data['dones']
-        rewards = rollout_state.sim_data['rewards']
+        dones = sim_data['dones']
+        rewards = sim_data['rewards']
 
         dones = jnp.asarray(dones, dtype=jnp.bool_)
         rewards = jnp.asarray(rewards, dtype=self._float_dtype)
 
         if self._is_dynamic_policy_assignment:
             reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
-            dones, rewards = self._reorder_into_policy_batches(
-                (dones, rewards), reorder_idxs)
         else:
             reorder_idxs = None
-            dones, rewards = self._group_into_policy_batches((dones, rewards))
+
+        dones, rewards = self._prep_data_for_policy(
+            (dones, rewards), reorder_idxs)
 
         rnn_states = self._rnn_reset_fn(rnn_states, dones)
 

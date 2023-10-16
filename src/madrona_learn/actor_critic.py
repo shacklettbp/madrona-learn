@@ -47,12 +47,13 @@ class ActorCritic(nn.Module):
 
     def debug(self, rnn_states, obs, train=False):
         actor_features, critic_features, new_rnn_states = self.backbone(
-            rnn_states, obs)
+            rnn_states, obs, train=train)
 
-        action_dists = self.actor(actor_features)
-        values = self.critic(critic_features)
+        action_dists = self.actor(actor_features, train=train)
+        values = self.critic(critic_features, train=train)
 
-        return action_dists, values, new_rnn_states
+        return (action_dists.best(), action_dists.probs(),
+                values, new_rnn_states)
 
     def actor_only(self, rnn_states_in, obs_in, train=False):
         actor_features, rnn_states_out = self.backbone.actor_only(

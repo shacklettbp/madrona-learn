@@ -1,11 +1,12 @@
 import jax
 import jax.nn
 from jax import lax, random, numpy as jnp
+import flax
 
 from dataclasses import dataclass
 from typing import List
 
-@dataclass
+@dataclass(frozen=True)
 class DiscreteActionDistributions:
     actions_num_buckets : List[int]
     all_logits: jax.Array
@@ -50,11 +51,11 @@ class DiscreteActionDistributions:
         all_actions = []
 
         def best_action(logits):
-            all_actions.append(jnp.argmax(logits))
+            all_actions.append(jnp.argmax(logits, keepdims=True, axis=-1))
 
         self._iter_dists(best_action)
 
-        return jnp.stack(all_actions, axis=1)
+        return jnp.concatenate(all_actions, axis=-1)
 
     def action_stats(self, all_actions):
         all_log_probs = []

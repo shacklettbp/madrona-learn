@@ -26,12 +26,13 @@ class HyperParams(flax.struct.PyTreeNode):
 
 class PolicyTrainState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
+    value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
+    rnn_reset_fn: Callable = flax.struct.field(pytree_node=False)
+    tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     params: flax.core.FrozenDict[str, Any]
     batch_stats: flax.core.FrozenDict[str, Any]
-    value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
     value_normalize_stats: flax.core.FrozenDict[str, Any]
     hyper_params: HyperParams
-    tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
     scaler: Optional[DynamicScale]
@@ -39,11 +40,11 @@ class PolicyTrainState(flax.struct.PyTreeNode):
 
     def update(
         self,
+        tx=None,
         params=None,
         batch_stats=None,
         value_normalize_stats=None,
         hyper_params=None,
-        tx=None,
         opt_state=None,
         scheduler=None,
         scaler=None,
@@ -51,16 +52,17 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     ):
         return PolicyTrainState(
             apply_fn = self.apply_fn,
+            value_normalize_fn = self.value_normalize_fn,
+            rnn_reset_fn = self.rnn_reset_fn,
             params = params if params != None else self.params,
+            tx = tx if tx != None else self.tx,
             batch_stats = (
                 batch_stats if batch_stats != None else self.batch_stats),
-            value_normalize_fn = self.value_normalize_fn,
             value_normalize_stats = (
                 value_normalize_stats if value_normalize_stats != None else
                     self.value_normalize_stats),
             hyper_params = (
                 hyper_params if hyper_params != None else self.hyper_params),
-            tx = tx if tx != None else self.tx,
             opt_state = opt_state if opt_state != None else self.opt_state,
             scheduler = scheduler if scheduler != None else self.scheduler,
             scaler = scaler if scaler != None else self.scaler,
@@ -91,13 +93,11 @@ class TrainStateManager(flax.struct.PyTreeNode):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
         restore_desc = {
+            'next_update': 0,
             'train_states': self.train_states,
         }
         
-        print(restore_desc)
-
         loaded = checkpointer.restore(path, item=restore_desc)
-        print(loaded)
 
         return TrainStateManager(
             train_states = loaded['train_states'],
@@ -164,6 +164,8 @@ def _setup_new_policy(
     value_norm_fn, value_norm_stats = _setup_value_normalizer(
         hyper_params, value_norm_rng, fake_outs[2])
 
+    rnn_reset_fn = policy.clear_recurrent_state
+
     optimizer = optax.adam(learning_rate=hyper_params.lr)
     opt_state = optimizer.init(params)
 
@@ -174,12 +176,13 @@ def _setup_new_policy(
 
     return PolicyTrainState(
         apply_fn = policy.apply,
+        value_normalize_fn = value_norm_fn,
+        rnn_reset_fn = rnn_reset_fn,
+        tx = optimizer,
         params = params,
         batch_stats = batch_stats,
-        value_normalize_fn = value_norm_fn,
         value_normalize_stats = value_norm_stats,
         hyper_params = hyper_params,
-        tx = optimizer,
         opt_state = opt_state,
         scheduler = None,
         scaler = scaler,

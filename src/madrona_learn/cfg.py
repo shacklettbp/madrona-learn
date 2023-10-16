@@ -11,6 +11,7 @@ class AlgoConfig:
     def setup(self, cfg: "TrainConfig"):
         raise NotImplementedError
 
+
 @dataclass(frozen=True)
 class TrainConfig:
     num_worlds: int
@@ -43,6 +44,13 @@ class TrainConfig:
                 rep += f"\n  {k}: {v}" 
 
         return rep
+
+
+@dataclass(frozen=True)
+class InferConfig:
+    num_steps: int
+    num_policies: int
+    mixed_precision: bool = False
 
 
 @dataclass(frozen = True)
