@@ -115,12 +115,9 @@ class BackboneEncoder(nn.Module):
     def clear_recurrent_state(self, recurrent_states, should_clear):
         return ()
 
-    def setup(self):
-        self.rnn_state_shape = None
-
     def __call__(self, rnn_states, inputs, train):
-        features = self.net(inputs)
-        return features, None
+        features = self.net(inputs, train=train)
+        return features, ()
 
     def sequence(
         self,
