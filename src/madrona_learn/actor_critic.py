@@ -155,7 +155,7 @@ class RecurrentBackboneEncoder(nn.Module):
         self,
         rnn_start_states,
         sequence_ends,
-        *flattened_inputs,
+        flattened_inputs,
         train
     ):
         features = self.net(flattened_inputs, train=train)
