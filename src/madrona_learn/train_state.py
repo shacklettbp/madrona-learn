@@ -159,7 +159,11 @@ def _setup_new_policy(
         method='rollout')
 
     params = variables['params']
-    batch_stats = variables['batch_stats']
+
+    if 'batch_stats' in variables:
+        batch_stats = variables['batch_stats']
+    else:
+        batch_stats = {}
 
     value_norm_fn, value_norm_stats = _setup_value_normalizer(
         hyper_params, value_norm_rng, fake_outs[2])

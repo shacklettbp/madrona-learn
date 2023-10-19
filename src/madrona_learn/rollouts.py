@@ -72,7 +72,7 @@ class RolloutData(flax.struct.PyTreeNode):
         mb = jax.tree_map(lambda x: jnp.take(x, indices, 0), self.data)
 
         mb, rnn_start_states = mb.pop('rnn_start_states')
-        mb_per_step, bootstrap_values = mb.pop('bootstrap_values')
+        mb, bootstrap_values = mb.pop('bootstrap_values')
 
         mb = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1), mb)
 
@@ -409,7 +409,7 @@ class RolloutExecutor:
             rollout_store = rollout_store.save('bootstrap_values',
                 slice(None), bootstrap_values)
 
-        with profile("Reshape Rollouts"):
+        with profile("Finalize Rollouts"):
             rollout_data = self._finalize_rollouts(rollout_store.data)
 
         return rollout_state, rollout_data

@@ -45,8 +45,17 @@ class PPOConfig(AlgoConfig):
         return _ppo
 
     def metrics(self):
-        return ['loss', 'action_loss', 'value_loss', 'entropy_loss',
-                'returns', 'advantages', 'values']
+        return [
+            'Loss',
+            'Action Loss',
+            'Value Loss',
+            'Entropy Loss',
+            'Rewards',
+            'Returns',
+            'Values',
+            'Advantages',
+            'Bootstrap Values',
+        ]
 
     def finalize_rollouts_fn(self):
         if self.use_advantage:
@@ -185,13 +194,15 @@ def _ppo_update(
         )
 
     metrics = metrics.record({
-        'loss': combined_loss,
-        'action_loss': action_loss,
-        'value_loss': value_loss,
-        'entropy_loss': entropy_loss,
-        'returns': returns,
-        'advantages': mb['advantages'],
-        'values': mb['values'],
+        'Loss': combined_loss,
+        'Action Loss': action_loss,
+        'Value Loss': value_loss,
+        'Entropy Loss': entropy_loss,
+        'Returns': returns,
+        'Advantages': mb['advantages'],
+        'Values': mb['values'],
+        'Rewards': mb['rewards'],
+        'Bootstrap Values': mb['bootstrap_values'],
     })
 
     return state, metrics
