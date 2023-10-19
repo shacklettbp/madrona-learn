@@ -24,12 +24,12 @@ def init(mem_fraction):
 
 def init_recurrent_states(policy, batch_size_per_policy, num_policies):
     def init_rnn_states():
-        def init(arg):
-            return policy.init_recurrent_state(batch_size_per_policy)
+        return policy.init_recurrent_state(batch_size_per_policy)
 
-        return jax.vmap(init)(jnp.empty(num_policies))
+    init_rnn_states = jax.jit(
+        jax.vmap(init_rnn_states, axis_size=num_policies))
 
-    return jax.jit(init_rnn_states)()
+    return init_rnn_states()
 
 def make_pbt_reorder_funcs(dyn_assignment, num_policies):
     def group_into_policy_batches(args):

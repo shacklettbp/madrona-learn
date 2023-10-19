@@ -12,10 +12,11 @@ from functools import partial
 from typing import List, Optional, Dict, Callable
 from time import time
 
-from .cfg import TrainConfig, CustomMetricConfig
+from .cfg import TrainConfig
 from .rollouts import RolloutExecutor, RolloutState
 from .actor_critic import ActorCritic
-from .algo_common import InternalConfig, TrainingMetrics
+from .algo_common import InternalConfig
+from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import HyperParams, PolicyTrainState, TrainStateManager
 from .profile import profile
@@ -49,10 +50,8 @@ def _update_loop(
     train_state_mgr: TrainStateManager,
     start_update_idx: int,
 ):
-    def algo_wrapper(train_state, rollout_data):
-        metrics = TrainingMetrics.create(
-            cfg.algo.metrics() + metrics_cfg.custom_metrics)
-
+    @jax.vmap
+    def algo_wrapper(train_state, rollout_data, metrics):
         return algo_update_fn(
             cfg, 
             icfg,
@@ -62,13 +61,18 @@ def _update_loop(
             metrics,
         )
 
-    algo_wrapper = jax.vmap(algo_wrapper, in_axes=(0, 0))
+    @partial(jax.vmap, axis_size = cfg.pbt_ensemble_size)
+    def metric_init_wrapper(train_state):
+        return TrainingMetrics.create(
+            cfg.algo.metrics() + metrics_cfg.custom_metrics)
 
     def update_iter(update_idx, inputs):
         rollout_state, train_state_mgr = inputs
 
         #update_start_time = time()
         update_start_time = 0
+
+        metrics = metric_init_wrapper(train_state_mgr.train_states)
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
@@ -77,7 +81,7 @@ def _update_loop(
 
             with profile('Optimize'):
                 updated_train_states, metrics = algo_wrapper(
-                    train_state_mgr.train_states, rollout_data)
+                    train_state_mgr.train_states, rollout_data, metrics)
 
         train_state_mgr = TrainStateManager(
             train_states = updated_train_states)

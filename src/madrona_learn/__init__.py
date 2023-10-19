@@ -1,6 +1,6 @@
 from madrona_learn.train import train
 from madrona_learn.train_state import TrainStateManager
-from madrona_learn.cfg import TrainConfig, CustomMetricConfig, InferConfig
+from madrona_learn.cfg import TrainConfig, InferConfig
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
         ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
@@ -12,6 +12,7 @@ import madrona_learn.rnn
 from madrona_learn.ppo import PPOConfig
 from madrona_learn.utils import init
 from madrona_learn.eval import infer
+from madrona_learn.metrics import CustomMetricConfig 
 
 __all__ = [
         "init", "train", "infer", "TrainStateManager", "models", "rnn",

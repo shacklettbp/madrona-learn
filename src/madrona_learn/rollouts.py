@@ -330,7 +330,7 @@ class RolloutExecutor:
         rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
 
         # Per Step rollouts reshaped / transposed as follows:
-        # [C, T / C, P, B, ...] => [P, B * C, T / C, ...]
+        # [C, T / C, P, B, ...] => [P, C * B, T / C, ...]
 
         def reorder_seq_data(x):
             t = x.transpose(2, 0, 3, 1, *range(4, len(x.shape)))

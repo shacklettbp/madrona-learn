@@ -11,14 +11,13 @@ from typing import List, Callable, Dict, Any
 
 from .actor_critic import ActorCritic
 from .cfg import AlgoConfig, TrainConfig
-from .moving_avg import EMANormalizer
+from .metrics import TrainingMetrics
 from .profile import profile
 from .train_state import HyperParams, PolicyTrainState
 from .rollouts import RolloutData
 
 from .algo_common import (
     InternalConfig,
-    TrainingMetrics,
     compute_advantages, 
     compute_returns,
     normalize_advantages,

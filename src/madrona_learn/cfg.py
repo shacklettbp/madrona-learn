@@ -51,9 +51,3 @@ class InferConfig:
     num_steps: int
     num_policies: int
     mixed_precision: bool = False
-
-
-@dataclass(frozen = True)
-class CustomMetricConfig:
-    cb: Callable
-    custom_metrics: List[str]
