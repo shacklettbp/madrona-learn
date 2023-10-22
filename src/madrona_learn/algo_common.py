@@ -51,17 +51,20 @@ class InternalConfig:
             self.float_storage_type = jnp.float32
 
 
-def compute_returns(cfg: TrainConfig,
-                    rollouts: FrozenDict):
-    num_chunks, steps_per_chunk, P, B = rollouts['dones'].shape[0:4]
+def compute_returns(
+    cfg: TrainConfig,
+    rewards: jax.Array,
+    dones: jax.Array,
+    bootstrap_values: jax.Array,
+):
+    num_chunks, steps_per_chunk, P, B = dones.shape[0:4]
 
     T = num_chunks * steps_per_chunk
     N = P * B
 
     seq_dones, seq_rewards = jax.tree_map(
-        lambda x: x.shape(T, N, 1), (rollouts['dones'], rollouts['rewards']))
+        lambda x: x.shape(T, N, 1), (dones, rewards))
 
-    bootstrap_values = rollouts['bootstrap_values']
     bootstrap_values = bootstrap_values.reshape(-1, 1)
 
     returns = jnp.empty_like(seq_rewards)
@@ -85,24 +88,24 @@ def compute_returns(cfg: TrainConfig,
     next_return, returns = lax.fori_loop(
         0, T, return_step, (bootstrap_values, returns))
 
-    returns = returns.reshape(num_chunks, steps_per_chunk, P, B)
+    return returns.reshape(num_chunks, steps_per_chunk, P, B)
 
-    return rollouts.copy({
-        'returns': returns
-    })
-
-def compute_advantages(cfg: TrainConfig,
-                       rollouts: FrozenDict):
-    num_chunks, steps_per_chunk, P, B = rollouts['dones'].shape[0:4]
+def compute_advantages(
+    cfg: TrainConfig,
+    rewards: jax.Array,
+    values: jax.Array,
+    dones: jax.Array,
+    bootstrap_values: jax.Array,
+):
+    num_chunks, steps_per_chunk, P, B = dones.shape[0:4]
 
     T = num_chunks * steps_per_chunk
     N = P * B
 
     seq_dones, seq_rewards, seq_values = jax.tree_map(
         lambda x: x.reshape(T, N, 1),
-        (rollouts['dones'], rollouts['rewards'], rollouts['values']))
+        (dones, rewards, values))
 
-    bootstrap_values = rollouts['bootstrap_values']
     bootstrap_values = bootstrap_values.reshape(-1, 1)
 
     advantages = jnp.empty_like(seq_rewards)
@@ -135,20 +138,13 @@ def compute_advantages(cfg: TrainConfig,
         0, T, advantage_step,
         (jnp.zeros_like(bootstrap_values), bootstrap_values, advantages))
 
-    advantages = advantages.reshape(num_chunks, steps_per_chunk, P, B, 1)
+    return advantages.reshape(num_chunks, steps_per_chunk, P, B, 1)
 
-    return rollouts.copy({
-        'advantages': advantages
-    })
+def zscore_data(data):
+    mean = jnp.mean(data, dtype=jnp.float32)
+    var = jnp.var(data, dtype=jnp.float32)
 
-def normalize_advantages(cfg, advantages):
-    if not cfg.normalize_advantages:
-        return advantages
-    else:
-       mean = jnp.mean(advantages, dtype=jnp.float32)
-       var = jnp.var(advantages, dtype=jnp.float32)
+    mean = jnp.asarray(mean, dtype=data.dtype)
+    var = jnp.asarray(var, dtype=data.dtype)
 
-       mean = jnp.asarray(mean, dtype=advantages.dtype)
-       var = jnp.asarray(var, dtype=advantages.dtype)
-
-       return (advantages - mean) * lax.rsqrt(jnp.clip(var, a_min=1e-5))
+    return (data - mean) * lax.rsqrt(jnp.clip(var, a_min=1e-5))

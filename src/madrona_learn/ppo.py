@@ -11,16 +11,14 @@ from typing import List, Callable, Dict, Any
 
 from .actor_critic import ActorCritic
 from .cfg import AlgoConfig, TrainConfig
-from .metrics import TrainingMetrics
+from .metrics import TrainingMetrics, Metric
 from .profile import profile
 from .train_state import HyperParams, PolicyTrainState
 from .rollouts import RolloutData
 
 from .algo_common import (
     InternalConfig,
-    compute_advantages, 
-    compute_returns,
-    normalize_advantages,
+    zscore_data,
 )
 
 __all__ = [ "PPOConfig" ]
@@ -35,7 +33,6 @@ class PPOConfig(AlgoConfig):
     max_grad_norm: float
     clip_value_loss: bool = False
     huber_value_loss: bool = True
-    use_advantage: bool = True
 
     def name(self):
         return "ppo"
@@ -43,24 +40,17 @@ class PPOConfig(AlgoConfig):
     def update_fn(self):
         return _ppo
 
-    def metrics(self):
-        return [
-            'Loss',
-            'Action Loss',
-            'Value Loss',
-            'Entropy Loss',
-            'Rewards',
-            'Returns',
-            'Values',
-            'Advantages',
-            'Bootstrap Values',
-        ]
-
-    def finalize_rollouts_fn(self):
-        if self.use_advantage:
-            return compute_advantages
-        else:
-            return compute_returns
+    def add_metrics(
+        self,
+        cfg: TrainConfig,
+        metrics: FrozenDict[str, Metric],
+    ):
+        return metrics.copy({
+            'Loss': Metric.init(True),
+            'Action Loss': Metric.init(True),
+            'Value Loss': Metric.init(True),
+            'Entropy Loss': Metric.init(True),
+        })
 
 
 class PPOHyperParams(HyperParams):
@@ -88,25 +78,33 @@ def _ppo_update(
     def loss_fn(params):
         (new_log_probs, entropies, new_values_normalized), ac_mutable_out = \
             fwd_pass(params)
-        normalized_advantages = normalize_advantages(cfg, mb['advantages'])
+
+        if cfg.compute_advantages:
+            advantages = mb['advantages']
+            if cfg.normalize_advantages:
+                advantages = zscore_data(advantages)
+        else:
+            # For simplicity below when computing the surrogate loss
+            # just use the general name "advantages"
+            advantages = mb['returns']
+            if cfg.normalize_returns:
+                advantages = zscore_data(advantages)
 
         ratio = jnp.exp(new_log_probs - mb['log_probs'])
-        surr1 = normalized_advantages * ratio
+        surr1 = advantages * ratio
 
         clipped_ratio = jnp.clip(
             ratio, 1.0 - cfg.algo.clip_coef, 1.0 + cfg.algo.clip_coef)
-        surr2 = normalized_advantages * clipped_ratio
+        surr2 = advantages * clipped_ratio
 
         action_obj = jnp.minimum(surr1, surr2)
-
-        returns = mb['advantages'] + mb['values']
 
         if cfg.algo.clip_value_loss:
             old_values_normalized = state.value_normalize_fn(
                 { 'batch_stats': state.value_normalize_stats },
                 mode='normalize',
                 update_stats=False,
-                x=mb.values,
+                x=mb['values'],
             )
 
             low = old_values_normalized - cfg.algo.clip_coef
@@ -118,7 +116,7 @@ def _ppo_update(
             { 'batch_stats': state.value_normalize_stats },
             mode='normalize',
             update_stats=True,
-            x=returns,
+            x=mb['returns'],
             mutable=['batch_stats'],
         )
 
@@ -148,7 +146,6 @@ def _ppo_update(
             action_loss,
             value_loss,
             entropy_loss,
-            returns,
         )
 
     with profile('Optimize'):
@@ -181,7 +178,6 @@ def _ppo_update(
             action_loss,
             value_loss,
             entropy_loss,
-            returns,
         ) = aux[1]
 
         state = state.update(
@@ -197,11 +193,6 @@ def _ppo_update(
         'Action Loss': action_loss,
         'Value Loss': value_loss,
         'Entropy Loss': entropy_loss,
-        'Returns': returns,
-        'Advantages': mb['advantages'],
-        'Values': mb['values'],
-        'Rewards': mb['rewards'],
-        'Bootstrap Values': mb['bootstrap_values'],
     })
 
     return state, metrics
@@ -227,8 +218,6 @@ def _ppo(
 
             with profile('Gather Minibatch'):
                 mb = rollout_data.minibatch(mb_inds[mb_i])
-
-            metrics = metrics.increment_count()
 
             train_state, metrics = _ppo_update(cfg, mb, train_state, metrics)
 

@@ -57,7 +57,7 @@ def _update_loop(
             icfg,
             train_state,
             rollout_data,
-            metrics_cfg.cb,
+            metrics_cfg.update_cb,
             metrics,
         )
 
@@ -72,12 +72,14 @@ def _update_loop(
         #update_start_time = time()
         update_start_time = 0
 
-        metrics = metric_init_wrapper(train_state_mgr.train_states)
+        metrics = cfg.algo.add_metrics(cfg, FrozenDict())
+        metrics = rollout_exec.add_metrics(cfg, metrics)
+        metrics = TrainingMetrics.create(cfg, metrics)
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
-                rollout_state, rollout_data = rollout_exec.collect(
-                    rollout_state, train_state_mgr)
+                rollout_state, rollout_data, metrics = rollout_exec.collect(
+                    train_state_mgr, rollout_state, metrics)
 
             with profile('Optimize'):
                 updated_train_states, metrics = algo_wrapper(

@@ -10,7 +10,8 @@ from functools import partial
 
 from .cfg import TrainConfig
 from .actor_critic import ActorCritic
-from .algo_common import InternalConfig
+from .algo_common import InternalConfig, compute_advantages, compute_returns
+from .metrics import TrainingMetrics, Metric
 from .profile import profile
 from .train_state import TrainStateManager, PolicyTrainState
 from .utils import TypedShape, make_pbt_reorder_funcs
@@ -72,13 +73,12 @@ class RolloutData(flax.struct.PyTreeNode):
         mb = jax.tree_map(lambda x: jnp.take(x, indices, 0), self.data)
 
         mb, rnn_start_states = mb.pop('rnn_start_states')
-        mb, bootstrap_values = mb.pop('bootstrap_values')
 
+        # Make time leading axis
         mb = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1), mb)
 
         return mb.copy({
             'rnn_start_states': rnn_start_states,
-            'bootstrap_values': bootstrap_values,
         })
 
 
@@ -119,6 +119,9 @@ class RolloutExecutor:
         self._num_rollout_policies = \
             cfg.pbt_ensemble_size * cfg.pbt_history_len
         self._float_dtype = icfg.float_storage_type
+        self._use_advantages = cfg.compute_advantages
+        self._compute_advantages_fn = partial(compute_advantages, cfg)
+        self._compute_returns_fn = partial(compute_returns, cfg)
 
         typed_shapes = {}
 
@@ -140,7 +143,7 @@ class RolloutExecutor:
             typed_shapes['actions'].shape, self._float_dtype)
 
         typed_shapes['rewards'] = TypedShape(
-            sim_data['rewards'].shape, self._float_dtype)
+          sim_data['rewards'].shape, self._float_dtype)
 
         typed_shapes['dones'] = TypedShape(
             sim_data['dones'].shape, jnp.bool_)
@@ -218,12 +221,27 @@ class RolloutExecutor:
         self._critic_fn = jax.vmap(critic_fn_wrapper)
         self._rnn_reset_fn = jax.vmap(
             train_state_mgr.train_states.rnn_reset_fn)
-        self._finalize_rollouts_fn = partial(
-            cfg.algo.finalize_rollouts_fn(), cfg)
-
         self._prep_data_for_policy, self._prep_data_for_sim = \
             make_pbt_reorder_funcs(self._is_dynamic_policy_assignment,
                                    self._num_rollout_policies)
+
+    def add_metrics(
+        self, 
+        cfg: TrainConfig,
+        metrics: FrozenDict[str, Metric],
+    ):
+        new_metrics = {
+            'Rewards': Metric.init(True),
+            'Returns': Metric.init(True),
+            'Values': Metric.init(True),
+        }
+
+        if cfg.compute_advantages:
+            new_metrics['Advantages'] = Metric.init(True)
+
+        new_metrics['Bootstrap Values'] = Metric.init(True)
+
+        return metrics.copy(new_metrics)
 
     def _canonicalize_float_dtypes(self, xs):
         def canonicalize(x):
@@ -238,29 +256,31 @@ class RolloutExecutor:
         return jax.tree_map(lambda x: x[0:self._num_train_policies], data)
 
     def _rollout_infer(self, train_states, rollout_state):
-        next_key, step_key = random.split(rollout_state.prng_key)
+        rnn_states = rollout_state.rnn_states
+        sim_data = rollout_state.sim_data
+        prng_key = rollout_state.prng_key
+
+        prng_key, step_key = random.split(prng_key)
         sample_keys = random.split(step_key, self._num_rollout_policies)
 
-        rnn_states = rollout_state.rnn_states
-        obs = rollout_state.sim_data['obs']
-        obs = self._canonicalize_float_dtypes(obs)
+        policy_obs = self._canonicalize_float_dtypes(sim_data['obs'])
 
         policy_obs = self._prep_data_for_policy(
-            obs, rollout_state.reorder_idxs)
+            policy_obs, rollout_state.reorder_idxs)
         actions, log_probs, values, rnn_states = \
             self._rollout_fn(train_states, sample_keys, rnn_states, policy_obs)
 
         sim_actions = self._prep_data_for_sim(
             actions, rollout_state.reorder_idxs)
 
-        sim_data_actions_set = rollout_state.sim_data.copy({
+        sim_data = sim_data.copy({
             'actions': sim_actions,
         })
 
         rollout_state = rollout_state.update(
-            prng_key = next_key,
+            prng_key = prng_key,
             rnn_states = rnn_states,
-            sim_data = sim_data_actions_set,
+            sim_data = sim_data,
         )
 
         save_data = FrozenDict(
@@ -323,11 +343,38 @@ class RolloutExecutor:
 
         return rollout_state, save_data
 
-    def _finalize_rollouts(self, rollouts):
-        rollouts = self._finalize_rollouts_fn(rollouts)
+    def _finalize_rollouts(self, rollouts, metrics):
+        rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
+
+        if self._use_advantages:
+            advantages = self._compute_advantages_fn(rollouts['rewards'],
+                rollouts['values'], rollouts['dones'], bootstrap_values)
+
+            rollouts = rollouts.copy({
+                'advantages': advantages,
+            })
+
+            metrics = metrics.record({
+                'Advantages': advantages,
+            })
+
+            returns = advantages + rollouts['values']
+        else:
+            returns = self._compute_returns_fn(rollouts['rewards'],
+                rollouts['dones'], bootstrap_values)
+
+        rollouts = rollouts.copy({
+            'returns': returns,
+        })
+
+        metrics = metrics.record({
+            'Rewards': rollouts['rewards'],
+            'Values': rollouts['values'],
+            'Returns': rollouts['returns'],
+            'Bootstrap Values': bootstrap_values,
+        })
 
         rollouts, rnn_start_states = rollouts.pop('rnn_start_states')
-        rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
 
         # Per Step rollouts reshaped / transposed as follows:
         # [C, T / C, P, B, ...] => [P, C * B, T / C, ...]
@@ -350,14 +397,14 @@ class RolloutExecutor:
         return RolloutData(
             data = rollouts.copy({
                 'rnn_start_states': rnn_start_states,
-                'bootstrap_values': bootstrap_values,
             }),
-        )
+        ), metrics
 
     def collect(
         self,
-        rollout_state: RolloutState,
         train_state_mgr: TrainStateManager,
+        rollout_state: RolloutState,
+        metrics: TrainingMetrics,
     ):
         def rollout_iter(bptt_step, inputs):
             rollout_state, rollout_store, bptt_chunk = inputs
@@ -410,6 +457,7 @@ class RolloutExecutor:
                 slice(None), bootstrap_values)
 
         with profile("Finalize Rollouts"):
-            rollout_data = self._finalize_rollouts(rollout_store.data)
+            rollout_data, metrics = self._finalize_rollouts(
+                rollout_store.data, metrics)
 
-        return rollout_state, rollout_data
+        return rollout_state, rollout_data, metrics

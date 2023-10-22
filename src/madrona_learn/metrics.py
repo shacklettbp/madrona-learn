@@ -2,102 +2,140 @@ import jax
 from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
 import flax
+import numpy as np
 from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, List
 
 @dataclass(frozen = True)
 class CustomMetricConfig:
-    cb: Callable
-    custom_metrics: List[str]
+    register_metrics: Callable
+    rollout_cb: Callable = lambda metrics, *args: metrics
+    update_cb: Callable = lambda metrics, *args: metrics
 
 
 class Metric(flax.struct.PyTreeNode):
+    per_policy: bool = flax.struct.field(pytree_node=False)
     mean: jnp.float32
-    stddev: jnp.float32
+    m2: jnp.float32
     min: jnp.float32
     max: jnp.float32
+    count: jnp.int32
+
+    @staticmethod
+    def init(per_policy):
+        return Metric(
+            per_policy = per_policy,
+            mean = jnp.float32(0),
+            m2 = jnp.float32(0),
+            min = jnp.float32(jnp.finfo(jnp.float32).max),
+            max = jnp.float32(jnp.finfo(jnp.float32).min),
+            count = jnp.int32(0),
+        )
 
 
 class TrainingMetrics(flax.struct.PyTreeNode):
     metrics: FrozenDict[str, Metric]
-    count: jnp.int32
     print_names: FrozenDict[str, str] = flax.struct.field(pytree_node=False)
 
     @staticmethod
-    def create(metric_names):
-        init_metrics = {}
+    def create(cfg, metrics: FrozenDict[str, Metric]):
         max_keylen = 0
-        for name in metric_names:
-            init_metrics[name] = Metric(
-                mean = jnp.float32(0),
-                stddev = jnp.float32(0),
-                min = jnp.float32(jnp.finfo(jnp.float32).max),
-                max = jnp.float32(jnp.finfo(jnp.float32).min),
-            )
-
+        for name in metrics.keys():
             max_keylen = max(max_keylen, len(name))
 
         print_names = {}
-        for name in metric_names:
+        for name in metrics.keys():
             print_names[name] = name + ' ' * (max_keylen - len(name))
 
+        @partial(jax.vmap, in_axes=None, out_axes=0,
+                 axis_size=cfg.pbt_ensemble_size)
+        def expand_policy_dim(x):
+            return x
+
+        def expand_metric(x):
+            if x.per_policy:
+                return expand_policy_dim(x)
+            else:
+                return x
+
+        metrics = FrozenDict({k: expand_metric(v) for k,v in metrics.items()})
+
         return TrainingMetrics(
-            metrics = frozen_dict.freeze(init_metrics),
-            count = 0,
+            metrics = metrics,
             print_names = print_names,
         )
 
+    def _update_metric(self, cur_metric, new_data):
+        num_new_elems = new_data.size
+        new_data_mean = jnp.mean(new_data, dtype=jnp.float32)
+        new_data_min = jnp.asarray(jnp.min(new_data), dtype=jnp.float32)
+        new_data_max = jnp.asarray(jnp.max(new_data), dtype=jnp.float32)
+
+        new_data_deltas = new_data - jnp.asarray(
+            new_data_mean, dtype=new_data.dtype)
+        new_data_m2 = jnp.sum(new_data_deltas * new_data_deltas,
+                              dtype=jnp.float32)
+
+        new_count = cur_metric.count + num_new_elems
+
+        delta = new_data_mean - cur_metric.mean
+
+        mean = (cur_metric.mean + delta * 
+            jnp.asarray(num_new_elems, dtype=jnp.float32) /
+            jnp.asarray(new_count, dtype=jnp.float32))
+        m2 = (cur_metric.m2 + new_data_m2  + delta * delta *
+              jnp.asarray(cur_metric.count, dtype=jnp.float32) *
+              jnp.asarray(num_new_elems, dtype=jnp.float32) /
+              jnp.asarray(new_count, dtype=jnp.float32))
+
+        return cur_metric.replace(
+            mean = mean,
+            m2 = m2,
+            min = jnp.minimum(cur_metric.min, new_data_min),
+            max = jnp.maximum(cur_metric.max, new_data_max),
+            count = new_count,
+        )
+
     def record(self, data):
-        def compute_metric(x):
-            mean = jnp.mean(x, dtype=jnp.float32)
-            stddev = jnp.std(x, dtype=jnp.float32)
-            min = jnp.asarray(jnp.min(x), dtype=jnp.float32)
-            max = jnp.asarray(jnp.max(x), dtype=jnp.float32)
-
-            return Metric(mean, stddev, min, max)
-
         merged_metrics = {}
         for k in data.keys():
             old_metric = self.metrics[k]
-            new_metric = compute_metric(data[k])
 
-            merged_metrics[k] = Metric(
-                mean = (old_metric.mean +
-                    (new_metric.mean - old_metric.mean) / self.count),
-                stddev = (old_metric.stddev +
-                    (new_metric.stddev - old_metric.stddev) / self.count),
-                min = jnp.minimum(old_metric.min, new_metric.min),
-                max = jnp.maximum(old_metric.max, new_metric.max),
-            )
+            # If this is a per-policy metric and record isn't being
+            # called in a vmap'd region, _update_metric needs to be vmapped
+            if old_metric.per_policy and old_metric.mean.ndim == 2:
+                @jax.vmap
+                def update_metric(cur_metric, new_data):
+                    self._update_metric(old_metric, data[k])
+            else:
+                update_metric = self._update_metric
 
-        return TrainingMetrics(
-            metrics = self.metrics.copy(merged_metrics),
-            count = self.count,
-            print_names = self.print_names,
-        )
+            merged_metrics[k] = update_metric(old_metric, data[k])
 
-    def increment_count(self):
-        return TrainingMetrics(
-            metrics = self.metrics,
-            count = self.count + 1,
-            print_names = self.print_names,
-        )
+        return self.replace(metrics = self.metrics.copy(merged_metrics))
 
     def __repr__(self):
         rep = "TrainingMetrics:\n"
 
-        def comma_separate(v):
-            r = []
-
-            for i in range(v.shape[0]):
-                r.append(f"{float(v[i]): .3e}")
-
-            return ", ".join(r)
-
         for k, name in self.print_names.items():
-            v = self.metrics[k]
-            rep += f"    {name} => Avg: {comma_separate(v.mean)}, Min: {comma_separate(v.min)}, Max: {comma_separate(v.max)}, σ: {comma_separate(v.stddev)}\n"
+            m = self.metrics[k]
+
+            def fmt(x):
+                if not m.per_policy:
+                    return f"{float(x): .3e}"
+
+                r = []
+
+                for i in range(x.shape[0]):
+                    r.append(f"{float(x[i]): .3e}")
+
+                return ", ".join(r)
+
+            stddev = np.sqrt(m.m2 / m.count)
+
+            rep += f"    {name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}\n"
 
         return rep
