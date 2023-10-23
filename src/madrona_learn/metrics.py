@@ -120,6 +120,7 @@ class TrainingMetrics(flax.struct.PyTreeNode):
     def __repr__(self):
         rep = "TrainingMetrics:\n"
 
+        formatted = ["TrainingMetrics"]
         for k, name in self.print_names.items():
             m = self.metrics[k]
 
@@ -136,6 +137,6 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
             stddev = np.sqrt(m.m2 / m.count)
 
-            rep += f"    {name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}\n"
-
-        return rep
+            formatted.append(f"    {name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}")
+        
+        return "\n".join(formatted)
