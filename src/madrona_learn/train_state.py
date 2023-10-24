@@ -118,6 +118,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
     @staticmethod
     def create(
         policy,
+        optimizer,
         hyper_params,
         mixed_precision,
         num_policies,
@@ -127,7 +128,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
         example_rnn_states,
         checkify_errors,
     ):
-        train_states = _setup_train_states(policy, hyper_params,
+        train_states = _setup_train_states(policy, optimizer, hyper_params,
             mixed_precision, num_policies, batch_size_per_policy,
             base_init_rng, example_obs, example_rnn_states, checkify_errors)
 
@@ -147,6 +148,7 @@ def _setup_value_normalizer(hyper_params, rng_key, fake_values):
 
 def _setup_new_policy(
     policy,
+    optimizer,
     hyper_params,
     mixed_precision,
     prng_key,
@@ -170,7 +172,6 @@ def _setup_new_policy(
 
     rnn_reset_fn = policy.clear_recurrent_state
 
-    optimizer = optax.adam(learning_rate=hyper_params.lr)
     opt_state = optimizer.init(params)
 
     if mixed_precision:
@@ -195,6 +196,7 @@ def _setup_new_policy(
 
 def _setup_train_states(
     policy,
+    optimizer,
     hyper_params,
     mixed_precision,
     num_policies,
@@ -205,7 +207,7 @@ def _setup_train_states(
     checkify_errors,
 ):
     setup_new_policy = partial(_setup_new_policy,
-        policy, hyper_params, mixed_precision)
+        policy, optimizer, hyper_params, mixed_precision)
 
     setup_new_policies = jax.vmap(setup_new_policy)
 

@@ -8,9 +8,8 @@ class AlgoConfig:
     def name(self):
         raise NotImplementedError
 
-    def setup(self, cfg: "TrainConfig"):
+    def setup(self):
         raise NotImplementedError
-
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -46,10 +45,3 @@ class TrainConfig:
                 rep += f"\n  {k}: {v}" 
 
         return rep
-
-
-@dataclass(frozen=True)
-class InferConfig:
-    num_steps: int
-    num_policies: int
-    mixed_precision: bool = False

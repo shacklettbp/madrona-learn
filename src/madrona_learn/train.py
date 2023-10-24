@@ -15,7 +15,7 @@ from time import time
 from .cfg import TrainConfig
 from .rollouts import RolloutExecutor, RolloutState
 from .actor_critic import ActorCritic
-from .algo_common import InternalConfig
+from .algo_common import AlgoBase, InternalConfig
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import HyperParams, PolicyTrainState, TrainStateManager
@@ -40,7 +40,7 @@ def train(
                     policy, iter_cb, metrics_cfg, restore_ckpt)
 
 def _update_loop(
-    algo_update_fn: Callable,
+    algo: AlgoBase,
     iter_cb: Callable,
     cfg: TrainConfig,
     metrics_cfg: CustomMetricConfig,
@@ -52,7 +52,7 @@ def _update_loop(
 ):
     @jax.vmap
     def algo_wrapper(train_state, rollout_data, metrics):
-        return algo_update_fn(
+        return algo.update(
             cfg, 
             icfg,
             train_state,
@@ -72,7 +72,7 @@ def _update_loop(
         #update_start_time = time()
         update_start_time = 0
 
-        metrics = cfg.algo.add_metrics(cfg, FrozenDict())
+        metrics = algo.add_metrics(cfg, FrozenDict())
         metrics = rollout_exec.add_metrics(cfg, metrics)
         metrics = TrainingMetrics.create(cfg, metrics)
 
@@ -110,6 +110,8 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
             checkify.index_checks
         )
 
+    algo = cfg.algo.setup()
+
     init_sim_data = frozen_dict.freeze(init_sim_data)
 
     rollout_rnd, init_rnd = random.split(random.PRNGKey(cfg.seed))
@@ -125,16 +127,12 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
         init_sim_data = init_sim_data,
     )
 
-    hyper_params = HyperParams(
-        lr = cfg.lr,
-        gamma = cfg.gamma,
-        gae_lambda = cfg.gae_lambda,
-        normalize_values = cfg.normalize_values,
-        value_normalizer_decay = cfg.value_normalizer_decay,
-    )
+    hyper_params = algo.init_hyperparams(cfg)
+    optimizer = algo.make_optimizer(hyper_params)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
+        optimizer = optimizer,
         hyper_params = hyper_params,
         mixed_precision = cfg.mixed_precision,
         num_policies = cfg.pbt_ensemble_size * cfg.pbt_history_len,
@@ -157,11 +155,9 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
         rollout_state,
     )
 
-    algo_update_fn = cfg.algo.update_fn()
-
     def update_loop_wrapper(rollout_state, train_state_mgr):
         return _update_loop(
-            algo_update_fn = algo_update_fn,
+            algo = algo,
             iter_cb = iter_cb,
             cfg = cfg,
             metrics_cfg = metrics_cfg,

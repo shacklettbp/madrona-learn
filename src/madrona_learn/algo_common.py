@@ -8,9 +8,31 @@ from dataclasses import dataclass
 from typing import List, Dict
 
 from .cfg import TrainConfig
+from .metrics import Metric
 from .moving_avg import EMANormalizer
 from .train_state import HyperParams
 from .utils import DataclassProtocol
+
+class AlgoBase:
+    def init_hyperparams(self, cfg: TrainConfig):
+        raise NotImplementedError
+
+    def make_optimizer(
+        self,
+        hyper_params: HyperParams,
+    ):
+        raise NotImplementedError
+
+    def update(self):
+        raise NotImplementedError
+
+    def add_metrics(
+        self,
+        cfg: TrainConfig, 
+        metrics: FrozenDict[str, Metric],
+    ):
+        raise NotImplementedError
+
 
 @dataclass
 class InternalConfig:

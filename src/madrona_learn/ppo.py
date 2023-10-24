@@ -17,6 +17,7 @@ from .train_state import HyperParams, PolicyTrainState
 from .rollouts import RolloutData
 
 from .algo_common import (
+    AlgoBase,
     InternalConfig,
     zscore_data,
 )
@@ -37,8 +38,46 @@ class PPOConfig(AlgoConfig):
     def name(self):
         return "ppo"
 
-    def update_fn(self):
-        return _ppo
+    def setup(self):
+        return PPO()
+
+
+class PPOHyperParams(HyperParams):
+    clip_coef: float
+    value_loss_coef: float
+    entropy_coef: float
+    max_grad_norm: float
+
+
+class PPO(AlgoBase):
+    def init_hyperparams(
+        self,
+        cfg: TrainConfig,
+    ):
+        return PPOHyperParams(
+            # Common
+            lr = cfg.lr,
+            gamma = cfg.gamma,
+            gae_lambda = cfg.gae_lambda,
+            normalize_values = cfg.normalize_values,
+            value_normalizer_decay = cfg.value_normalizer_decay,
+            # PPO
+            clip_coef = cfg.algo.clip_coef,
+            value_loss_coef = cfg.algo.value_loss_coef,
+            entropy_coef = cfg.algo.entropy_coef,
+            max_grad_norm = cfg.algo.max_grad_norm,
+        )
+
+    def make_optimizer(
+        self,
+        hyper_params: HyperParams,
+    ):
+        return optax.chain(
+            optax.clip(hyper_params.max_grad_norm),
+            optax.adam(learning_rate= hyper_params.lr))
+
+    def update(self, *args, **kwargs):
+        return _ppo(*args, **kwargs)
 
     def add_metrics(
         self,
@@ -52,12 +91,6 @@ class PPOConfig(AlgoConfig):
             'Entropy Loss': Metric.init(True),
         })
 
-
-class PPOHyperParams(HyperParams):
-    clip_coef: float
-    value_loss_coef: float
-    entropy_coef: float
-    max_grad_norm: float
 
 def _ppo_update(
     cfg: TrainConfig,
@@ -93,8 +126,8 @@ def _ppo_update(
         ratio = jnp.exp(new_log_probs - mb['log_probs'])
         surr1 = advantages * ratio
 
-        clipped_ratio = jnp.clip(
-            ratio, 1.0 - cfg.algo.clip_coef, 1.0 + cfg.algo.clip_coef)
+        clipped_ratio = jnp.clip(ratio, 1.0 - state.hyper_params.clip_coef,
+                                 1.0 + state.hyper_params.clip_coef)
         surr2 = advantages * clipped_ratio
 
         action_obj = jnp.minimum(surr1, surr2)
@@ -107,8 +140,8 @@ def _ppo_update(
                 x=mb['values'],
             )
 
-            low = old_values_normalized - cfg.algo.clip_coef
-            high = old_values_normalized + cfg.algo.clip_coef
+            low = old_values_normalized - state.hyper_params.clip_coef
+            high = old_values_normalized + state.hyper_params.clip_coef
 
             new_values = jnp.clip(new_values, low, high)
 
@@ -133,9 +166,9 @@ def _ppo_update(
 
         # Maximize the action objective function
         action_loss = -action_obj 
-        value_loss = cfg.algo.value_loss_coef * value_loss
+        value_loss = state.hyper_params.value_loss_coef * value_loss
         # Maximize entropy
-        entropy_loss = - cfg.algo.entropy_coef * entropy_avg
+        entropy_loss = - state.hyper_params.entropy_coef * entropy_avg
 
         loss = action_loss + value_loss + entropy_loss
 
@@ -159,7 +192,6 @@ def _ppo_update(
         else:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             aux, grads = grad_fn(state.params)
-
 
         with jax.numpy_dtype_promotion('standard'):
             param_updates, new_opt_state = state.tx.update(
