@@ -93,7 +93,7 @@ def inference_loop(
         rnn_states = rnn_reset_fn(rnn_states, dones)
 
         inference_state.user_step_cb(
-            actions, action_probs, values, dones, rewards)
+            policy_obs, actions, action_probs, values, dones, rewards)
 
         inference_state = inference_state.replace(
             rnn_states = rnn_states,

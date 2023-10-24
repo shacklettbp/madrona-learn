@@ -73,7 +73,7 @@ class PPO(AlgoBase):
         hyper_params: HyperParams,
     ):
         return optax.chain(
-            optax.clip(hyper_params.max_grad_norm),
+            optax.clip_by_global_norm(hyper_params.max_grad_norm),
             optax.adam(learning_rate= hyper_params.lr))
 
     def update(self, *args, **kwargs):
