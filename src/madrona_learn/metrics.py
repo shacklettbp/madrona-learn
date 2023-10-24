@@ -117,10 +117,10 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
         return self.replace(metrics = self.metrics.copy(merged_metrics))
 
-    def __repr__(self):
-        rep = "TrainingMetrics:\n"
+    def pretty_print(self, tab=2):
+        tab = ' ' * tab
 
-        formatted = ["TrainingMetrics"]
+        formatted = [tab + "TrainingMetrics"]
         for k, name in self.print_names.items():
             m = self.metrics[k]
 
@@ -137,6 +137,6 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
             stddev = np.sqrt(m.m2 / m.count)
 
-            formatted.append(f"    {name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}")
+            formatted.append(tab * 2 + f"{name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}")
         
-        return "\n".join(formatted)
+        print("\n".join(formatted))
