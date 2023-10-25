@@ -2,7 +2,7 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
-from typing import List
+from typing import List, Callable
 
 from .action import DiscreteActionDistributions
 from .moving_avg import EMANormalizer
@@ -11,6 +11,7 @@ class MLP(nn.Module):
     num_channels: int
     num_layers: int
     dtype: jnp.dtype
+    weight_initializer: Callable = jax.nn.initializers.he_normal()
 
     @nn.compact
     def __call__(self, inputs, train):
@@ -20,7 +21,7 @@ class MLP(nn.Module):
             x = nn.Dense(
                     self.num_channels,
                     use_bias=True,
-                    kernel_init=jax.nn.initializers.he_normal(),
+                    kernel_init=self.weight_initializer,
                     bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                 )(x)
@@ -34,13 +35,14 @@ class MLP(nn.Module):
 class DenseLayerDiscreteActor(nn.Module):
     actions_num_buckets: List[int]
     dtype: jnp.dtype
+    weight_initializer: Callable = jax.nn.initializers.orthogonal(scale=0.01)
 
     def setup(self):
         total_action_dim = sum(self.actions_num_buckets)
         self.impl = nn.Dense(
                 total_action_dim,
                 use_bias=True,
-                kernel_init=jax.nn.initializers.orthogonal(scale=0.01),
+                kernel_init=self.weight_initializer,
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )
@@ -52,13 +54,14 @@ class DenseLayerDiscreteActor(nn.Module):
 
 class DenseLayerCritic(nn.Module):
     dtype: jnp.dtype
+    weight_initializer: Callable = jax.nn.initializers.orthogonal()
 
     @nn.compact
     def __call__(self, features, train=False):
         return nn.Dense(
                 1,
                 use_bias=True,
-                kernel_init=jax.nn.initializers.orthogonal(),
+                kernel_init=self.weight_initializer,
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )(features)
