@@ -71,7 +71,7 @@ def inference_loop(
 
         policy_obs = prep_for_policy(sim_data['obs'], reorder_idxs)
 
-        actions, action_probs, values, rnn_states = policy_infer(
+        actions, action_probs, action_logits, values, rnn_states = policy_infer(
             train_state_mgr.train_states, rnn_states, policy_obs)
 
         sim_actions = prep_for_sim(actions, reorder_idxs)
@@ -92,8 +92,8 @@ def inference_loop(
 
         rnn_states = rnn_reset_fn(rnn_states, dones)
 
-        inference_state.user_step_cb(
-            policy_obs, actions, action_probs, values, dones, rewards)
+        inference_state.user_step_cb(policy_obs, actions, action_probs,
+            action_logits, values, dones, rewards)
 
         inference_state = inference_state.replace(
             rnn_states = rnn_states,

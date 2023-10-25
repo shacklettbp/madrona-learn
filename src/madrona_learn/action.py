@@ -86,3 +86,13 @@ class DiscreteActionDistributions:
         self._iter_dists(compute_probs)
 
         return all_probs
+
+    def logits(self):
+        all_logits = []
+
+        def collect_logits(logits):
+            all_logits.append(logits)
+
+        self._iter_dists(collect_logits)
+
+        return all_logits

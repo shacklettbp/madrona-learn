@@ -53,7 +53,7 @@ class ActorCritic(nn.Module):
         values = self.critic(critic_features, train=train)
 
         return (action_dists.best(), action_dists.probs(),
-                values, new_rnn_states)
+                action_dists.logits(), values, new_rnn_states)
 
     def actor_only(self, rnn_states_in, obs_in, train=False):
         actor_features, rnn_states_out = self.backbone.actor_only(
