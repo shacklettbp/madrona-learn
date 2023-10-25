@@ -36,8 +36,8 @@ def train(
     icfg = InternalConfig(dev, cfg)
 
     with jax.default_device(dev):
-        _train_impl(cfg, icfg, sim_step, init_sim_data,
-                    policy, iter_cb, metrics_cfg, restore_ckpt)
+        return _train_impl(cfg, icfg, sim_step, init_sim_data,
+            policy, iter_cb, metrics_cfg, restore_ckpt)
 
 def _update_loop(
     algo: AlgoBase,
@@ -184,3 +184,5 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
     err, (rollout_state, train_state_mgr) = compiled_update_loop(
         rollout_state, train_state_mgr)
     err.throw()
+
+    return train_state_mgr
