@@ -21,13 +21,17 @@ class EMANormalizer(nn.Module):
         N,
     ):
         one_minus_decay = jnp.float32(1) - self.decay
-        x_f32 = jnp.asarray(x, jnp.float32)
+
+        reduce_axes = tuple(range(len(x.shape) - 1))
+        x_mean = jnp.mean(x, axis=reduce_axes, dtype=jnp.float32)
+
+        assert(x_mean.shape == mu.value.shape)
 
         N.value = N.value + 1
         bias_correction = -jnp.expm1(N.value * jnp.log(self.decay))
 
         mu_biased.value = (mu_biased.value * self.decay +
-            x_f32.mean() * one_minus_decay)
+            x_mean * one_minus_decay)
 
         new_mu = mu_biased.value / bias_correction
 
@@ -38,7 +42,13 @@ class EMANormalizer(nn.Module):
         # full estimate of variance
         prev_mu = jnp.where(N.value == 0, new_mu, mu.value)
 
-        sigma_sq_new = jnp.mean((x_f32 - prev_mu) * (x_f32 - new_mu))
+        sigma_sq_new = jnp.mean(
+            (x - jnp.asarray(prev_mu, dtype=x.dtype)) *
+            (x - jnp.asarray(new_mu, dtype=x.dtype)),
+            axis=reduce_axes, dtype=jnp.float32)
+
+        assert(sigma_sq_new.shape == sigma_sq_biased.value.shape)
+
         sigma_sq_biased.value = (sigma_sq_biased.value * self.decay +
             sigma_sq_new * one_minus_decay)
 
@@ -61,9 +71,9 @@ class EMANormalizer(nn.Module):
         mu = self.variable("batch_stats", "mu",
             lambda: jnp.zeros((dim,), jnp.float32))
         inv_sigma = self.variable("batch_stats", "inv_sigma", 
-            lambda: jnp.zeros((dim,), jnp.float32))
+            lambda: jnp.ones((dim,), jnp.float32))
         sigma = self.variable("batch_stats", "sigma",
-            lambda: jnp.zeros((dim,), jnp.float32))
+            lambda: jnp.ones((dim,), jnp.float32))
 
         # Intermediate values used to compute the moving average
         mu_biased = self.variable("batch_stats", "mu_biased",
