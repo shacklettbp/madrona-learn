@@ -19,6 +19,8 @@ class DiscreteActionDistributions:
 
             yield logits_slice
 
+            cur_bucket_offset += num_buckets
+
     def sample(self, prng_key):
         all_actions = []
         all_log_probs = []
