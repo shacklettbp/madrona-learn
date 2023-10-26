@@ -153,6 +153,10 @@ def _ppo_update(
             mutable=['batch_stats'],
         )
 
+        jax.debug.print("Values, Returns: {} {}",
+            jnp.mean(new_values_normalized), jnp.mean(normalized_returns),
+            ordered=True)
+
         if cfg.algo.huber_value_loss:
             value_loss = optax.huber_loss(
                 new_values_normalized, normalized_returns)
@@ -163,6 +167,8 @@ def _ppo_update(
         action_obj = jnp.mean(action_obj)
         value_loss = jnp.mean(value_loss)
         entropy_avg = jnp.mean(entropies)
+
+        jax.debug.print("V loss: {}", value_loss, ordered=True)
 
         # Maximize the action objective function
         action_loss = -action_obj 
@@ -192,6 +198,11 @@ def _ppo_update(
         else:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             aux, grads = grad_fn(state.params)
+
+        flattened_grads, _ = jax.tree_util.tree_flatten_with_path(grads)
+        jax.debug.print("\nGRADS: {}", aux[1][2], ordered=True)
+        for k, v in flattened_grads:
+            jax.debug.print(jax.tree_util.keystr(k) + ": {} {} {}", jnp.mean(v), jnp.min(v), jnp.max(v), ordered=True)
 
         with jax.numpy_dtype_promotion('standard'):
             param_updates, new_opt_state = state.tx.update(

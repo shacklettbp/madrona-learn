@@ -11,25 +11,22 @@ class DiscreteActionDistributions:
     actions_num_buckets : List[int]
     all_logits: jax.Array
 
-    def _iter_dists(self, cb, *args):
+    def _iter_logits(self):
         cur_bucket_offset = 0
-        for i, num_buckets in enumerate(self.actions_num_buckets):
+        for num_buckets in self.actions_num_buckets:
             logits_slice = self.all_logits[
                 :, cur_bucket_offset:cur_bucket_offset + num_buckets]
 
-            args_sliced = tuple(jnp.expand_dims(a[..., i], -1) for a in args)
-            cb(logits_slice, *args_sliced)
+            yield logits_slice
 
     def sample(self, prng_key):
         all_actions = []
         all_log_probs = []
 
-        def sample_actions(logits):
-            nonlocal prng_key
+        sample_keys = random.split(prng_key, len(self.actions_num_buckets))
 
-            prng_key, rnd = random.split(prng_key)
-
-            actions = random.categorical(prng_key, logits)
+        for sample_key, logits in zip(sample_keys, self._iter_logits()):
+            actions = random.categorical(sample_key, logits)
             actions = jnp.expand_dims(actions, axis=-1)
 
             action_logits = jnp.take_along_axis(logits, actions, axis=-1)
@@ -39,18 +36,14 @@ class DiscreteActionDistributions:
             all_actions.append(actions)
             all_log_probs.append(action_log_probs)
 
-        self._iter_dists(sample_actions)
-
         return (jnp.concatenate(all_actions, axis=-1),
                 jnp.concatenate(all_log_probs, axis=-1))
 
     def best(self):
         all_actions = []
 
-        def best_action(logits):
+        for logits in self._iter_logits():
             all_actions.append(jnp.argmax(logits, keepdims=True, axis=-1))
-
-        self._iter_dists(best_action)
 
         return jnp.concatenate(all_actions, axis=-1)
 
@@ -58,7 +51,8 @@ class DiscreteActionDistributions:
         all_log_probs = []
         all_entropies = []
 
-        def compute_stats(logits, actions):
+        for i, logits in enumerate(self._iter_logits()):
+            actions = jnp.expand_dims(all_actions[..., i], axis=-1)
             log_probs = \
                 logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
             p_logp = jnp.exp(log_probs) * log_probs
@@ -69,30 +63,24 @@ class DiscreteActionDistributions:
             all_log_probs.append(action_log_probs)
             all_entropies.append(entropies)
 
-        self._iter_dists(compute_stats, all_actions)
-
         return (jnp.concatenate(all_log_probs, axis=-1),
                 jnp.concatenate(all_entropies, axis=-1))
 
     def probs(self):
         all_probs = []
 
-        def compute_probs(logits):
+        for logits in self._iter_logits():
             log_probs = logits - jax.nn.logsumexp(
                 logits, axis=-1, keepdims=True)
             probs = jnp.exp(log_probs)
             all_probs.append(probs)
-
-        self._iter_dists(compute_probs)
 
         return all_probs
 
     def logits(self):
         all_logits = []
 
-        def collect_logits(logits):
+        for logits in self._iter_logits():
             all_logits.append(logits)
-
-        self._iter_dists(collect_logits)
 
         return all_logits
