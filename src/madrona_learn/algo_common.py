@@ -166,6 +166,9 @@ def zscore_data(data):
     mean = jnp.mean(data, dtype=jnp.float32)
     var = jnp.var(data, dtype=jnp.float32)
 
+    jax.debug.print(
+        "Z Score: {} {} {} " + str(data.dtype), mean, var, lax.rsqrt(jnp.clip(var, a_min=1e-5)))
+
     mean = jnp.asarray(mean, dtype=data.dtype)
     var = jnp.asarray(var, dtype=data.dtype)
 

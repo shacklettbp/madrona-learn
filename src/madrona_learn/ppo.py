@@ -132,6 +132,18 @@ def _ppo_update(
 
         action_obj = jnp.minimum(surr1, surr2)
 
+
+        jax.debug.print("Obs {}", mb['obs']['self'], ordered=True)
+        jax.debug.print("Returns {}", mb['returns'], ordered=True)
+        jax.debug.print("{}", mb['values'], ordered=True)
+        jax.debug.print("NV: {}", new_values_normalized, ordered=True)
+        jax.debug.print("{}", mb['advantages'], ordered=True)
+        jax.debug.print("{}", mb['log_probs'], ordered=True)
+        jax.debug.print("{} {} {}",
+            advantages, jnp.mean(advantages), jnp.var(advantages), ordered=True)
+        jax.debug.print("{}", ratio, ordered=True)
+        jax.debug.print("{}", action_obj, ordered=True)
+
         if cfg.algo.clip_value_loss:
             old_values_normalized = state.value_normalize_fn(
                 { 'batch_stats': state.value_normalize_stats },
@@ -153,6 +165,10 @@ def _ppo_update(
             mutable=['batch_stats'],
         )
 
+        jax.debug.print("Values, Returns: {} {}",
+            jnp.mean(new_values_normalized), jnp.mean(normalized_returns),
+            ordered=True)
+
         if cfg.algo.huber_value_loss:
             value_loss = optax.huber_loss(
                 new_values_normalized, normalized_returns)
@@ -163,6 +179,8 @@ def _ppo_update(
         action_obj = jnp.mean(action_obj)
         value_loss = jnp.mean(value_loss)
         entropy_avg = jnp.mean(entropies)
+
+        jax.debug.print("V loss: {}", value_loss, ordered=True)
 
         # Maximize the action objective function
         action_loss = -action_obj 
@@ -193,6 +211,12 @@ def _ppo_update(
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             aux, grads = grad_fn(state.params)
 
+        flattened_grads, _ = jax.tree_util.tree_flatten_with_path(grads)
+        jax.debug.print("\nGRADS: {}", aux[1][2], ordered=True)
+        for k, v in flattened_grads:
+            jax.debug.print(jax.tree_util.keystr(k) + ": {} {} {}", jnp.mean(v), jnp.min(v), jnp.max(v), ordered=True)
+            jax.debug.print(" {}", v, ordered=True)
+
         with jax.numpy_dtype_promotion('standard'):
             param_updates, new_opt_state = state.tx.update(
                 grads, opt_state, params)
@@ -211,6 +235,11 @@ def _ppo_update(
             value_loss,
             entropy_loss,
         ) = aux[1]
+
+        flattened_new_params, _ = jax.tree_util.tree_flatten_with_path(new_params)
+        jax.debug.print("\nPARAMS:", ordered=True)
+        for k, v in flattened_new_params:
+            jax.debug.print(jax.tree_util.keystr(k) + ": {}", v, ordered=True)
 
         state = state.update(
             params = new_params,
@@ -243,6 +272,9 @@ def _ppo(
         mb_rnd, train_state = train_state.gen_update_rnd()
 
         all_inds = random.permutation(mb_rnd, icfg.num_train_seqs_per_policy)
+        jax.debug.print("{}", all_inds)
+        all_inds = jnp.arange(icfg.num_train_seqs_per_policy)
+
         mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
 
         def mb_iter(mb_i, inputs):

@@ -6,6 +6,40 @@ import flax
 from dataclasses import dataclass
 from typing import List
 
+class SampleCallback:
+    def __init__(self):
+        import numpy as np
+
+        self.recorded_updates = 10
+        self.recorded_steps = 1
+        self.num_worlds = 1024
+
+        self.data = np.fromfile("/tmp/sampled_actions", dtype=np.int32)
+        self.actions = self.data.reshape(
+            self.recorded_updates, self.recorded_steps, self.num_worlds, 1)
+
+        self.cur_update = 0
+        self.cur_step = 0
+
+    def sample(self):
+        sampled = self.actions[self.cur_update, self.cur_step]
+
+        self.cur_step += 1
+        if self.cur_step >= self.recorded_steps:
+            self.cur_step = 0
+            self.cur_update += 1
+
+        return sampled
+
+    def reset(self):
+        self.cur_update = 0
+        self.cur_step = 0
+
+sample_callback = SampleCallback()
+
+def read_actions():
+    return sample_callback.sample()
+
 @dataclass(frozen=True)
 class DiscreteActionDistributions:
     actions_num_buckets : List[int]
@@ -26,8 +60,13 @@ class DiscreteActionDistributions:
         sample_keys = random.split(prng_key, len(self.actions_num_buckets))
 
         for sample_key, logits in zip(sample_keys, self._iter_logits()):
-            actions = random.categorical(sample_key, logits)
-            actions = jnp.expand_dims(actions, axis=-1)
+            #actions = random.categorical(sample_key, logits)
+            #actions = jnp.expand_dims(actions, axis=-1)
+
+            actions = jax.experimental.io_callback(read_actions,
+                jax.ShapeDtypeStruct(
+                    dtype=jnp.int32, shape=(sample_callback.num_worlds, 1)),
+                ordered=True)
 
             action_logits = jnp.take_along_axis(logits, actions, axis=-1)
             action_log_probs = action_logits - jax.nn.logsumexp(
