@@ -143,39 +143,6 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
         checkify_errors = checkify_errors,
     )
 
-    import torch
-    torch_state_dict = torch.load("/tmp/pt")
-    torch_state_dict = jax.tree_map(lambda x: x.numpy().transpose(), torch_state_dict)
-
-    def convert(key):
-        return jnp.expand_dims(jnp.asarray(torch_state_dict[key], dtype=jnp.float32), axis=0)
-
-    params = train_state_mgr.train_states.params
-    params['actor']['impl']['kernel'] = convert('actor.impl.weight')
-    params['backbone']['actor_encoder']['net']['Dense_0']['kernel'] = \
-        convert('backbone.actor_encoder.net.net.0.weight')
-    params['backbone']['actor_encoder']['net']['Dense_1']['kernel'] = \
-        convert('backbone.actor_encoder.net.net.3.weight')
-    params['backbone']['critic_encoder']['net']['Dense_0']['kernel'] = \
-        convert('backbone.critic_encoder.net.net.0.weight')
-    params['backbone']['critic_encoder']['net']['Dense_1']['kernel'] = \
-        convert('backbone.critic_encoder.net.net.3.weight')
-    params['critic']['Dense_0']['kernel'] = \
-        convert('critic.impl.weight')
-
-
-    train_state_mgr = train_state_mgr.replace(
-        train_states = train_state_mgr.train_states.replace(
-            params = params,
-        ),
-    )
-
-    flattened_params, _ = jax.tree_util.tree_flatten_with_path(
-        train_state_mgr.train_states.params)
-    for k, v in flattened_params:
-        jax.debug.print(jax.tree_util.keystr(k) + ": {} {} {}", v.shape, jnp.mean(v), jnp.std(v), ordered=True)
-
-
     if restore_ckpt != None:
         train_state_mgr, start_update_idx = train_state_mgr.load(restore_ckpt)
     else:
