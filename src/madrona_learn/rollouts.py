@@ -193,9 +193,9 @@ class RolloutExecutor:
                 method=method,
             )
 
-        def rollout_fn_wrapper(state, sample_keys, rnn_states, obs):
+        def rollout_fn_wrapper(state, sample_key, rnn_states, obs):
             actions, log_probs, values, rnn_states = infer_wrapper(
-                'rollout', state, sample_keys, rnn_states, obs)
+                'rollout', state, sample_key, rnn_states, obs)
 
             values = state.value_normalize_fn(
                 { 'batch_stats': state.value_normalize_stats },
