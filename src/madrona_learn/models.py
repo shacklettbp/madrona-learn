@@ -11,7 +11,7 @@ class MLP(nn.Module):
     num_channels: int
     num_layers: int
     dtype: jnp.dtype
-    weight_initializer: Callable = jax.nn.initializers.he_normal()
+    weight_init: Callable = jax.nn.initializers.he_normal()
 
     @nn.compact
     def __call__(self, inputs, train):
@@ -21,7 +21,7 @@ class MLP(nn.Module):
             x = nn.Dense(
                     self.num_channels,
                     use_bias=True,
-                    kernel_init=self.weight_initializer,
+                    kernel_init=self.weight_init,
                     bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                 )(x)
@@ -35,14 +35,14 @@ class MLP(nn.Module):
 class DenseLayerDiscreteActor(nn.Module):
     actions_num_buckets: List[int]
     dtype: jnp.dtype
-    weight_initializer: Callable = jax.nn.initializers.orthogonal(scale=0.01)
+    weight_init: Callable = jax.nn.initializers.orthogonal(scale=0.01)
 
     def setup(self):
         total_action_dim = sum(self.actions_num_buckets)
         self.impl = nn.Dense(
                 total_action_dim,
                 use_bias=True,
-                kernel_init=self.weight_initializer,
+                kernel_init=self.weight_init,
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )
@@ -54,14 +54,14 @@ class DenseLayerDiscreteActor(nn.Module):
 
 class DenseLayerCritic(nn.Module):
     dtype: jnp.dtype
-    weight_initializer: Callable = jax.nn.initializers.orthogonal()
+    weight_init: Callable = jax.nn.initializers.orthogonal()
 
     @nn.compact
     def __call__(self, features, train=False):
         return nn.Dense(
                 1,
                 use_bias=True,
-                kernel_init=self.weight_initializer,
+                kernel_init=self.weight_init,
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )(features)
