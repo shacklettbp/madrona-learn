@@ -8,7 +8,7 @@ from typing import Tuple
 __all__ = ["LSTM"]
 
 class MultiLayerLSTMCell(nn.RNNCellBase):
-    hidden_channels: int
+    num_hidden_channels: int
     num_layers: int
     dtype: jnp.dtype
 
@@ -28,7 +28,7 @@ class MultiLayerLSTMCell(nn.RNNCellBase):
 
         for i in range(self.num_layers):
             (new_c, new_h), out = nn.OptimizedLSTMCell(
-                    features=self.hidden_channels,
+                    features=self.num_hidden_channels,
                     kernel_init=jax.nn.initializers.orthogonal(),
                     recurrent_kernel_init=jax.nn.initializers.orthogonal(),
                     bias_init=jax.nn.initializers.constant(0),
@@ -45,7 +45,7 @@ class MultiLayerLSTMCell(nn.RNNCellBase):
         return (all_c, all_h), all_out
 
 class LSTM(nn.Module):
-    hidden_channels: int
+    num_hidden_channels: int
     num_layers: int
     dtype: jnp.dtype
 
@@ -54,7 +54,7 @@ class LSTM(nn.Module):
         c_states = []
         h_states = []
 
-        init_zeros = jnp.zeros((N, self.hidden_channels), self.dtype)
+        init_zeros = jnp.zeros((N, self.num_hidden_channels), self.dtype)
 
         for i in range(self.num_layers):
             c_states.append(init_zeros)
@@ -82,7 +82,7 @@ class LSTM(nn.Module):
 
     def setup(self):
         self.cell = MultiLayerLSTMCell(
-            self.hidden_channels, self.num_layers, self.dtype)
+            self.num_hidden_channels, self.num_layers, self.dtype)
 
     def __call__(self, cur_hiddens, in_features, train):
         new_hiddens, out = self.cell(cur_hiddens, in_features)

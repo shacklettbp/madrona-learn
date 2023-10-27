@@ -7,6 +7,14 @@ from typing import List, Callable
 from .action import DiscreteActionDistributions
 from .moving_avg import EMANormalizer
 
+class LayerNorm(nn.Module):
+    dtype: jnp.dtype
+
+    @nn.compact
+    def __call__(self, x):
+        with jax.numpy_dtype_promotion('standard'):
+            return nn.LayerNorm(dtype=self.dtype)(x)
+
 class MLP(nn.Module):
     num_channels: int
     num_layers: int
@@ -25,8 +33,7 @@ class MLP(nn.Module):
                     bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                 )(x)
-            with jax.numpy_dtype_promotion('standard'):
-                x = nn.LayerNorm(dtype=self.dtype)(x)
+            x = LayerNorm(dtype=self.dtype)(x)
             x = nn.relu(x)
 
         return x
@@ -72,65 +79,78 @@ class EMANormalizeTree(nn.Module):
 
     @nn.compact
     def __call__(self, tree, train):
-        orig_shapes = jax.tree_map(jnp.shape, tree)
-        flattened, treedef = jax.tree_util.tree_flatten(tree)
-
-        combined = jnp.concatenate(flattened, axis=-1)
-
-        normalized_combined = EMANormalizer(self.decay)(
-            'normalize', train, combined)
-
-        normalized = []
-        cur_offset = 0
-        for x in flattened:
-            num_features = x.shape[-1]
-            normalized.append(normalized_combined[
-                ..., cur_offset:cur_offset + num_features])
-            cur_offset += num_features
-
-        normalized_tree = jax.tree_util.tree_unflatten(
-                treedef, normalized)
-
         return jax.tree_map(
-            lambda x, y: x.reshape(y), normalized_tree, orig_shapes)
+            lambda x: EMANormalizer(self.decay)('normalize', train, x), tree)
 
 
-class EgocentricSelfAttentionNet(nn.Module):
+# Based on the Emergent Tool Use policy paper
+class EntitySelfAttentionNet(nn.Module):
     num_embed_channels: int
     num_heads: int
     dtype: jnp.dtype
+    dense_init: Callable = jax.nn.initializers.orthogonal()
+    # To follow the paper, this should be true. If the observations are
+    # already egocentric, this seems redundant.
+    embed_concat_self: bool = False
 
     @nn.compact
-    def __call__(self, input_tree, train):
-        inputs, treedef = jax.tree_util.tree_flatten_with_path(input_tree)
+    def __call__(self, x_tree, train):
+        def make_embed():
+            return nn.Dense(
+                self.num_embed_channels,
+                use_bias = True,
+                kernel_init = self.dense_init,
+                bias_init = jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )
 
-        embedded = []
-        for keypath, x in inputs:
-            embedding = nn.Dense(
-                    self.num_embed_channels,
-                    use_bias=True,
-                    kernel_init=jax.nn.initializers.orthogonal(),
-                    bias_init=jax.nn.initializers.constant(0),
-                    dtype=self.dtype,
-                )(x)
+        x_tree, x_self = x_tree.pop('self')
 
-            embedded.append(embedding)
+        x_self = jnp.expand_dims(x_self, axis=-2)
 
-        embedded = jnp.stack(embedded, axis=1)
+        embed_self = make_embed()(x_self)
 
-        attended = nn.SelfAttention(
+        x_flat, treedef = jax.tree_util.tree_flatten_with_path(x_tree)
+
+        embedded_entities = [embed_self]
+        for keypath, x_entities in x_flat:
+            if self.embed_concat_self:
+                x_entities = jnp.concatenate([x_entities, x_self], axis=-1)
+
+            embedding = make_embed()(x_entities)
+
+            embedded_entities.append(embedding)
+
+        embedded_entities = jnp.concatenate(embedded_entities, axis=-2)
+
+        attended_entities = nn.SelfAttention(
                 num_heads=self.num_heads,
                 qkv_features=self.num_embed_channels,
                 out_features=self.num_embed_channels,
                 dtype=self.dtype,
-            )(embedded)
+            )(embedded_entities)
 
-        attended = nn.Dense(
+        attended_entities = nn.Dense(
                 self.num_embed_channels,
                 dtype=self.dtype,
-            )(attended)
+            )(attended_entities)
 
-        out = attended + embedded
-        out = out.mean(axis=1)
+        attended_entities = attended_entities + embedded_entities
+        attended_entities = LayerNorm(dtype=self.dtype)(attended_entities)
+        attended_entities = attended_entities.mean(axis=-2)
+
+        out = jnp.concatenate(
+            [jnp.squeeze(embed_self, axis=-2), attended_entities], axis=-1)
+        out = LayerNorm(dtype=self.dtype)(out)
+
+        out = nn.Dense(
+                self.num_embed_channels * 2,
+                use_bias = True,
+                kernel_init = self.dense_init,
+                bias_init = jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )(out)
+
+        out = LayerNorm(dtype=self.dtype)(out)
 
         return out

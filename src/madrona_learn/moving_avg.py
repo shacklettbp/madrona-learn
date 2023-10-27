@@ -67,7 +67,9 @@ class EMANormalizer(nn.Module):
         input_dtype = jnp.result_type(x)
         dim = x.shape[-1]
 
-        # Current parameter estimates
+        # Current parameter estimates. Initialized to mu 0, sigma 1 as a
+        # noop. On first call where update_stats == True, these values
+        # are overwritten
         mu = self.variable("batch_stats", "mu",
             lambda: jnp.zeros((dim,), jnp.float32))
         inv_sigma = self.variable("batch_stats", "inv_sigma", 
