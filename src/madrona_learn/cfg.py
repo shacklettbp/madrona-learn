@@ -28,10 +28,10 @@ class TrainConfig:
     pbt_history_len: int = 1
     compute_advantages: bool = True
     normalize_advantages: bool = True # Only used if compute_advantages = True
-    normalize_returns : bool = True # Only used if compute_advantages = False
-    normalize_values : bool = True
-    value_normalizer_decay : float = 0.99999
-    mixed_precision : bool = False
+    normalize_returns: bool = True # Only used if compute_advantages = False
+    normalize_values: bool = True
+    value_normalizer_decay: float = 0.99999
+    mixed_precision: bool = False
 
     def __repr__(self):
         rep = "TrainConfig:"

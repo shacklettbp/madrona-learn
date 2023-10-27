@@ -409,7 +409,7 @@ class RolloutExecutor:
         def rollout_iter(bptt_step, inputs):
             rollout_state, rollout_store, bptt_chunk = inputs
 
-            with profile('Policy Infer', gpu=True):
+            with profile('Policy Infer'):
                 rollout_state, pre_step_save_data = self._rollout_infer(
                     train_state_mgr.train_states, rollout_state)
 

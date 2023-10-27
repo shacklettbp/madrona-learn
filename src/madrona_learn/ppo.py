@@ -220,12 +220,13 @@ def _ppo_update(
             scaler = scaler,
         )
 
-    metrics = metrics.record({
-        'Loss': combined_loss,
-        'Action Loss': action_loss,
-        'Value Loss': value_loss,
-        'Entropy Loss': entropy_loss,
-    })
+    with profile('Record Metrics'):
+        metrics = metrics.record({
+            'Loss': combined_loss,
+            'Action Loss': action_loss,
+            'Value Loss': value_loss,
+            'Entropy Loss': entropy_loss,
+        })
 
     return state, metrics
 
@@ -242,8 +243,9 @@ def _ppo(
 
         mb_rnd, train_state = train_state.gen_update_rnd()
 
-        all_inds = random.permutation(mb_rnd, icfg.num_train_seqs_per_policy)
-        mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
+        with profile('Compute Minibatch Indices'):
+            all_inds = random.permutation(mb_rnd, icfg.num_train_seqs_per_policy)
+            mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
 
         def mb_iter(mb_i, inputs):
             train_state, metrics = inputs
@@ -253,7 +255,8 @@ def _ppo(
 
             train_state, metrics = _ppo_update(cfg, mb, train_state, metrics)
 
-            metrics = metrics_cb(metrics, epoch_i, mb, train_state)
+            with profile('Metrics Callback'):
+                metrics = metrics_cb(metrics, epoch_i, mb, train_state)
 
             return train_state, metrics
 

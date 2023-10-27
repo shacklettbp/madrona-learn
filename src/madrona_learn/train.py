@@ -31,13 +31,14 @@ def train(
     iter_cb: Callable,
     metrics_cfg: CustomMetricConfig,
     restore_ckpt: str = None,
+    profile_port: int = None,
 ):
     print(cfg)
     icfg = InternalConfig(dev, cfg)
 
     with jax.default_device(dev):
         return _train_impl(cfg, icfg, sim_step, init_sim_data,
-            policy, iter_cb, metrics_cfg, restore_ckpt)
+            policy, iter_cb, metrics_cfg, restore_ckpt, profile_port)
 
 def _update_loop(
     algo: AlgoBase,
@@ -81,7 +82,7 @@ def _update_loop(
                 rollout_state, rollout_data, metrics = rollout_exec.collect(
                     train_state_mgr, rollout_state, metrics)
 
-            with profile('Optimize'):
+            with profile('Learn'):
                 updated_train_states, metrics = algo_wrapper(
                     train_state_mgr.train_states, rollout_data, metrics)
 
@@ -99,7 +100,11 @@ def _update_loop(
         (rollout_state, train_state_mgr))
 
 def _train_impl(cfg, icfg, sim_step, init_sim_data,
-                policy, iter_cb, metrics_cfg, restore_ckpt):
+                policy, iter_cb, metrics_cfg, restore_ckpt, profile_port):
+    if profile_port != None:
+        jax.profiler.start_server(profile_port)
+        env_vars['TF_GPU_CUPTI_FORCE_CONCURRENT_KERNEL'] = '1'
+
     checkify_errors = checkify.user_checks
     if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
             env_vars['MADRONA_LEARN_FULL_CHECKIFY'] == '1':
@@ -168,6 +173,7 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
             start_update_idx = start_update_idx,
         )
 
+
     update_loop_wrapper = jax.jit(
         checkify.checkify(update_loop_wrapper, errors=checkify_errors),
         donate_argnums=[0, 1])
@@ -175,14 +181,22 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
     lowered_update_loop = update_loop_wrapper.lower(
         rollout_state, train_state_mgr)
 
-    if 'MADRONA_LEARN_PRINT_LOWERED' in env_vars and \
-            env_vars['MADRONA_LEARN_PRINT_LOWERED'] == '1':
-        print(lowered_update_loop.as_text())
+    if 'MADRONA_LEARN_DUMP_LOWERED' in env_vars:
+        with open(env_vars['MADRONA_LEARN_DUMP_LOWERED'], 'w') as f:
+            print(lowered_update_loop.as_text(), file=f)
 
     compiled_update_loop = lowered_update_loop.compile()
+
+    if 'MADRONA_LEARN_DUMP_IR' in env_vars:
+        with open(env_vars['MADRONA_LEARN_DUMP_IR'], 'w') as f:
+            print(compiled_update_loop.as_text(), file=f)
 
     err, (rollout_state, train_state_mgr) = compiled_update_loop(
         rollout_state, train_state_mgr)
     err.throw()
+
+    if profile_port != None:
+        train_state_mgr.train_states.update_prng_key.block_until_ready()
+        jax.profiler.stop_server()
 
     return train_state_mgr
