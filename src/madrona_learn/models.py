@@ -7,13 +7,50 @@ from typing import List, Callable
 from .action import DiscreteActionDistributions
 from .moving_avg import EMANormalizer
 
-class LayerNorm(nn.Module):
+from .pallas import monkeypatch as pl_patch
+from .pallas import layer_norm as pl_layer_norm
+from jax.experimental.pallas.ops import attention as pl_attention
+
+class PallasLayerNorm(nn.Module):
     dtype: jnp.dtype
+    use_ref: bool = False
 
     @nn.compact
     def __call__(self, x):
+        orig_shape = x.shape
+        dim = orig_shape[-1]
+
+        # Pallas layernorm wants (batch, seq, features) but
+        # seq is just treated as another batch dim anyway
+        x = x.reshape(-1, 1, dim)
+
+        scale = self.param('scale',
+            jax.nn.initializers.constant(1), (dim,), jnp.float32)
+
+        bias = self.param('bias',
+            jax.nn.initializers.constant(0), (dim,), jnp.float32)
+
+        normalized = pl_layer_norm.layer_norm(x, scale, bias)
+
+        return normalized.reshape(orig_shape)
+
+class LayerNorm(nn.Module):
+    dtype: jnp.dtype
+    use_ref: bool = False
+
+    def _ref(self, x):
         with jax.numpy_dtype_promotion('standard'):
-            return nn.LayerNorm(dtype=self.dtype)(x)
+            return nn.LayerNorm(name='impl', dtype=self.dtype)(x)
+
+    def _pallas(self, x):
+        return PallasLayerNorm(name='impl', dtype=self.dtype)(x)
+
+    @nn.compact
+    def __call__(self, x):
+        if self.use_ref:
+            return self._ref(x)
+        else:
+            return self._pallas(x)
 
 class MLP(nn.Module):
     num_channels: int
