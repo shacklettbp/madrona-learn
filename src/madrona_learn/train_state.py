@@ -14,15 +14,9 @@ from typing import Optional, Any, Callable
 from functools import partial
 
 from .actor_critic import ActorCritic
+from .algo_common import HyperParams, AlgoBase, InternalConfig
+from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
-
-class HyperParams(flax.struct.PyTreeNode):
-    lr: float
-    gamma: float
-    gae_lambda: float
-    normalize_values: bool
-    value_normalizer_decay: float
-
 
 class PolicyTrainState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
@@ -117,20 +111,24 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
     @staticmethod
     def create(
-        policy,
-        optimizer,
-        hyper_params,
-        mixed_precision,
-        num_policies,
-        batch_size_per_policy,
+        policy: nn.Module,
+        cfg: TrainConfig,
+        icfg: InternalConfig,
+        algo: AlgoBase,
         base_init_rng,
         example_obs,
         example_rnn_states,
         checkify_errors,
     ):
-        train_states = _setup_train_states(policy, optimizer, hyper_params,
-            mixed_precision, num_policies, batch_size_per_policy,
-            base_init_rng, example_obs, example_rnn_states, checkify_errors)
+        setup_train_states = partial(_setup_train_states,
+            policy, cfg, icfg, algo)
+
+        setup_train_states = jax.jit(checkify.checkify(
+            setup_train_states, errors=checkify_errors))
+
+        err, train_states = setup_train_states(
+            base_init_rng, example_obs, example_rnn_states)
+        err.throw()
 
         return TrainStateManager(train_states=train_states)
 
@@ -148,13 +146,15 @@ def _setup_value_normalizer(hyper_params, rng_key, fake_values):
 
 def _setup_new_policy(
     policy,
-    optimizer,
-    hyper_params,
-    mixed_precision,
+    cfg,
+    algo,
     prng_key,
     rnn_states,
     obs,
 ):
+    hyper_params = algo.init_hyperparams(cfg)
+    optimizer = algo.make_optimizer(hyper_params)
+
     model_init_rng, value_norm_rng, update_rng = random.split(prng_key, 3)
     fake_outs, variables = policy.init_with_output(
         model_init_rng, random.PRNGKey(0), rnn_states, obs,
@@ -174,7 +174,7 @@ def _setup_new_policy(
 
     opt_state = optimizer.init(params)
 
-    if mixed_precision:
+    if cfg.mixed_precision:
         scaler = DynamicScale()
     else:
         scaler = None
@@ -196,34 +196,24 @@ def _setup_new_policy(
 
 def _setup_train_states(
     policy,
-    optimizer,
-    hyper_params,
-    mixed_precision,
-    num_policies,
-    batch_size_per_policy,
+    cfg,
+    icfg,
+    algo,
     base_init_rng,
     example_obs,
     example_rnn_states,
-    checkify_errors,
 ):
-    setup_new_policy = partial(_setup_new_policy,
-        policy, optimizer, hyper_params, mixed_precision)
+    setup_new_policy = partial(_setup_new_policy, policy, cfg, algo)
 
     setup_new_policies = jax.vmap(setup_new_policy)
 
     obs = jax.tree_map(lambda x: x.reshape(
-            num_policies,
-            batch_size_per_policy,
+            cfg.pbt_ensemble_size,
+            cfg.pbt_history_len,
+            icfg.rollout_agents_per_policy,
             *x.shape[1:],
         ), example_obs)
 
-    setup_new_policies = jax.jit(
-        checkify.checkify(setup_new_policies, errors=checkify_errors))
+    init_rngs = random.split(base_init_rng, cfg.pbt_ensemble_size)
 
-    init_rngs = random.split(base_init_rng, num_policies)
-
-    err, train_states = setup_new_policies(
-        init_rngs, example_rnn_states, obs)
-    err.throw()
-
-    return train_states
+    return setup_new_policies(init_rngs, example_rnn_states, obs)

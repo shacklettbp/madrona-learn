@@ -14,7 +14,7 @@ from typing import List, Optional, Dict, Callable, Any
 
 from .actor_critic import ActorCritic
 from .cfg import TrainConfig
-from .train_state import TrainStateManager, HyperParams
+from .train_state import TrainStateManager
 from .utils import init_recurrent_states, make_pbt_reorder_funcs
 
 def eval_ckpt(
@@ -133,19 +133,15 @@ def _eval_ckpt_impl(
         batch_size_per_policy, train_cfg.pbt_ensemble_size)
 
     algo = train_cfg.algo.setup()
-    hyper_params = algo.init_hyperparams(train_cfg)
-    optimizer = algo.make_optimizer(hyper_params)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
-        optimizer = optimizer,
-        hyper_params = hyper_params,
-        num_policies = train_cfg.pbt_ensemble_size,
-        batch_size_per_policy = batch_size_per_policy,
+        cfg = train_cfg,
+        algo = algo,
+        rollout_agents_per_policy = batch_size_per_policy,
         base_init_rng = random.PRNGKey(0),
         example_obs = init_sim_data['obs'],
         example_rnn_states = rnn_states,
-        mixed_precision = train_cfg.mixed_precision,
         checkify_errors = checkify_errors,
     )
 

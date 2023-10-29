@@ -18,7 +18,7 @@ from .actor_critic import ActorCritic
 from .algo_common import AlgoBase, InternalConfig
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
-from .train_state import HyperParams, PolicyTrainState, TrainStateManager
+from .train_state import PolicyTrainState, TrainStateManager
 from .profile import profile
 from .utils import init_recurrent_states
 
@@ -137,11 +137,9 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
-        optimizer = optimizer,
-        hyper_params = hyper_params,
-        mixed_precision = cfg.mixed_precision,
-        num_policies = cfg.pbt_ensemble_size * cfg.pbt_history_len,
-        batch_size_per_policy = icfg.rollout_agents_per_policy,
+        cfg = cfg,
+        icfg = icfg,
+        algo = algo,
         base_init_rng = init_rnd,
         example_obs = init_sim_data['obs'],
         example_rnn_states = rnn_states,

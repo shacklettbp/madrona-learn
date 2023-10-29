@@ -10,8 +10,15 @@ from typing import List, Dict
 from .cfg import TrainConfig
 from .metrics import Metric
 from .moving_avg import EMANormalizer
-from .train_state import HyperParams
 from .utils import DataclassProtocol
+
+class HyperParams(flax.struct.PyTreeNode):
+    lr: float
+    gamma: float
+    gae_lambda: float
+    normalize_values: bool
+    value_normalizer_decay: float
+
 
 class AlgoBase:
     def init_hyperparams(self, cfg: TrainConfig):
