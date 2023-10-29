@@ -36,7 +36,7 @@ from jax._src.pallas.pallas_call import _trace_to_jaxpr
 from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental.pallas.ops import attention
+from madrona_learn.pallas import attention
 from madrona_learn.pallas import layer_norm
 from jax.experimental.pallas.ops import rms_norm
 from jax.experimental.pallas.ops import softmax

@@ -2,14 +2,16 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+
 from typing import List, Callable
+from functools import partial
 
 from .action import DiscreteActionDistributions
 from .moving_avg import EMANormalizer
 
-from .pallas import monkeypatch as pl_patch
+from .pallas import monkeypatch as _pl_patch
 from .pallas import layer_norm as pl_layer_norm
-from jax.experimental.pallas.ops import attention as pl_attention
+from .pallas import attention as pl_attention
 
 class PallasLayerNorm(nn.Module):
     dtype: jnp.dtype
@@ -34,23 +36,59 @@ class PallasLayerNorm(nn.Module):
 
         return normalized.reshape(orig_shape)
 
+
 class LayerNorm(nn.Module):
     dtype: jnp.dtype
-    use_ref: bool = False
-
-    def _ref(self, x):
-        with jax.numpy_dtype_promotion('standard'):
-            return nn.LayerNorm(name='impl', dtype=self.dtype)(x)
-
-    def _pallas(self, x):
-        return PallasLayerNorm(name='impl', dtype=self.dtype)(x)
+    use_ref: bool = True # Current pallas layernorm is not faster
 
     @nn.compact
     def __call__(self, x):
         if self.use_ref:
-            return self._ref(x)
+            with jax.numpy_dtype_promotion('standard'):
+                return nn.LayerNorm(name='impl', dtype=self.dtype)(x)
         else:
-            return self._pallas(x)
+            return PallasLayerNorm(name='impl', dtype=self.dtype)(x)
+
+
+class SelfAttention(nn.Module):
+    num_heads: int
+    qkv_features: int
+    out_features: int
+    dtype: jnp.dtype
+    use_ref: bool = True
+
+    @nn.compact
+    def __call__(self, x):
+        if self.use_ref or self.dtype != jnp.float16:
+            attention_fn = nn.attention.dot_product_attention
+        else:
+            def attention_fn(q, k, v, mask, dropout_rng, dropout_rate,
+                             broadcast_dropout, deterministic,
+                             dtype, precision):
+                seq_len = q.shape[1]
+                pad_amount = max(0, 16 - seq_len)
+
+                q = jnp.pad(q, ((0, 0), (0, pad_amount), (0, 0), (0, 0)),
+                            constant_values = 0)
+
+                k = jnp.pad(k, ((0, 0), (0, pad_amount), (0, 0), (0, 0)),
+                            constant_values = 0)
+
+                v = jnp.pad(v, ((0, 0), (0, pad_amount), (0, 0), (0, 0)),
+                            constant_values = 0)
+
+                with jax.numpy_dtype_promotion('standard'):
+                    out = pl_attention.mha(q, k, v, segment_ids=None)
+
+                return out[:, 0:seq_len, :, :]
+
+        return nn.SelfAttention(
+            num_heads = self.num_heads,
+            qkv_features = self.qkv_features,
+            out_features = self.out_features,
+            dtype = self.dtype,
+            attention_fn = attention_fn
+        )(x)
 
 class MLP(nn.Module):
     num_channels: int
@@ -160,7 +198,7 @@ class EntitySelfAttentionNet(nn.Module):
 
         embedded_entities = jnp.concatenate(embedded_entities, axis=-2)
 
-        attended_entities = nn.SelfAttention(
+        attended_entities = SelfAttention(
                 num_heads=self.num_heads,
                 qkv_features=self.num_embed_channels,
                 out_features=self.num_embed_channels,
