@@ -116,8 +116,7 @@ class RolloutExecutor:
         self._num_bptt_steps = icfg.num_bptt_steps
         self._num_train_policies = cfg.pbt_ensemble_size
         self._train_agents_per_policy = icfg.train_agents_per_policy
-        self._num_rollout_policies = \
-            cfg.pbt_ensemble_size * cfg.pbt_history_len
+        self._num_rollout_policies = icfg.num_rollout_policies
         self._float_dtype = icfg.float_storage_type
         self._use_advantages = cfg.compute_advantages
         self._compute_advantages_fn = partial(compute_advantages, cfg)
@@ -220,7 +219,7 @@ class RolloutExecutor:
         self._rollout_fn = jax.vmap(rollout_fn_wrapper)
         self._critic_fn = jax.vmap(critic_fn_wrapper)
         self._rnn_reset_fn = jax.vmap(
-            train_state_mgr.train_states.rnn_reset_fn)
+            train_state_mgr.policy_states.rnn_reset_fn)
         self._prep_data_for_policy, self._prep_data_for_sim = \
             make_pbt_reorder_funcs(self._is_dynamic_policy_assignment,
                                    self._num_rollout_policies)

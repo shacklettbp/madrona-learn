@@ -18,13 +18,30 @@ from .algo_common import HyperParams, AlgoBase, InternalConfig
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
 
-class PolicyTrainState(flax.struct.PyTreeNode):
+class PolicyState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
-    value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
     rnn_reset_fn: Callable = flax.struct.field(pytree_node=False)
-    tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     params: flax.core.FrozenDict[str, Any]
     batch_stats: flax.core.FrozenDict[str, Any]
+
+    def update(
+        self,
+        params = None,
+        batch_stats = None,
+    ):
+        return PolicyState(
+            apply_fn = self.apply_fn,
+            rnn_reset_fn = self.rnn_reset_fn,
+            params = params if params != None else self.params,
+            batch_stats = (
+                batch_stats if batch_stats != None else self.batch_stats,
+            ),
+        )
+
+
+class PolicyTrainState(flax.struct.PyTreeNode):
+    value_normalize_fn: Callable = flax.struct.field(pytree_node=False)
+    tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     value_normalize_stats: flax.core.FrozenDict[str, Any]
     hyper_params: HyperParams
     opt_state: optax.OptState
@@ -35,8 +52,6 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     def update(
         self,
         tx=None,
-        params=None,
-        batch_stats=None,
         value_normalize_stats=None,
         hyper_params=None,
         opt_state=None,
@@ -45,13 +60,8 @@ class PolicyTrainState(flax.struct.PyTreeNode):
         update_prng_key=None,
     ):
         return PolicyTrainState(
-            apply_fn = self.apply_fn,
             value_normalize_fn = self.value_normalize_fn,
-            rnn_reset_fn = self.rnn_reset_fn,
-            params = params if params != None else self.params,
             tx = tx if tx != None else self.tx,
-            batch_stats = (
-                batch_stats if batch_stats != None else self.batch_stats),
             value_normalize_stats = (
                 value_normalize_stats if value_normalize_stats != None else
                     self.value_normalize_stats),
@@ -71,6 +81,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
 
 
 class TrainStateManager(flax.struct.PyTreeNode):
+    policy_states: PolicyState
     train_states: PolicyTrainState
 
     def save(self, update_idx, path):
@@ -120,17 +131,24 @@ class TrainStateManager(flax.struct.PyTreeNode):
         example_rnn_states,
         checkify_errors,
     ):
-        setup_train_states = partial(_setup_train_states,
-            policy, cfg, icfg, algo)
+        # All the arguments to _make_policies can be treated as constant by
+        # jax, so bind them all using partial. Strangely, this is necessary,
+        # because if example_obs (which is a set of dlpack imported arrays) is
+        # passed as an argument into the jitted function, there is a memcpy
+        # error within jax caused by the later code that slices the tensor
+        make_policies = partial(_make_policies, policy, cfg, icfg, algo,
+                                base_init_rng, example_obs, example_rnn_states)
 
-        setup_train_states = jax.jit(checkify.checkify(
-            setup_train_states, errors=checkify_errors))
+        make_policies = jax.jit(checkify.checkify(
+            make_policies, errors=checkify_errors))
 
-        err, train_states = setup_train_states(
-            base_init_rng, example_obs, example_rnn_states)
+        err, (policy_states, train_states) = make_policies()
         err.throw()
 
-        return TrainStateManager(train_states=train_states)
+        return TrainStateManager(
+            policy_states = policy_states,
+            train_states = train_states,
+        )
 
 def _setup_value_normalizer(hyper_params, rng_key, fake_values):
     value_norm_decay = (hyper_params.value_normalizer_decay 
@@ -144,20 +162,15 @@ def _setup_value_normalizer(hyper_params, rng_key, fake_values):
 
     return value_normalizer.apply, value_normalizer_vars['batch_stats']
 
-def _setup_new_policy(
+def _setup_policy_state(
     policy,
-    cfg,
-    algo,
     prng_key,
     rnn_states,
     obs,
 ):
-    hyper_params = algo.init_hyperparams(cfg)
-    optimizer = algo.make_optimizer(hyper_params)
-
-    model_init_rng, value_norm_rng, update_rng = random.split(prng_key, 3)
+    # The second prng key is passed as the key for sampling
     fake_outs, variables = policy.init_with_output(
-        model_init_rng, random.PRNGKey(0), rnn_states, obs,
+        prng_key, random.PRNGKey(0), rnn_states, obs,
         method='rollout')
 
     params = variables['params']
@@ -167,12 +180,31 @@ def _setup_new_policy(
     else:
         batch_stats = {}
 
-    value_norm_fn, value_norm_stats = _setup_value_normalizer(
-        hyper_params, value_norm_rng, fake_outs[2])
-
     rnn_reset_fn = policy.clear_recurrent_state
 
-    opt_state = optimizer.init(params)
+    return PolicyState(
+        apply_fn = policy.apply,
+        rnn_reset_fn = rnn_reset_fn,
+        params = params,
+        batch_stats = batch_stats,
+    ), fake_outs
+
+def _setup_train_state(
+    cfg,
+    algo,
+    prng_key,
+    policy_state,
+    fake_policy_out,
+):
+    hyper_params = algo.init_hyperparams(cfg)
+    optimizer = algo.make_optimizer(hyper_params)
+
+    value_norm_rng, update_rng = random.split(prng_key, 2)
+
+    value_norm_fn, value_norm_stats = _setup_value_normalizer(
+        hyper_params, value_norm_rng, fake_policy_out[2])
+
+    opt_state = optimizer.init(policy_state.params)
 
     if cfg.mixed_precision:
         scaler = DynamicScale()
@@ -180,12 +212,8 @@ def _setup_new_policy(
         scaler = None
 
     return PolicyTrainState(
-        apply_fn = policy.apply,
         value_normalize_fn = value_norm_fn,
-        rnn_reset_fn = rnn_reset_fn,
         tx = optimizer,
-        params = params,
-        batch_stats = batch_stats,
         value_normalize_stats = value_norm_stats,
         hyper_params = hyper_params,
         opt_state = opt_state,
@@ -194,7 +222,7 @@ def _setup_new_policy(
         update_prng_key = update_rng,
     )
 
-def _setup_train_states(
+def _make_policies(
     policy,
     cfg,
     icfg,
@@ -203,17 +231,38 @@ def _setup_train_states(
     example_obs,
     example_rnn_states,
 ):
-    setup_new_policy = partial(_setup_new_policy, policy, cfg, algo)
-
-    setup_new_policies = jax.vmap(setup_new_policy)
+    setup_policy_state = partial(_setup_policy_state, policy)
+    setup_policy_states = jax.vmap(setup_policy_state)
 
     obs = jax.tree_map(lambda x: x.reshape(
-            cfg.pbt_ensemble_size,
-            cfg.pbt_history_len,
+            icfg.num_rollout_policies,
             icfg.rollout_agents_per_policy,
             *x.shape[1:],
         ), example_obs)
 
-    init_rngs = random.split(base_init_rng, cfg.pbt_ensemble_size)
+    obs = jax.tree_map(lambda x: x[0:cfg.pbt_ensemble_size, ...], obs)
 
-    return setup_new_policies(init_rngs, example_rnn_states, obs)
+    rnn_states = jax.tree_map(
+        lambda x: x[0:cfg.pbt_ensemble_size, ...], example_rnn_states)
+
+    policy_init_base_rng, train_init_base_rng = random.split(base_init_rng)
+
+    policy_init_rngs = random.split(
+        policy_init_base_rng, cfg.pbt_ensemble_size)
+
+    policy_states, fake_policy_outs = setup_policy_states(
+        policy_init_rngs, rnn_states, obs)
+
+    setup_train_state = partial(_setup_train_state, cfg, algo)
+    setup_train_states = jax.vmap(setup_train_state)
+    
+    train_init_rngs = random.split(
+        train_init_base_rng, cfg.pbt_ensemble_size)
+    train_states = setup_train_states(
+        train_init_rngs, policy_states, fake_policy_outs)
+
+    policy_states = jax.tree_map(lambda x: jnp.tile(
+            x, (cfg.pbt_history_len, *([1] * (len(x.shape) - 1)))),
+        policy_states)
+
+    return policy_states, train_states

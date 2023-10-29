@@ -43,6 +43,7 @@ class AlgoBase:
 
 @dataclass
 class InternalConfig:
+    num_rollout_policies: int
     rollout_batch_size: int
     rollout_agents_per_policy: int
     rollout_batch_size_per_policy: int
@@ -53,21 +54,23 @@ class InternalConfig:
     float_storage_type : jnp.dtype
 
     def __init__(self, dev, cfg):
-        self.rollout_batch_size = \
-            cfg.num_teams * cfg.team_size * cfg.num_worlds
+        self.num_rollout_policies = cfg.pbt_ensemble_size * cfg.pbt_history_len
+
+        self.rollout_batch_size = (
+            cfg.num_teams * cfg.team_size * cfg.num_worlds)
 
         assert(cfg.num_worlds % cfg.pbt_ensemble_size == 0)
 
-        self.rollout_agents_per_policy = self.rollout_batch_size // (
-            cfg.pbt_ensemble_size * cfg.pbt_history_len)
+        self.rollout_agents_per_policy = (
+            self.rollout_batch_size // self.num_rollout_policies)
 
         self.num_train_agents = cfg.team_size * cfg.num_worlds
-        self.train_agents_per_policy = \
-            self.num_train_agents // cfg.pbt_ensemble_size
+        self.train_agents_per_policy = (
+            self.num_train_agents // cfg.pbt_ensemble_size)
 
         assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
-        self.num_train_seqs_per_policy = \
-            self.train_agents_per_policy * cfg.num_bptt_chunks
+        self.num_train_seqs_per_policy = (
+            self.train_agents_per_policy * cfg.num_bptt_chunks)
 
         self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
 

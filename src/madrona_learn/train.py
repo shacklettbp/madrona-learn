@@ -123,7 +123,7 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
 
     rnn_states = init_recurrent_states(
         policy, icfg.rollout_agents_per_policy,
-        cfg.pbt_ensemble_size * cfg.pbt_history_len)
+        icfg.num_rollout_policies)
 
     rollout_state = RolloutState.create(
         step_fn = sim_step,
@@ -131,9 +131,6 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
         rnn_states = rnn_states,
         init_sim_data = init_sim_data,
     )
-
-    hyper_params = algo.init_hyperparams(cfg)
-    optimizer = algo.make_optimizer(hyper_params)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
