@@ -223,8 +223,8 @@ class RolloutExecutor:
                 })
 
             rollout_state, rollout_store = rollout_loop(
-                self._num_rollout_policies, self._num_bptt_steps,
-                train_state_mgr.policy_states, rollout_state,
+                rollout_state, train_state_mgr.policy_states,
+                self._num_rollout_policies, self._num_bptt_steps, 
                 post_inference_cb, post_step_cb, rollout_store,
                 self._float_dtype, sample_actions = True, return_debug = False)
 
@@ -397,10 +397,10 @@ class RolloutExecutor:
                 (bptt_chunk, bptt_step), save_data)
 
 def rollout_loop(
+    rollout_state: RolloutState,
+    policy_states: PolicyState,
     num_policies: int,
     num_steps: int,
-    policy_states: PolicyState,
-    rollout_state: RolloutState,
     post_inference_cb: Callable,
     post_step_cb: Callable,
     cb_state: Any,

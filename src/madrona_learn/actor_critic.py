@@ -81,7 +81,7 @@ class ActorCritic(nn.Module):
             actions, log_probs = action_dists.sample(prng_key)
             results['log_probs'] = log_probs
         else:
-            actions = actions_dists.best()
+            actions = action_dists.best()
 
         results['actions'] = actions
         results['values'] = self.critic(critic_features)

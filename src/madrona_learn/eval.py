@@ -13,32 +13,34 @@ from functools import partial
 from typing import List, Optional, Dict, Callable, Any
 
 from .actor_critic import ActorCritic
-from .cfg import TrainConfig
 from .rollouts import RolloutState, rollout_loop
 from .train_state import TrainStateManager
+from .utils import init_recurrent_states
 
 def eval_ckpt(
     dev: jax.Device,
     ckpt_path: str,
     num_eval_steps: int,
-    train_cfg: TrainConfig,
     sim_step: Callable,
     init_sim_data: FrozenDict,
     policy: ActorCritic,
     step_cb: Callable,
+    policy_dtype: jnp.dtype,
+    load_policies: List[int] = [0],
 ):
     with jax.default_device(dev):
-        _eval_ckpt_impl(ckpt_path, num_eval_steps, train_cfg, sim_step,
-                        init_sim_data, policy, step_cb)
+        _eval_ckpt_impl(ckpt_path, num_eval_steps, sim_step,
+            init_sim_data, policy, step_cb, policy_dtype, load_policies)
 
 def _eval_ckpt_impl(
     ckpt_path: str,
     num_eval_steps: int,
-    train_cfg: TrainConfig,
     sim_step: Callable,
     init_sim_data: FrozenDict,
     policy: ActorCritic,
     step_cb: Callable,
+    policy_dtype: jnp.dtype,
+    load_policies: List[int],
 ):
     checkify_errors = checkify.user_checks
     if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
@@ -52,26 +54,17 @@ def _eval_ckpt_impl(
 
     init_sim_data = frozen_dict.freeze(init_sim_data)
 
+    num_policies = len(load_policies)
+
     batch_size_per_policy = \
-        init_sim_data['actions'].shape[0] // train_cfg.pbt_ensemble_size
+        init_sim_data['actions'].shape[0] // num_policies
 
     rnn_states = init_recurrent_states(policy,
-        batch_size_per_policy, train_cfg.pbt_ensemble_size)
+        batch_size_per_policy, num_policies)
 
-    algo = train_cfg.algo.setup()
-
-    train_state_mgr = TrainStateManager.create(
-        policy = policy, 
-        cfg = train_cfg,
-        algo = algo,
-        rollout_agents_per_policy = batch_size_per_policy,
-        base_init_rng = random.PRNGKey(0),
-        example_obs = init_sim_data['obs'],
-        example_rnn_states = rnn_states,
-        checkify_errors = checkify_errors,
-    )
-
-    train_state_mgr, _ = train_state_mgr.load(ckpt_path)
+    policy_states = TrainStateManager.load_policies(policy, ckpt_path)
+    policy_states = jax.tree_map(
+        lambda x: x[load_policies], policy_states)
 
     rollout_state = RolloutState.create(
         step_fn = sim_step,
@@ -95,15 +88,21 @@ def _eval_ckpt_impl(
 
         return None
 
-    rollout_loop_fn = partial(rollout_loop, 
-        train_cfg.pbt_ensemble_size, num_eval_steps,
-        train_state_mgr.policy_states, rollout_state,
-        post_policy_cb, post_step_cb, None,
-        jnp.float16 if train_cfg.mixed_precision else jnp.float32,
-        sample_actions = False, return_debug = True)
+    rollout_loop_fn = partial(rollout_loop,
+        policy_states = policy_states,
+        num_policies = num_policies,
+        num_steps = num_eval_steps,
+        post_inference_cb = post_policy_cb,
+        post_step_cb = post_step_cb,
+        cb_state = None,
+        preferred_float_dtype = policy_dtype,
+        sample_actions = False,
+        return_debug = True,
+    )
 
     rollout_loop_fn = jax.jit(
-        checkify.checkify(rollout_loop_fn, errors=checkify_errors))
+        checkify.checkify(rollout_loop_fn, errors=checkify_errors),
+        donate_argnums=0)
 
     lowered_rollout_loop = rollout_loop_fn.lower(rollout_state)
 
@@ -111,7 +110,7 @@ def _eval_ckpt_impl(
             env_vars['MADRONA_LEARN_PRINT_LOWERED'] == '1':
         print(lowered_rollout_loop.as_text())
 
-    compiled_rollout_loop = lowered_inference_loop.compile()
+    compiled_rollout_loop = lowered_rollout_loop.compile()
 
     err, _ = compiled_rollout_loop(rollout_state)
     err.throw()

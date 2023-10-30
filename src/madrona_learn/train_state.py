@@ -115,16 +115,16 @@ class TrainStateManager(flax.struct.PyTreeNode):
         ), loaded['next_update']
 
     @staticmethod
-    def load_policy_weights(path, policy_idx):
+    def load_policies(policy, path):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         loaded = checkpointer.restore(path)
 
-        return {
-            'params': jax.tree_map(lambda x: x[policy_idx],
-                                   loaded['train_states'].params),
-            'batch_stats': jax.tree_map(lambda x: x[policy_idx],
-                                        loaded['train_states'].batch_stats),
-        }
+        return PolicyState(
+            apply_fn = policy.apply,
+            rnn_reset_fn = policy.clear_recurrent_state,
+            params = loaded['policy_states']['params'],
+            batch_stats = loaded['policy_states']['batch_stats'],
+        )
 
     @staticmethod
     def create(
@@ -186,11 +186,9 @@ def _setup_policy_state(
     else:
         batch_stats = {}
 
-    rnn_reset_fn = policy.clear_recurrent_state
-
     return PolicyState(
         apply_fn = policy.apply,
-        rnn_reset_fn = rnn_reset_fn,
+        rnn_reset_fn = policy.clear_recurrent_state,
         params = params,
         batch_stats = batch_stats,
     ), fake_outs
