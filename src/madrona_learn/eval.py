@@ -14,8 +14,8 @@ from typing import List, Optional, Dict, Callable, Any
 
 from .actor_critic import ActorCritic
 from .cfg import TrainConfig
+from .rollouts import RolloutState, rollout_loop
 from .train_state import TrainStateManager
-from .utils import init_recurrent_states, make_pbt_reorder_funcs
 
 def eval_ckpt(
     dev: jax.Device,
@@ -30,80 +30,6 @@ def eval_ckpt(
     with jax.default_device(dev):
         _eval_ckpt_impl(ckpt_path, num_eval_steps, train_cfg, sim_step,
                         init_sim_data, policy, step_cb)
-
-
-class InferenceState(flax.struct.PyTreeNode):
-    sim_step_fn: Callable = flax.struct.field(pytree_node=False)
-    user_step_cb: Callable = flax.struct.field(pytree_node=False)
-    rnn_states: Any
-    sim_data: FrozenDict
-    reorder_idxs: Optional[jax.Array]
-
-
-def inference_loop(
-    num_steps: int,
-    num_policies: int,
-    train_state_mgr: TrainStateManager,
-    inference_state: InferenceState,
-):
-    def policy_infer(state, rnn_states, obs):
-        return state.apply_fn(
-            {
-                'params': state.params,
-                'batch_stats': state.batch_stats,
-            },
-            rnn_states,
-            obs,
-            train=False,
-            method='debug',
-        )
-
-    policy_infer = jax.vmap(policy_infer)
-    rnn_reset_fn = jax.vmap(train_state_mgr.train_states.rnn_reset_fn)
-
-    prep_for_policy, prep_for_sim = make_pbt_reorder_funcs(
-        inference_state.reorder_idxs != None, num_policies)
-
-    def inference_iter(step_idx, inference_state):
-        rnn_states = inference_state.rnn_states
-        sim_data = inference_state.sim_data
-        reorder_idxs = inference_state.reorder_idxs
-
-        policy_obs = prep_for_policy(sim_data['obs'], reorder_idxs)
-
-        actions, action_probs, action_logits, values, rnn_states = policy_infer(
-            train_state_mgr.train_states, rnn_states, policy_obs)
-
-        sim_actions = prep_for_sim(actions, reorder_idxs)
-
-        sim_data = sim_data.copy({
-            'actions': sim_actions,
-        })
-
-        sim_data = frozen_dict.freeze(inference_state.sim_step_fn(sim_data))
-
-        if reorder_idxs != None:
-            reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
-
-        dones = jnp.asarray(sim_data['dones'], dtype=jnp.bool_)
-        rewards = jnp.asarray(sim_data['rewards'], dtype=values.dtype)
-
-        dones, rewards = prep_for_policy((dones, rewards), reorder_idxs)
-
-        rnn_states = rnn_reset_fn(rnn_states, dones)
-
-        inference_state.user_step_cb(policy_obs, actions, action_probs,
-            action_logits, values, dones, rewards)
-
-        inference_state = inference_state.replace(
-            rnn_states = rnn_states,
-            sim_data = sim_data,
-            reorder_idxs = reorder_idxs,
-        )
-
-        return inference_state
-
-    return lax.fori_loop(0, num_steps, inference_iter, inference_state)
 
 def _eval_ckpt_impl(
     ckpt_path: str,
@@ -147,34 +73,45 @@ def _eval_ckpt_impl(
 
     train_state_mgr, _ = train_state_mgr.load(ckpt_path)
 
-    sim_data = jax.tree_map(jnp.copy, init_sim_data)
-
-    if 'policy_assignments' in sim_data:
-        init_reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
-    else:
-        init_reorder_idxs = None
-
-    inference_state = InferenceState(
-        sim_step_fn = sim_step,
-        user_step_cb = step_cb,
+    rollout_state = RolloutState.create(
+        step_fn = sim_step,
+        prng_key = random.PRNGKey(0),
         rnn_states = rnn_states,
-        sim_data = sim_data,
-        reorder_idxs = init_reorder_idxs,
+        init_sim_data = init_sim_data,
     )
 
-    inference_loop_fn = partial(inference_loop, num_eval_steps,
-        train_cfg.pbt_ensemble_size, train_state_mgr)
+    def post_policy_cb(step_idx, policy_obs, policy_out, cb_state):
+        return policy_out.copy({
+            'obs': policy_obs,
+        })
 
-    inference_loop_fn = jax.jit(
-        checkify.checkify(inference_loop_fn, errors=checkify_errors))
+    def post_step_cb(step_idx, dones, rewards, cb_state):
+        step_data = cb_state.copy({
+            'dones': dones,
+            'rewards': rewards,
+        })
 
-    lowered_inference_loop = inference_loop_fn.lower(inference_state)
+        step_cb(step_data)
+
+        return None
+
+    rollout_loop_fn = partial(rollout_loop, 
+        train_cfg.pbt_ensemble_size, num_eval_steps,
+        train_state_mgr.policy_states, rollout_state,
+        post_policy_cb, post_step_cb, None,
+        jnp.float16 if train_cfg.mixed_precision else jnp.float32,
+        sample_actions = False, return_debug = True)
+
+    rollout_loop_fn = jax.jit(
+        checkify.checkify(rollout_loop_fn, errors=checkify_errors))
+
+    lowered_rollout_loop = rollout_loop_fn.lower(rollout_state)
 
     if 'MADRONA_LEARN_PRINT_LOWERED' in env_vars and \
             env_vars['MADRONA_LEARN_PRINT_LOWERED'] == '1':
-        print(lowered_inference_loop.as_text())
+        print(lowered_rollout_loop.as_text())
 
-    compiled_inference_loop = lowered_inference_loop.compile()
+    compiled_rollout_loop = lowered_inference_loop.compile()
 
-    err, _ = compiled_inference_loop(inference_state)
+    err, _ = compiled_rollout_loop(rollout_state)
     err.throw()

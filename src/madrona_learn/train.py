@@ -52,10 +52,11 @@ def _update_loop(
     start_update_idx: int,
 ):
     @jax.vmap
-    def algo_wrapper(train_state, rollout_data, metrics):
+    def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
             cfg, 
             icfg,
+            policy_state,
             train_state,
             rollout_data,
             metrics_cfg.update_cb,
@@ -83,11 +84,25 @@ def _update_loop(
                     train_state_mgr, rollout_state, metrics)
 
             with profile('Learn'):
-                updated_train_states, metrics = algo_wrapper(
-                    train_state_mgr.train_states, rollout_data, metrics)
+                active_policy_states = jax.tree_map(
+                    lambda x: x[0:cfg.pbt_ensemble_size],
+                    train_state_mgr.policy_states)
 
-        train_state_mgr = TrainStateManager(
-            train_states = updated_train_states)
+                updated_policy_states, updated_train_states, metrics = algo_wrapper(
+                    active_policy_states, train_state_mgr.train_states,
+                    rollout_data, metrics)
+
+                # Copy new params into the full
+                # ensemble size * history len array
+                updated_policy_states = jax.tree_map(
+                    lambda full, updated: full.at[0:cfg.pbt_ensemble_size].set(
+                        updated),
+                    train_state_mgr.policy_states, updated_policy_states)
+
+            train_state_mgr = TrainStateManager(
+                policy_states = updated_policy_states,
+                train_states = updated_train_states,
+            )
             
         #update_end_time = time()
         update_end_time = 0

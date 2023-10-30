@@ -34,7 +34,7 @@ class PolicyState(flax.struct.PyTreeNode):
             rnn_reset_fn = self.rnn_reset_fn,
             params = params if params != None else self.params,
             batch_stats = (
-                batch_stats if batch_stats != None else self.batch_stats,
+                batch_stats if batch_stats != None else self.batch_stats
             ),
         )
 
@@ -64,15 +64,18 @@ class PolicyTrainState(flax.struct.PyTreeNode):
             tx = tx if tx != None else self.tx,
             value_normalize_stats = (
                 value_normalize_stats if value_normalize_stats != None else
-                    self.value_normalize_stats),
+                    self.value_normalize_stats
+            ),
             hyper_params = (
-                hyper_params if hyper_params != None else self.hyper_params),
+                hyper_params if hyper_params != None else self.hyper_params
+            ),
             opt_state = opt_state if opt_state != None else self.opt_state,
             scheduler = scheduler if scheduler != None else self.scheduler,
             scaler = scaler if scaler != None else self.scaler,
             update_prng_key = (
                 update_prng_key if update_prng_key != None else 
-                    self.update_prng_key),
+                    self.update_prng_key
+            ),
         )
 
     def gen_update_rnd(self):
@@ -87,6 +90,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
     def save(self, update_idx, path):
         ckpt = {
             'next_update': update_idx + 1,
+            'policy_states': self.policy_states,
             'train_states': self.train_states,
         }
 
@@ -99,12 +103,14 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
         restore_desc = {
             'next_update': 0,
+            'policy_states': self.policy_states,
             'train_states': self.train_states,
         }
         
         loaded = checkpointer.restore(path, item=restore_desc)
 
         return TrainStateManager(
+            policy_states = loaded['policy_states'],
             train_states = loaded['train_states'],
         ), loaded['next_update']
 
@@ -202,7 +208,7 @@ def _setup_train_state(
     value_norm_rng, update_rng = random.split(prng_key, 2)
 
     value_norm_fn, value_norm_stats = _setup_value_normalizer(
-        hyper_params, value_norm_rng, fake_policy_out[2])
+        hyper_params, value_norm_rng, fake_policy_out['values'])
 
     opt_state = optimizer.init(policy_state.params)
 

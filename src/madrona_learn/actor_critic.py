@@ -2,9 +2,11 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
-from typing import Optional, List, Union, Callable
+from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
+from typing import Optional, List, Union, Callable
+
 from .action import DiscreteActionDistributions
 from .profile import profile
 
@@ -45,38 +47,52 @@ class ActorCritic(nn.Module):
     def setup(self):
         pass
 
-    def debug(self, rnn_states, obs, train=False):
-        actor_features, critic_features, new_rnn_states = self.backbone(
-            rnn_states, obs, train=train)
-
-        action_dists = self.actor(actor_features, train=train)
-        values = self.critic(critic_features, train=train)
-
-        return (action_dists.best(), action_dists.probs(),
-                action_dists.logits(), values, new_rnn_states)
-
     def actor_only(self, rnn_states_in, obs_in, train=False):
         actor_features, rnn_states_out = self.backbone.actor_only(
                 rnn_states_in, obs_in, train=train)
 
         action_dists = self.actor(actor_features, train=train)
-        return action_dists.best(), rnn_states_out
+
+        return FrozenDict({
+            'actions': action_dists.best(),
+            'rnn_states': rnn_states_out,
+        })
 
     def critic_only(self, rnn_states_in, obs_in, train=False):
         critic_features, rnn_states_out = self.backbone.critic_only(
             rnn_states_in, obs_in, train=train)
         values = self.critic(critic_features, train=train)
-        return values, rnn_states_out
 
-    def rollout(self, prng_key, rnn_states_in, obs_in, train=False):
+        return FrozenDict({
+            'values': values,
+            'rnn_states': rnn_states_out,
+        })
+
+    def rollout(self, prng_key, rnn_states_in, obs_in, train=False,
+                sample_actions=True, return_debug=False):
         actor_features, critic_features, rnn_states_out = self.backbone(
             rnn_states_in, obs_in, train=train)
 
         action_dists = self.actor(actor_features)
-        actions, log_probs = action_dists.sample(prng_key)
 
-        values = self.critic(critic_features)
-        return actions, log_probs, values, rnn_states_out
+        results = {}
+
+        if sample_actions:
+            actions, log_probs = action_dists.sample(prng_key)
+            results['log_probs'] = log_probs
+        else:
+            actions = actions_dists.best()
+
+        results['actions'] = actions
+        results['values'] = self.critic(critic_features)
+
+        results['rnn_states'] = rnn_states_out
+
+        if return_debug:
+            results['action_probs'] = action_dists.probs()
+            results['action_logits'] = action_dists.logits()
+
+        return frozen_dict.freeze(results)
 
     def update(
             self,
@@ -102,7 +118,12 @@ class ActorCritic(nn.Module):
         entropies = entropies.reshape(T, N, *entropies.shape[1:])
         values = values.reshape(T, N, *values.shape[1:])
 
-        return log_probs, entropies, values
+        return FrozenDict({
+            'log_probs': log_probs,
+            'entropies': entropies,
+            'values': values,
+        })
+
 
 class BackboneEncoder(nn.Module):
     net : nn.Module

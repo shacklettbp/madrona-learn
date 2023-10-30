@@ -13,8 +13,8 @@ from .actor_critic import ActorCritic
 from .algo_common import InternalConfig, compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
 from .profile import profile
-from .train_state import TrainStateManager, PolicyTrainState
-from .utils import TypedShape, make_pbt_reorder_funcs
+from .train_state import TrainStateManager, PolicyState, PolicyTrainState
+from .utils import TypedShape, convert_float_leaves
 
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
@@ -83,23 +83,27 @@ class RolloutData(flax.struct.PyTreeNode):
 
 
 class RolloutStore(flax.struct.PyTreeNode):
-    data : FrozenDict
+    store : FrozenDict
 
     @staticmethod
     def create_from_tree(typed_shapes : FrozenDict):
-        data = jax.tree_map(
-            lambda x: jnp.empty(x.shape, x.dtype), typed_shapes)
         return RolloutStore(
-            data = data,
+            store = jax.tree_map(
+                lambda x: jnp.empty(x.shape, x.dtype), typed_shapes),
         )
 
-    def save(self, k, indices, values):
-        def save_leaf(store, v): 
+    def save(self, indices, data):
+        def save_leaf(v, store): 
             return store.at[indices].set(v)
 
-        updated = jax.tree_map(save_leaf, self.data[k], values)
+        data = frozen_dict.freeze(data)
 
-        return RolloutStore(data = self.data.copy({k: updated}))
+        new_store = self.store
+        for k, v in data.items():
+            new_store = new_store.copy(
+                {k: jax.tree_map(save_leaf, v, new_store[k])})
+
+        return RolloutStore(store = new_store)
 
 
 class RolloutExecutor:
@@ -181,49 +185,6 @@ class RolloutExecutor:
 
         self._store_typed_shape_tree = frozen_dict.freeze(typed_shapes)
 
-        def infer_wrapper(method, state, *args):
-            return state.apply_fn(
-                {
-                    'params': state.params,
-                    'batch_stats': state.batch_stats,
-                },
-                *args,
-                train=False,
-                method=method,
-            )
-
-        def rollout_fn_wrapper(state, sample_key, rnn_states, obs):
-            actions, log_probs, values, rnn_states = infer_wrapper(
-                'rollout', state, sample_key, rnn_states, obs)
-
-            values = state.value_normalize_fn(
-                { 'batch_stats': state.value_normalize_stats },
-                mode='invert',
-                update_stats=False,
-                x=values,
-            )
-
-            return actions, log_probs, values, rnn_states
-
-        def critic_fn_wrapper(state, rnn_states, obs):
-            values, _ = infer_wrapper(
-                'critic_only', state, rnn_states, obs)
-
-            return state.value_normalize_fn(
-                { 'batch_stats': state.value_normalize_stats },
-                mode='invert',
-                update_stats=False,
-                x=values,
-            )
-
-        self._rollout_fn = jax.vmap(rollout_fn_wrapper)
-        self._critic_fn = jax.vmap(critic_fn_wrapper)
-        self._rnn_reset_fn = jax.vmap(
-            train_state_mgr.policy_states.rnn_reset_fn)
-        self._prep_data_for_policy, self._prep_data_for_sim = \
-            make_pbt_reorder_funcs(self._is_dynamic_policy_assignment,
-                                   self._num_rollout_policies)
-
     def add_metrics(
         self, 
         cfg: TrainConfig,
@@ -242,105 +203,100 @@ class RolloutExecutor:
 
         return metrics.copy(new_metrics)
 
-    def _canonicalize_float_dtypes(self, xs):
-        def canonicalize(x):
-            if jnp.issubdtype(x.dtype, jnp.floating):
-                return jnp.asarray(x, dtype=self._float_dtype)
-            else:
-                return x
+    def collect(
+        self,
+        train_state_mgr: TrainStateManager,
+        rollout_state: RolloutState,
+        metrics: TrainingMetrics,
+    ):
+        def iter_bptt_chunk(bptt_chunk, inputs):
+            rollout_state, rollout_store = inputs
 
-        return jax.tree_map(canonicalize, xs)
+            post_inference_cb = partial(self._post_inference_cb,
+                train_state_mgr.train_states, bptt_chunk)
+            post_step_cb = partial(self._post_step_cb, bptt_chunk)
+
+            with profile("Cache RNN state"):
+                rollout_store = rollout_store.save(bptt_chunk, {
+                    'rnn_start_states': self._slice_train_policy_data(
+                        rollout_state.rnn_states),
+                })
+
+            rollout_state, rollout_store = rollout_loop(
+                self._num_rollout_policies, self._num_bptt_steps,
+                train_state_mgr.policy_states, rollout_state,
+                post_inference_cb, post_step_cb, rollout_store,
+                self._float_dtype, sample_actions = True, return_debug = False)
+
+            return rollout_state, rollout_store
+
+        rollout_store = RolloutStore.create_from_tree(
+            self._store_typed_shape_tree)
+
+        rollout_state, rollout_store = lax.fori_loop(
+            0, self._num_bptt_chunks, iter_bptt_chunk,
+            (rollout_state, rollout_store))
+
+        with profile("Bootstrap Values"):
+            bootstrap_values = self._bootstrap_values(
+                train_state_mgr.policy_states, train_state_mgr.train_states,
+                rollout_state)
+
+            rollout_store = rollout_store.save(
+                slice(None), {'bootstrap_values': bootstrap_values})
+
+        with profile("Finalize Rollouts"):
+            rollout_data, metrics = self._finalize_rollouts(
+                rollout_store.store, metrics)
+
+        return rollout_state, rollout_data, metrics
 
     def _slice_train_policy_data(self, data):
         return jax.tree_map(lambda x: x[0:self._num_train_policies], data)
 
-    def _rollout_infer(self, train_states, rollout_state):
-        rnn_states = rollout_state.rnn_states
-        sim_data = rollout_state.sim_data
-        prng_key = rollout_state.prng_key
+    def _invert_value_normalization(self, train_states, values):
+        @jax.vmap
+        def invert_vn(train_state, v):
+            return train_state.value_normalize_fn(
+                { 'batch_stats': train_state.value_normalize_stats },
+                mode='invert',
+                update_stats=False,
+                x=v,
+            )
 
-        prng_key, step_key = random.split(prng_key)
-        sample_keys = random.split(step_key, self._num_rollout_policies)
+        return invert_vn(train_states, values)
 
-        policy_obs = self._canonicalize_float_dtypes(sim_data['obs'])
+    def _bootstrap_values(self, policy_states, train_states, rollout_state):
+        prep_for_policy = _make_pbt_reorder_funcs(
+            rollout_state.reorder_idxs != None, self._num_rollout_policies)[0]
 
-        policy_obs = self._prep_data_for_policy(
-            policy_obs, rollout_state.reorder_idxs)
-        actions, log_probs, values, rnn_states = \
-            self._rollout_fn(train_states, sample_keys, rnn_states, policy_obs)
-
-        sim_actions = self._prep_data_for_sim(
-            actions, rollout_state.reorder_idxs)
-
-        sim_data = sim_data.copy({
-            'actions': sim_actions,
-        })
-
-        rollout_state = rollout_state.update(
-            prng_key = prng_key,
-            rnn_states = rnn_states,
-            sim_data = sim_data,
-        )
-
-        save_data = FrozenDict(
-            obs = policy_obs,
-            actions = actions,
-            log_probs = log_probs,
-            values = values,
-        )
-
-        save_data = self._slice_train_policy_data(save_data)
-
-        return rollout_state, save_data
-
-    def _critic_infer(self, train_states, rollout_state):
         rnn_states = rollout_state.rnn_states
         obs = rollout_state.sim_data['obs']
-        obs = self._canonicalize_float_dtypes(obs)
 
-        policy_obs = self._prep_data_for_policy(obs, rollout_state.reorder_idxs)
-        values = self._critic_fn(train_states, rnn_states, policy_obs)
+        obs = convert_float_leaves(obs, self._float_dtype)
+        obs = prep_for_policy(obs, rollout_state.reorder_idxs)
 
-        return self._slice_train_policy_data(values)
+        rnn_states, obs = self._slice_train_policy_data((rnn_states, obs))
+        policy_states = self._slice_train_policy_data(policy_states)
 
-    def _step_rollout_state(self, rollout_state):
-        step_fn = rollout_state.step_fn
-        sim_data = rollout_state.sim_data
-        rnn_states = rollout_state.rnn_states
+        @jax.vmap
+        def critic_fn(state, rnn_states, obs):
+            policy_out = state.apply_fn(
+                {
+                    'params': state.params,
+                    'batch_stats': state.batch_stats,
+                },
+                rnn_states,
+                obs,
+                train=False,
+                method='critic_only',
+            )
 
-        with profile('Simulator Step'):
-            sim_data = frozen_dict.freeze(step_fn(sim_data))
+            return policy_out['values']
 
-        dones = sim_data['dones']
-        rewards = sim_data['rewards']
+        values = critic_fn(policy_states, rnn_states, obs)
 
-        dones = jnp.asarray(dones, dtype=jnp.bool_)
-        rewards = jnp.asarray(rewards, dtype=self._float_dtype)
-
-        if self._is_dynamic_policy_assignment:
-            reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
-        else:
-            reorder_idxs = None
-
-        dones, rewards = self._prep_data_for_policy(
-            (dones, rewards), reorder_idxs)
-
-        rnn_states = self._rnn_reset_fn(rnn_states, dones)
-
-        rollout_state = rollout_state.update(
-            sim_data = sim_data,
-            reorder_idxs = reorder_idxs,
-            rnn_states = rnn_states,
-        )
-
-        save_data = FrozenDict(
-            dones = dones,
-            rewards = rewards,
-        )
-
-        save_data = self._slice_train_policy_data(save_data)
-
-        return rollout_state, save_data
+        return self._invert_value_normalization(train_states, values)
 
     def _finalize_rollouts(self, rollouts, metrics):
         rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
@@ -399,64 +355,151 @@ class RolloutExecutor:
             }),
         ), metrics
 
-    def collect(
+    def _post_inference_cb(
         self,
-        train_state_mgr: TrainStateManager,
-        rollout_state: RolloutState,
-        metrics: TrainingMetrics,
+        train_states: PolicyTrainState,
+        bptt_chunk: int,
+        bptt_step: int,
+        policy_obs: FrozenDict[str, Any],
+        policy_out: FrozenDict[str, Any],
+        rollout_store: RolloutStore,
     ):
-        def rollout_iter(bptt_step, inputs):
-            rollout_state, rollout_store, bptt_chunk = inputs
+        with profile('Pre Step Rollout Store'):
+            values = self._slice_train_policy_data(policy_out['values'])
+            values = self._invert_value_normalization(train_states, values)
 
-            with profile('Policy Infer'):
-                rollout_state, pre_step_save_data = self._rollout_infer(
-                    train_state_mgr.train_states, rollout_state)
+            obs, actions, log_probs = self._slice_train_policy_data(
+                (policy_obs, policy_out['actions'], policy_out['log_probs']))
 
-            with profile('Pre Step Rollout Store'):
-                for k in ['obs', 'actions', 'log_probs', 'values']:
-                    rollout_store = rollout_store.save(
-                        k, (bptt_chunk, bptt_step), pre_step_save_data[k])
+            save_data = {
+                'obs': obs,
+                'actions': actions,
+                'log_probs': log_probs,
+                'values': values,
+            }
 
-            with profile('Rollout Step'):
-                rollout_state, post_step_save_data = self._step_rollout_state(
-                    rollout_state)
+            return rollout_store.save((bptt_chunk, bptt_step), save_data)
 
-            with profile('Post Step Rollout Store'):
-                for k in ['rewards', 'dones']:
-                    rollout_store = rollout_store.save(
-                        k, (bptt_chunk, bptt_step), post_step_save_data[k])
+    def _post_step_cb(
+        self,
+        bptt_chunk: int,
+        bptt_step: int,
+        dones: jax.Array,
+        rewards: jax.Array,
+        rollout_store: RolloutStore,
+    ):
+        with profile('Post Step Rollout Store'):
+            save_data = self._slice_train_policy_data({
+                'dones': dones,
+                'rewards': rewards,
+            })
+            return rollout_store.save(
+                (bptt_chunk, bptt_step), save_data)
 
-            return rollout_state, rollout_store, bptt_chunk
+def rollout_loop(
+    num_policies: int,
+    num_steps: int,
+    policy_states: PolicyState,
+    rollout_state: RolloutState,
+    post_inference_cb: Callable,
+    post_step_cb: Callable,
+    cb_state: Any,
+    preferred_float_dtype: jnp.dtype,
+    **policy_kwargs,
+):
+    def policy_fn(state, sample_key, rnn_states, obs):
+        return state.apply_fn(
+            {
+                'params': state.params,
+                'batch_stats': state.batch_stats,
+            },
+            sample_key,
+            rnn_states,
+            obs,
+            train = False,
+            **policy_kwargs,
+            method = 'rollout',
+        )
 
-        def iter_bptt_chunk(bptt_chunk, inputs):
-            rollout_state, rollout_store = inputs
+    policy_fn = jax.vmap(policy_fn)
+    rnn_reset_fn = jax.vmap(policy_states.rnn_reset_fn)
 
-            with profile("Cache RNN state"):
-                rollout_store = rollout_store.save('rnn_start_states',
-                    bptt_chunk, rollout_state.rnn_states)
+    prep_for_policy, prep_for_sim = _make_pbt_reorder_funcs(
+        rollout_state.reorder_idxs != None, num_policies)
 
-            rollout_state, rollout_store, _ = lax.fori_loop(
-                0, self._num_bptt_steps, rollout_iter,
-                (rollout_state, rollout_store, bptt_chunk))
+    def rollout_iter(step_idx, iter_state):
+        rollout_state, cb_state = iter_state
 
-            return rollout_state, rollout_store
+        rnn_states = rollout_state.rnn_states
+        sim_data = rollout_state.sim_data
+        reorder_idxs = rollout_state.reorder_idxs
+        prng_key = rollout_state.prng_key
 
-        rollout_store = RolloutStore.create_from_tree(
-            self._store_typed_shape_tree)
+        with profile('Policy Inference'):
+            prng_key, step_key = random.split(prng_key)
+            step_keys = random.split(step_key, num_policies)
 
-        rollout_state, rollout_store = lax.fori_loop(
-            0, self._num_bptt_chunks, iter_bptt_chunk,
-            (rollout_state, rollout_store))
+            policy_obs = convert_float_leaves(
+                sim_data['obs'], preferred_float_dtype)
 
-        with profile("Bootstrap Values"):
-            bootstrap_values = self._critic_infer(
-                train_state_mgr.train_states, rollout_state)
+            policy_obs = prep_for_policy(policy_obs, reorder_idxs)
+            policy_out = policy_fn(
+                policy_states, step_keys, rnn_states, policy_obs)
 
-            rollout_store = rollout_store.save('bootstrap_values',
-                slice(None), bootstrap_values)
+            cb_state = post_inference_cb(
+                step_idx, policy_obs, policy_out, cb_state)
 
-        with profile("Finalize Rollouts"):
-            rollout_data, metrics = self._finalize_rollouts(
-                rollout_store.data, metrics)
+        with profile('Rollout Step'):
+            sim_data = sim_data.copy({
+                'actions': prep_for_sim(policy_out['actions'], reorder_idxs),
+            })
 
-        return rollout_state, rollout_data, metrics
+            sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
+
+            if reorder_idxs != None:
+                reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
+
+            dones = sim_data['dones'].astype(jnp.bool_)
+            rewards = sim_data['rewards'].astype(preferred_float_dtype)
+
+            dones, rewards = prep_for_policy((dones, rewards), reorder_idxs)
+
+            rnn_states = rnn_reset_fn(rnn_states, dones)
+
+            cb_state = post_step_cb(step_idx, dones, rewards, cb_state)
+
+        rollout_state = rollout_state.update(
+            rnn_states = rnn_states,
+            sim_data = sim_data,
+            reorder_idxs = reorder_idxs,
+        )
+
+        return rollout_state, cb_state
+
+    return lax.fori_loop(0, num_steps, rollout_iter, (rollout_state, cb_state))
+
+def _make_pbt_reorder_funcs(dyn_assignment, num_policies):
+    def group_into_policy_batches(args):
+        return jax.tree_map(
+            lambda x: x.reshape(num_policies, -1, *x.shape[1:]), args)
+
+    if dyn_assignment:
+        def prep_for_policy(args, sort_idxs):
+            reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
+            return group_into_policy_batches(reordered)
+
+        def prep_for_sim(args, sort_idxs):
+            args = jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
+
+            unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
+            return jax.tree_map(lambda x: jnp.take(x, unsort_idxs, 0), args)
+    else:
+        def prep_for_policy(args, sort_idxs):
+            assert(sort_idxs == None)
+            return group_into_policy_batches(args)
+
+        def prep_for_sim(args, sort_idxs):
+            assert(sort_idxs == None)
+            return jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
+
+    return prep_for_policy, prep_for_sim

@@ -13,7 +13,7 @@ from .actor_critic import ActorCritic
 from .cfg import AlgoConfig, TrainConfig
 from .metrics import TrainingMetrics, Metric
 from .profile import profile
-from .train_state import HyperParams, PolicyTrainState
+from .train_state import HyperParams, PolicyState, PolicyTrainState
 from .rollouts import RolloutData
 
 from .algo_common import (
@@ -95,13 +95,14 @@ class PPO(AlgoBase):
 def _ppo_update(
     cfg: TrainConfig,
     mb: FrozenDict[str, Any],
-    state: PolicyTrainState,
+    policy_state: PolicyState,
+    train_state: PolicyTrainState,
     metrics: TrainingMetrics,
 ):
     def fwd_pass(params):
         with profile('AC Forward'):
-            return state.apply_fn(
-                { 'params': params, 'batch_stats': state.batch_stats },
+            return policy_state.apply_fn(
+                { 'params': params, 'batch_stats': policy_state.batch_stats },
                 mb['rnn_start_states'], mb['dones'], mb['actions'], mb['obs'],
                 train=True,
                 method='update',
@@ -109,8 +110,10 @@ def _ppo_update(
             )
 
     def loss_fn(params):
-        (new_log_probs, entropies, new_values_normalized), ac_mutable_out = \
-            fwd_pass(params)
+        fwd_results, ac_mutable_new = fwd_pass(params)
+        new_log_probs = fwd_results['log_probs']
+        entropies = fwd_results['entropies']
+        new_values_normalized = fwd_results['values']
 
         if cfg.compute_advantages:
             advantages = mb['advantages']
@@ -126,27 +129,28 @@ def _ppo_update(
         ratio = jnp.exp(new_log_probs - mb['log_probs'])
         surr1 = advantages * ratio
 
-        clipped_ratio = jnp.clip(ratio, 1.0 - state.hyper_params.clip_coef,
-                                 1.0 + state.hyper_params.clip_coef)
+        clipped_ratio = jnp.clip(ratio,
+            1.0 - train_state.hyper_params.clip_coef,
+            1.0 + train_state.hyper_params.clip_coef)
         surr2 = advantages * clipped_ratio
 
         action_obj = jnp.minimum(surr1, surr2)
 
         if cfg.algo.clip_value_loss:
-            old_values_normalized = state.value_normalize_fn(
-                { 'batch_stats': state.value_normalize_stats },
+            old_values_normalized = train_state.value_normalize_fn(
+                { 'batch_stats': train_state.value_normalize_stats },
                 mode='normalize',
                 update_stats=False,
                 x=mb['values'],
             )
 
-            low = old_values_normalized - state.hyper_params.clip_coef
-            high = old_values_normalized + state.hyper_params.clip_coef
+            low = old_values_normalized - train_state.hyper_params.clip_coef
+            high = old_values_normalized + train_state.hyper_params.clip_coef
 
             new_values = jnp.clip(new_values, low, high)
 
-        normalized_returns, value_norm_mutable_out = state.value_normalize_fn(
-            { 'batch_stats': state.value_normalize_stats },
+        normalized_returns, value_norm_mutable_new = train_state.value_normalize_fn(
+            { 'batch_stats': train_state.value_normalize_stats },
             mode='normalize',
             update_stats=True,
             x=mb['returns'],
@@ -166,15 +170,15 @@ def _ppo_update(
 
         # Maximize the action objective function
         action_loss = -action_obj 
-        value_loss = state.hyper_params.value_loss_coef * value_loss
+        value_loss = train_state.hyper_params.value_loss_coef * value_loss
         # Maximize entropy
-        entropy_loss = - state.hyper_params.entropy_coef * entropy_avg
+        entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
 
         loss = action_loss + value_loss + entropy_loss
 
         return loss, (
-            ac_mutable_out['batch_stats'],
-            value_norm_mutable_out['batch_stats'],
+            ac_mutable_new['batch_stats'],
+            value_norm_mutable_new['batch_stats'],
             loss,
             action_loss,
             value_loss,
@@ -182,19 +186,19 @@ def _ppo_update(
         )
 
     with profile('Optimize'):
-        scaler = state.scaler
-        params = state.params
-        opt_state = state.opt_state
+        params = policy_state.params
+        scaler = train_state.scaler
+        opt_state = train_state.opt_state
 
         if scaler != None:
             grad_fn = scaler.value_and_grad(loss_fn, has_aux=True)
             scaler, is_finite, aux, grads = grad_fn(params)
         else:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-            aux, grads = grad_fn(state.params)
+            aux, grads = grad_fn(params)
 
         with jax.numpy_dtype_promotion('standard'):
-            param_updates, new_opt_state = state.tx.update(
+            param_updates, new_opt_state = train_state.tx.update(
                 grads, opt_state, params)
         new_params = optax.apply_updates(params, param_updates)
 
@@ -212,9 +216,12 @@ def _ppo_update(
             entropy_loss,
         ) = aux[1]
 
-        state = state.update(
+        policy_state = policy_state.update(
             params = new_params,
             batch_stats = new_ac_batch_stats,
+        )
+
+        train_state = train_state.update(
             value_normalize_stats = new_vn_batch_stats,
             opt_state = new_opt_state,
             scaler = scaler,
@@ -228,18 +235,19 @@ def _ppo_update(
             'Entropy Loss': entropy_loss,
         })
 
-    return state, metrics
+    return policy_state, train_state, metrics
 
 def _ppo(
     cfg: TrainConfig,
     icfg: InternalConfig,
+    policy_state: PolicyState,
     train_state: PolicyTrainState,
     rollout_data: RolloutData,
     metrics_cb: Callable,
     init_metrics: TrainingMetrics,
 ):
     def epoch_iter(epoch_i, inputs):
-        train_state, metrics = inputs
+        policy_state, train_state, metrics = inputs
 
         mb_rnd, train_state = train_state.gen_update_rnd()
 
@@ -248,22 +256,26 @@ def _ppo(
             mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
 
         def mb_iter(mb_i, inputs):
-            train_state, metrics = inputs
+            policy_state, train_state, metrics = inputs
 
             with profile('Gather Minibatch'):
                 mb = rollout_data.minibatch(mb_inds[mb_i])
 
-            train_state, metrics = _ppo_update(cfg, mb, train_state, metrics)
+            policy_state, train_state, metrics = _ppo_update(
+                cfg, mb, policy_state, train_state, metrics)
 
             with profile('Metrics Callback'):
-                metrics = metrics_cb(metrics, epoch_i, mb, train_state)
+                metrics = metrics_cb(
+                    metrics, epoch_i, mb, policy_state, train_state)
 
-            return train_state, metrics
+            return policy_state, train_state, metrics
 
         return lax.fori_loop(
-            0, cfg.algo.num_mini_batches, mb_iter, (train_state, metrics))
+            0, cfg.algo.num_mini_batches, mb_iter,
+            (policy_state, train_state, metrics))
 
-    train_state, metrics = lax.fori_loop(
-        0, cfg.algo.num_epochs, epoch_iter, (train_state, init_metrics))
+    policy_state, train_state, metrics = lax.fori_loop(
+        0, cfg.algo.num_epochs, epoch_iter,
+        (policy_state, train_state, init_metrics))
 
-    return train_state, metrics
+    return policy_state, train_state, metrics
