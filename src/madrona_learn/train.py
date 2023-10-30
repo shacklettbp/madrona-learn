@@ -46,6 +46,14 @@ def _pbt_update(
 ):
     policy_states = train_state_mgr.policy_states
 
+    def update_history(x):
+        if cfg.pbt_history_len == 1:
+            return x
+
+        return x.at[1:cfg.pbt_history_len].set(x[0:cfg.pbt_history_len - 1])
+
+    policy_states = jax.tree_map(update_history, policy_states)
+
     return train_state_mgr.replace(
         policy_states = policy_states,
     )
