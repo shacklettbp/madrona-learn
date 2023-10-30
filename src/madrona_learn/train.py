@@ -44,7 +44,11 @@ def _pbt_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
 ):
-    return train_state_mgr
+    policy_states = train_state_mgr.policy_states
+
+    return train_state_mgr.replace(
+        policy_states = policy_states,
+    )
 
 def _update_loop(
     algo: AlgoBase,

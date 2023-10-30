@@ -486,10 +486,12 @@ def _make_pbt_reorder_funcs(dyn_assignment, num_policies):
 
     if dyn_assignment:
         def prep_for_policy(args, sort_idxs):
+            sort_idxs = sort_idxs.squeeze(axis=-1)
             reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
             return group_into_policy_batches(reordered)
 
         def prep_for_sim(args, sort_idxs):
+            sort_idxs = sort_idxs.squeeze(axis=-1)
             args = jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
 
             unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
