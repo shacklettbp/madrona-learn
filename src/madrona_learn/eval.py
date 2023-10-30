@@ -27,10 +27,12 @@ def eval_ckpt(
     step_cb: Callable,
     policy_dtype: jnp.dtype,
     load_policies: List[int] = [0],
+    use_deterministic_policy: bool = True,
 ):
     with jax.default_device(dev):
         _eval_ckpt_impl(ckpt_path, num_eval_steps, sim_step,
-            init_sim_data, policy, step_cb, policy_dtype, load_policies)
+            init_sim_data, policy, step_cb, policy_dtype, load_policies,
+            use_deterministic_policy)
 
 def _eval_ckpt_impl(
     ckpt_path: str,
@@ -41,6 +43,7 @@ def _eval_ckpt_impl(
     step_cb: Callable,
     policy_dtype: jnp.dtype,
     load_policies: List[int],
+    use_deterministic_policy: bool,
 ):
     checkify_errors = checkify.user_checks
     if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
@@ -96,7 +99,7 @@ def _eval_ckpt_impl(
         post_step_cb = post_step_cb,
         cb_state = None,
         preferred_float_dtype = policy_dtype,
-        sample_actions = False,
+        sample_actions = not use_deterministic_policy,
         return_debug = True,
     )
 
