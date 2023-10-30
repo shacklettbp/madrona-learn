@@ -430,10 +430,10 @@ def rollout_loop(
     def rollout_iter(step_idx, iter_state):
         rollout_state, cb_state = iter_state
 
+        prng_key = rollout_state.prng_key
         rnn_states = rollout_state.rnn_states
         sim_data = rollout_state.sim_data
         reorder_idxs = rollout_state.reorder_idxs
-        prng_key = rollout_state.prng_key
 
         with profile('Policy Inference'):
             prng_key, step_key = random.split(prng_key)
@@ -469,6 +469,7 @@ def rollout_loop(
             cb_state = post_step_cb(step_idx, dones, rewards, cb_state)
 
         rollout_state = rollout_state.update(
+            prng_key = prng_key,
             rnn_states = rnn_states,
             sim_data = sim_data,
             reorder_idxs = reorder_idxs,
