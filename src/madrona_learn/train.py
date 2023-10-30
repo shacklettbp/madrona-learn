@@ -40,6 +40,12 @@ def train(
         return _train_impl(cfg, icfg, sim_step, init_sim_data,
             policy, iter_cb, metrics_cfg, restore_ckpt, profile_port)
 
+def _pbt_update(
+    cfg: TrainConfig,
+    train_state_mgr: TrainStateManager,
+):
+    return train_state_mgr
+
 def _update_loop(
     algo: AlgoBase,
     iter_cb: Callable,
@@ -51,6 +57,9 @@ def _update_loop(
     train_state_mgr: TrainStateManager,
     start_update_idx: int,
 ):
+    num_updates_remaining = cfg.num_updates - start_update_idx
+    pbt_update_interval = cfg.pbt_update_interval or num_updates_remaining
+
     @jax.vmap
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
@@ -68,7 +77,7 @@ def _update_loop(
         return TrainingMetrics.create(
             cfg.algo.metrics() + metrics_cfg.custom_metrics)
 
-    def update_iter(update_idx, inputs):
+    def inner_update_iter(update_idx, inputs):
         rollout_state, train_state_mgr = inputs
 
         #update_start_time = time()
@@ -111,7 +120,29 @@ def _update_loop(
 
         return rollout_state, train_state_mgr
 
-    return lax.fori_loop(start_update_idx, cfg.num_updates, update_iter,
+    def outer_update_iter(outer_update_idx, inputs):
+        rollout_state, train_state_mgr = inputs
+
+        inner_begin_idx = (
+            start_update_idx + outer_update_idx * pbt_update_interval
+        )
+
+        inner_end_idx = inner_begin_idx + pbt_update_interval
+        inner_end_idx = jnp.minimum(inner_end_idx, cfg.num_updates)
+
+        rollout_state, train_state_mgr = lax.fori_loop(
+            inner_begin_idx, inner_end_idx,
+            inner_update_iter, (rollout_state, train_state_mgr))
+        
+        train_state_mgr = _pbt_update(cfg, train_state_mgr)
+
+        return rollout_state, train_state_mgr
+
+    num_outer_iters = num_updates_remaining // pbt_update_interval
+    if num_outer_iters * pbt_update_interval < num_updates_remaining:
+        num_outer_iters += 1
+
+    return lax.fori_loop(0, num_outer_iters, outer_update_iter,
         (rollout_state, train_state_mgr))
 
 def _train_impl(cfg, icfg, sim_step, init_sim_data,

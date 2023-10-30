@@ -26,6 +26,7 @@ class TrainConfig:
     num_teams: int = 1
     pbt_ensemble_size: int = 1
     pbt_history_len: int = 1
+    pbt_update_interval: Optional[int] = None
     compute_advantages: bool = True
     normalize_advantages: bool = True # Only used if compute_advantages = True
     normalize_returns: bool = True # Only used if compute_advantages = False
