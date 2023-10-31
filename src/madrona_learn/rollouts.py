@@ -31,8 +31,8 @@ class RolloutState(flax.struct.PyTreeNode):
         init_sim_data,
     ):
         if 'policy_assignments' in init_sim_data:
-            policy_assignments = init_sim_data['policy_assignments']
-            reorder_idxs = jnp.argsort(policy_assignments)
+            reorder_idxs = jnp.argsort(
+                init_sim_data['policy_assignments'].squeeze(axis=-1))
         else:
             reorder_idxs = None
 
@@ -457,7 +457,8 @@ def rollout_loop(
             sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
 
             if reorder_idxs != None:
-                reorder_idxs = jnp.argsort(sim_data['policy_assignments'])
+                reorder_idxs = jnp.argsort(
+                    sim_data['policy_assignments'].squeeze(axis=-1))
 
             dones = sim_data['dones'].astype(jnp.bool_)
             rewards = sim_data['rewards'].astype(preferred_float_dtype)
@@ -486,12 +487,10 @@ def _make_pbt_reorder_funcs(dyn_assignment, num_policies):
 
     if dyn_assignment:
         def prep_for_policy(args, sort_idxs):
-            sort_idxs = sort_idxs.squeeze(axis=-1)
             reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
             return group_into_policy_batches(reordered)
 
         def prep_for_sim(args, sort_idxs):
-            sort_idxs = sort_idxs.squeeze(axis=-1)
             args = jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
 
             unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
