@@ -12,16 +12,18 @@ class AlgoConfig:
         raise NotImplementedError
 
 
+@dataclass(frozen=True)
 class PBTConfig:
-    population_size: int
-    history_len: int
-    batching_cfg: List[int]
+    num_train_policies: int
+    num_past_policies: int
+    self_play_batch_size: int
     update_interval: int
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     num_worlds: int
+    num_agents_per_world: int
     num_updates: int
     steps_per_update: int
     lr: float
@@ -46,6 +48,13 @@ class TrainConfig:
                 rep += f"\n  {v.name()}:"
                 for algo_cfg_k, algo_cfg_v in self.algo.__dict__.items():
                     rep += f"\n    {algo_cfg_k}: {algo_cfg_v}"
+            elif k == 'pbt':
+                if v == 'None':
+                    rep += "\n  ppt: Disabled"
+                else:
+                    rep += "\n  pbt:"
+                    for pbt_k, pbt_v in self.pbt.__dict__.items():
+                        rep += f"\n    {pbt_k}: {pbt_v}"
             else:
                 rep += f"\n  {k}: {v}" 
 

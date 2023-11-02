@@ -244,15 +244,15 @@ def _make_policies(
             *x.shape[1:],
         ), example_obs)
 
-    obs = jax.tree_map(lambda x: x[0:cfg.pbt_ensemble_size, ...], obs)
+    obs = jax.tree_map(lambda x: x[0:icfg.num_train_policies, ...], obs)
 
     rnn_states = jax.tree_map(
-        lambda x: x[0:cfg.pbt_ensemble_size, ...], example_rnn_states)
+        lambda x: x[0:icfg.num_train_policies, ...], example_rnn_states)
 
     policy_init_base_rng, train_init_base_rng = random.split(base_init_rng)
 
     policy_init_rngs = random.split(
-        policy_init_base_rng, cfg.pbt_ensemble_size)
+        policy_init_base_rng, icfg.num_train_policies)
 
     policy_states, fake_policy_outs = setup_policy_states(
         policy_init_rngs, rnn_states, obs)
@@ -261,12 +261,12 @@ def _make_policies(
     setup_train_states = jax.vmap(setup_train_state)
     
     train_init_rngs = random.split(
-        train_init_base_rng, cfg.pbt_ensemble_size)
+        train_init_base_rng, icfg.num_train_policies)
     train_states = setup_train_states(
         train_init_rngs, policy_states, fake_policy_outs)
 
-    policy_states = jax.tree_map(lambda x: jnp.tile(
-            x, (cfg.pbt_history_len, *([1] * (len(x.shape) - 1)))),
-        policy_states)
+    #policy_states = jax.tree_map(lambda x: jnp.tile(
+    #        x, (cfg.pbt_history_len, *([1] * (len(x.shape) - 1)))),
+    #    policy_states)
 
     return policy_states, train_states

@@ -118,7 +118,7 @@ class RolloutExecutor:
 
         self._num_bptt_chunks = cfg.num_bptt_chunks
         self._num_bptt_steps = icfg.num_bptt_steps
-        self._num_train_policies = cfg.pbt_ensemble_size
+        self._num_train_policies = icfg.num_train_policies
         self._train_agents_per_policy = icfg.train_agents_per_policy
         self._num_rollout_policies = icfg.num_rollout_policies
         self._float_dtype = icfg.float_storage_type

@@ -53,19 +53,22 @@ class InternalConfig:
     float_storage_type : jnp.dtype
 
     def __init__(self, dev, cfg):
-        self.num_rollout_policies = cfg.pbt_ensemble_size * cfg.pbt_history_len
+        if cfg.pbt != None:
+            self.num_rollout_policies = (
+                cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
+            self.num_train_policies = cfg.pbt.num_train_policies
+        else:
+            self.num_rollout_policies = 1
+            self.num_train_policies = 1
 
-        self.rollout_batch_size = (
-            cfg.num_teams * cfg.team_size * cfg.num_worlds)
-
-        assert(cfg.num_worlds % cfg.pbt_ensemble_size == 0)
+        self.rollout_batch_size = cfg.num_agents_per_world * cfg.num_worlds
 
         self.rollout_agents_per_policy = (
             self.rollout_batch_size // self.num_rollout_policies)
 
-        self.num_train_agents = cfg.team_size * cfg.num_worlds
+        self.num_train_agents = self.rollout_batch_size # FIXME
         self.train_agents_per_policy = (
-            self.num_train_agents // cfg.pbt_ensemble_size)
+            self.num_train_agents // self.num_train_policies)
 
         assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
         self.num_train_seqs_per_policy = (

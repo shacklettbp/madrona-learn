@@ -50,8 +50,10 @@ class TrainingMetrics(flax.struct.PyTreeNode):
         for name in metrics.keys():
             print_names[name] = name + ' ' * (max_keylen - len(name))
 
+        num_policies = cfg.pbt.num_train_policies if cfg.pbt else 1
+
         @partial(jax.vmap, in_axes=None, out_axes=0,
-                 axis_size=cfg.pbt_ensemble_size)
+                 axis_size=num_policies)
         def expand_policy_dim(x):
             return x
 

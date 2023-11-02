@@ -44,6 +44,11 @@ def _pbt_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
 ):
+    if cfg.pbt == None:
+        return train_state_mgr
+
+    return train_state_mgr # FIXME
+
     policy_states = train_state_mgr.policy_states
 
     policy_states = jax.tree_map(lambda x: x.reshape(
@@ -76,7 +81,10 @@ def _update_loop(
     start_update_idx: int,
 ):
     num_updates_remaining = cfg.num_updates - start_update_idx
-    pbt_update_interval = cfg.pbt_update_interval or num_updates_remaining
+    if cfg.pbt != None:
+        pbt_update_interval = cfg.pbt.update_interval
+    else:
+        pbt_update_interval = num_updates_remaining
 
     @jax.vmap
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
@@ -90,7 +98,7 @@ def _update_loop(
             metrics,
         )
 
-    @partial(jax.vmap, axis_size = cfg.pbt_ensemble_size)
+    @partial(jax.vmap, axis_size = icfg.num_train_policies)
     def metric_init_wrapper(train_state):
         return TrainingMetrics.create(
             cfg.algo.metrics() + metrics_cfg.custom_metrics)
@@ -111,23 +119,21 @@ def _update_loop(
                     train_state_mgr, rollout_state, metrics)
 
             with profile('Learn'):
-                active_policy_states = jax.tree_map(
-                    lambda x: x[0:cfg.pbt_ensemble_size],
+                train_policy_states = jax.tree_map(
+                    lambda x: x[0:icfg.num_train_policies],
                     train_state_mgr.policy_states)
 
-                updated_policy_states, updated_train_states, metrics = algo_wrapper(
-                    active_policy_states, train_state_mgr.train_states,
+                train_policy_states, updated_train_states, metrics = algo_wrapper(
+                    train_policy_states, train_state_mgr.train_states,
                     rollout_data, metrics)
 
-                # Copy new params into the full
-                # ensemble size * history len array
-                updated_policy_states = jax.tree_map(
-                    lambda full, updated: full.at[0:cfg.pbt_ensemble_size].set(
-                        updated),
-                    train_state_mgr.policy_states, updated_policy_states)
+                # Copy new params into the full policy_state array
+                policy_states = jax.tree_map(
+                    lambda full, new: full.at[0:icfg.num_train_policies].set(new),
+                    train_state_mgr.policy_states, train_policy_states)
 
             train_state_mgr = TrainStateManager(
-                policy_states = updated_policy_states,
+                policy_states = policy_states,
                 train_states = updated_train_states,
             )
             
