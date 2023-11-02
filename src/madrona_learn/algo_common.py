@@ -46,7 +46,6 @@ class InternalConfig:
     num_rollout_policies: int
     rollout_batch_size: int
     rollout_agents_per_policy: int
-    rollout_batch_size_per_policy: int
     num_train_agents: int
     train_agents_per_policy: int
     num_train_seqs_per_policy: int

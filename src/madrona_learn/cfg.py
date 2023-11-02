@@ -11,6 +11,14 @@ class AlgoConfig:
     def setup(self):
         raise NotImplementedError
 
+
+class PBTConfig:
+    population_size: int
+    history_len: int
+    batching_cfg: List[int]
+    update_interval: int
+
+
 @dataclass(frozen=True)
 class TrainConfig:
     num_worlds: int
@@ -22,11 +30,7 @@ class TrainConfig:
     gamma: float
     seed: int
     gae_lambda: float = 1.0
-    team_size: int = 1
-    num_teams: int = 1
-    pbt_ensemble_size: int = 1
-    pbt_history_len: int = 1
-    pbt_update_interval: Optional[int] = None
+    pbt: Optional[PBTConfig] = None
     compute_advantages: bool = True
     normalize_advantages: bool = True # Only used if compute_advantages = True
     normalize_returns: bool = True # Only used if compute_advantages = False
