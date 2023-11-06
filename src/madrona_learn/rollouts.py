@@ -74,6 +74,7 @@ class RolloutConfig:
 
         if has_matchmaking:
             assert num_teams > 1
+            assert num_current_policies > 1 or num_past_policies > 0
 
             min_policy_batch_size = min(
                 self_play_batch_size // num_current_policies,
@@ -91,6 +92,7 @@ class RolloutConfig:
                 policy_batch_size, min(64, total_batch_size))
         else:
             assert num_past_policies == 0
+
             min_policy_batch_size = 0
             policy_batch_size = total_batch_size // num_current_policies
 

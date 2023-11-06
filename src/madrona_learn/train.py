@@ -78,7 +78,7 @@ def _update_loop(
 ):
     num_updates_remaining = cfg.num_updates - start_update_idx
     if cfg.pbt != None:
-        pbt_update_interval = cfg.pbt.update_interval
+        pbt_update_interval = cfg.pbt.past_policy_update_interval
         num_train_policies = cfg.pbt.num_train_policies
     else:
         pbt_update_interval = num_updates_remaining
@@ -185,7 +185,7 @@ def _setup_rollout_cfg(dev_type, cfg):
 
         return RolloutConfig.setup(
             num_current_policies = cfg.pbt.num_train_policies,
-            num_past_policies = cfg.pbt.num_train_policies,
+            num_past_policies = cfg.pbt.num_past_policies,
             num_teams = cfg.pbt.num_teams,
             team_size = cfg.pbt.team_size,
             total_batch_size = total_batch_size,
