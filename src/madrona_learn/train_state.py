@@ -14,7 +14,7 @@ from typing import Optional, Any, Callable
 from functools import partial
 
 from .actor_critic import ActorCritic
-from .algo_common import HyperParams, AlgoBase, InternalConfig
+from .algo_common import HyperParams, AlgoBase
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
 
@@ -86,6 +86,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
 class TrainStateManager(flax.struct.PyTreeNode):
     policy_states: PolicyState
     train_states: PolicyTrainState
+    pbt_rng: random.PRNGKey
 
     def save(self, update_idx, path):
         ckpt = {
@@ -130,20 +131,17 @@ class TrainStateManager(flax.struct.PyTreeNode):
     def create(
         policy: nn.Module,
         cfg: TrainConfig,
-        icfg: InternalConfig,
         algo: AlgoBase,
-        base_init_rng,
+        base_rng,
         example_obs,
         example_rnn_states,
         checkify_errors,
     ):
-        # All the arguments to _make_policies can be treated as constant by
-        # jax, so bind them all using partial. Strangely, this is necessary,
-        # because if example_obs (which is a set of dlpack imported arrays) is
-        # passed as an argument into the jitted function, there is a memcpy
-        # error within jax caused by the later code that slices the tensor
-        make_policies = partial(_make_policies, policy, cfg, icfg, algo,
-                                base_init_rng, example_obs, example_rnn_states)
+        base_init_rng, pbt_rng = random.split(base_rng)
+
+        def make_policies():
+            return _make_policies(policy, cfg, algo, base_init_rng,
+                example_obs, example_rnn_states)
 
         make_policies = jax.jit(checkify.checkify(
             make_policies, errors=checkify_errors))
@@ -154,7 +152,9 @@ class TrainStateManager(flax.struct.PyTreeNode):
         return TrainStateManager(
             policy_states = policy_states,
             train_states = train_states,
+            pbt_rng = pbt_rng,
         )
+
 
 def _setup_value_normalizer(hyper_params, rng_key, fake_values):
     value_norm_decay = (hyper_params.value_normalizer_decay 
@@ -229,7 +229,6 @@ def _setup_train_state(
 def _make_policies(
     policy,
     cfg,
-    icfg,
     algo,
     base_init_rng,
     example_obs,
@@ -238,21 +237,22 @@ def _make_policies(
     setup_policy_state = partial(_setup_policy_state, policy)
     setup_policy_states = jax.vmap(setup_policy_state)
 
-    obs = jax.tree_map(lambda x: x.reshape(
-            icfg.num_rollout_policies,
-            icfg.rollout_agents_per_policy,
-            *x.shape[1:],
-        ), example_obs)
+    if cfg.pbt != None:
+        num_make = cfg.pbt.num_train_policies
+        num_past_copies = cfg.pbt.num_past_policies
+    else:
+        num_make = 1
+        num_past_copies = 0
 
-    obs = jax.tree_map(lambda x: x[0:icfg.num_train_policies, ...], obs)
+    obs = jax.tree_map(
+        lambda x: x[:num_make, None, ...], example_obs)
 
     rnn_states = jax.tree_map(
-        lambda x: x[0:icfg.num_train_policies, ...], example_rnn_states)
+        lambda x: x[:num_make, None, ...], example_rnn_states)
 
     policy_init_base_rng, train_init_base_rng = random.split(base_init_rng)
 
-    policy_init_rngs = random.split(
-        policy_init_base_rng, icfg.num_train_policies)
+    policy_init_rngs = random.split(policy_init_base_rng, num_make)
 
     policy_states, fake_policy_outs = setup_policy_states(
         policy_init_rngs, rnn_states, obs)
@@ -260,13 +260,15 @@ def _make_policies(
     setup_train_state = partial(_setup_train_state, cfg, algo)
     setup_train_states = jax.vmap(setup_train_state)
     
-    train_init_rngs = random.split(
-        train_init_base_rng, icfg.num_train_policies)
+    train_init_rngs = random.split(train_init_base_rng, num_make)
     train_states = setup_train_states(
         train_init_rngs, policy_states, fake_policy_outs)
 
-    #policy_states = jax.tree_map(lambda x: jnp.tile(
-    #        x, (cfg.pbt_history_len, *([1] * (len(x.shape) - 1)))),
-    #    policy_states)
+    num_repeats = -(num_past_copies // -num_make)
+
+    policy_states = jax.tree_map(
+        lambda x: jnp.tile(x, (num_repeats, *([1] * (len(x.shape) - 1))))[
+            0:num_make + num_past_copies],
+        policy_states)
 
     return policy_states, train_states

@@ -13,14 +13,13 @@ from typing import List, Optional, Dict, Callable
 from time import time
 
 from .cfg import TrainConfig
-from .rollouts import RolloutExecutor, RolloutState
+from .rollouts import RolloutConfig, RolloutManager, RolloutState
 from .actor_critic import ActorCritic
-from .algo_common import AlgoBase, InternalConfig
+from .algo_common import AlgoBase
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import PolicyTrainState, TrainStateManager
 from .profile import profile
-from .utils import init_recurrent_states
 
 def train(
     dev: jax.Device,
@@ -34,39 +33,37 @@ def train(
     profile_port: int = None,
 ):
     print(cfg)
-    icfg = InternalConfig(dev, cfg)
 
     with jax.default_device(dev):
-        return _train_impl(cfg, icfg, sim_step, init_sim_data,
+        return _train_impl(dev.platform, cfg, sim_step, init_sim_data,
             policy, iter_cb, metrics_cfg, restore_ckpt, profile_port)
 
 def _pbt_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
 ):
-    if cfg.pbt == None:
+    if cfg.pbt == None or cfg.pbt.num_past_policies == 0:
         return train_state_mgr
 
-    return train_state_mgr # FIXME
-
     policy_states = train_state_mgr.policy_states
+    pbt_rng = train_state_mgr.pbt_rng
+    pbt_rng, save_idx_rng, store_idx_rng = random.split(pbt_rng, 3)
 
-    policy_states = jax.tree_map(lambda x: x.reshape(
-        cfg.pbt_history_len, cfg.pbt_ensemble_size, *x.shape[1:]),
-        policy_states)
+    save_idx = random.randint(
+        save_idx_rng, 1, 0, cfg.pbt.num_train_policies)
 
-    def update_history(x):
-        if cfg.pbt_history_len == 1:
-            return x
+    store_idx = random.randint(
+        store_idx_rng, 1, cfg.pbt.num_train_policies,
+        cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
 
-        return x.at[1:cfg.pbt_history_len].set(x[0:cfg.pbt_history_len - 1])
+    def save_param(x):
+        return x.at[store_idx].set(x[save_idx])
 
-    policy_states = jax.tree_map(update_history, policy_states)
-    policy_states = jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]),
-        policy_states)
+    policy_states = jax.tree_map(save_param, policy_states)
 
     return train_state_mgr.replace(
         policy_states = policy_states,
+        pbt_rng = pbt_rng,
     )
 
 def _update_loop(
@@ -74,23 +71,23 @@ def _update_loop(
     iter_cb: Callable,
     cfg: TrainConfig,
     metrics_cfg: CustomMetricConfig,
-    icfg: InternalConfig,
     rollout_state: RolloutState,
-    rollout_exec: RolloutExecutor,
+    rollout_mgr: RolloutManager,
     train_state_mgr: TrainStateManager,
     start_update_idx: int,
 ):
     num_updates_remaining = cfg.num_updates - start_update_idx
     if cfg.pbt != None:
         pbt_update_interval = cfg.pbt.update_interval
+        num_train_policies = cfg.pbt.num_train_policies
     else:
         pbt_update_interval = num_updates_remaining
+        num_train_policies = 1
 
     @jax.vmap
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
             cfg, 
-            icfg,
             policy_state,
             train_state,
             rollout_data,
@@ -98,7 +95,7 @@ def _update_loop(
             metrics,
         )
 
-    @partial(jax.vmap, axis_size = icfg.num_train_policies)
+    @partial(jax.vmap, axis_size = num_train_policies)
     def metric_init_wrapper(train_state):
         return TrainingMetrics.create(
             cfg.algo.metrics() + metrics_cfg.custom_metrics)
@@ -110,17 +107,17 @@ def _update_loop(
         update_start_time = 0
 
         metrics = algo.add_metrics(cfg, FrozenDict())
-        metrics = rollout_exec.add_metrics(cfg, metrics)
+        metrics = rollout_mgr.add_metrics(cfg, metrics)
         metrics = TrainingMetrics.create(cfg, metrics)
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
-                rollout_state, rollout_data, metrics = rollout_exec.collect(
+                rollout_state, rollout_data, metrics = rollout_mgr.collect(
                     train_state_mgr, rollout_state, metrics)
 
             with profile('Learn'):
                 train_policy_states = jax.tree_map(
-                    lambda x: x[0:icfg.num_train_policies],
+                    lambda x: x[0:num_train_policies],
                     train_state_mgr.policy_states)
 
                 train_policy_states, updated_train_states, metrics = algo_wrapper(
@@ -129,7 +126,7 @@ def _update_loop(
 
                 # Copy new params into the full policy_state array
                 policy_states = jax.tree_map(
-                    lambda full, new: full.at[0:icfg.num_train_policies].set(new),
+                    lambda full, new: full.at[0:num_train_policies].set(new),
                     train_state_mgr.policy_states, train_policy_states)
 
             train_state_mgr = TrainStateManager(
@@ -169,7 +166,47 @@ def _update_loop(
     return lax.fori_loop(0, num_outer_iters, outer_update_iter,
         (rollout_state, train_state_mgr))
 
-def _train_impl(cfg, icfg, sim_step, init_sim_data,
+
+def _setup_rollout_cfg(dev_type, cfg):
+    if cfg.mixed_precision:
+        if dev.platform == 'gpu':
+            float_dtype = jnp.float16
+        else:
+            float_dtype = jnp.bfloat16
+    else:
+        float_dtype = jnp.float32
+
+    total_batch_size = cfg.agents_per_world * cfg.num_worlds
+
+    if cfg.pbt != None:
+        assert cfg.pbt.num_teams * cfg.pbt.team_size == cfg.agents_per_world
+
+        return RolloutConfig.setup(
+            num_current_policies = cfg.pbt.num_train_policies,
+            num_past_policies = cfg.pbt.num_train_policies,
+            num_teams = cfg.pbt.num_teams,
+            team_size = cfg.pbt.team_size,
+            total_batch_size = total_batch_size,
+            self_play_portion = cfg.pbt.self_play_portion,
+            cross_play_portion = cfg.pbt.cross_play_portion,
+            past_play_portion = cfg.pbt.past_play_portion,
+            float_dtype = float_dtype,
+        )
+    else:
+        return RolloutConfig.setup(
+            num_current_policies = 1,
+            num_past_policies = 0,
+            num_teams = 1,
+            team_size = cfg.agents_per_world,
+            total_batch_size = total_batch_size,
+            self_play_portion = 1.0,
+            cross_play_portion = 0.0,
+            past_play_portion = 0.0,
+            float_dtype = float_dtype,
+        )
+
+
+def _train_impl(dev_type, cfg, sim_step, init_sim_data,
                 policy, iter_cb, metrics_cfg, restore_ckpt, profile_port):
     if profile_port != None:
         jax.profiler.start_server(profile_port)
@@ -191,25 +228,29 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
 
     rollout_rnd, init_rnd = random.split(random.PRNGKey(cfg.seed))
 
-    rnn_states = init_recurrent_states(
-        policy, icfg.rollout_agents_per_policy,
-        icfg.num_rollout_policies)
+    rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
-    rollout_state = RolloutState.create(
-        step_fn = sim_step,
-        prng_key = rollout_rnd,
-        rnn_states = rnn_states,
-        init_sim_data = init_sim_data,
-    )
+    @jax.jit
+    def init_rollout_state(init_sim_data):
+        rnn_states = policy.init_recurrent_state(rollout_cfg.total_batch_size)
+
+        return RolloutState.create(
+            rollout_cfg = rollout_cfg,
+            step_fn = sim_step,
+            prng_key = rollout_rnd,
+            rnn_states = rnn_states,
+            init_sim_data = init_sim_data,
+        )
+
+    rollout_state = init_rollout_state(init_sim_data)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
         cfg = cfg,
-        icfg = icfg,
         algo = algo,
         base_init_rng = init_rnd,
-        example_obs = init_sim_data['obs'],
-        example_rnn_states = rnn_states,
+        example_obs = rollout_state.sim_data['obs'],
+        example_rnn_states = rollout_state.rnn_states,
         checkify_errors = checkify_errors,
     )
 
@@ -218,11 +259,11 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
     else:
         start_update_idx = 0
 
-    rollout_exec = RolloutExecutor(
-        cfg,
-        icfg,
-        train_state_mgr,
-        rollout_state,
+    rollout_mgr = RolloutManager(
+        train_cfg = cfg,
+        rollout_cfg = rollout_cfg,
+        train_state_mgr = train_state_mgr,
+        init_rollout_state = rollout_state,
     )
 
     def update_loop_wrapper(rollout_state, train_state_mgr):
@@ -231,13 +272,11 @@ def _train_impl(cfg, icfg, sim_step, init_sim_data,
             iter_cb = iter_cb,
             cfg = cfg,
             metrics_cfg = metrics_cfg,
-            icfg = icfg,
             rollout_state = rollout_state,
-            rollout_exec = rollout_exec,
+            rollout_mgr = rollout_mgr,
             train_state_mgr = train_state_mgr,
             start_update_idx = start_update_idx,
         )
-
 
     update_loop_wrapper = jax.jit(
         checkify.checkify(update_loop_wrapper, errors=checkify_errors),

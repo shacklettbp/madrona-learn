@@ -41,50 +41,6 @@ class AlgoBase:
         raise NotImplementedError
 
 
-@dataclass
-class InternalConfig:
-    num_rollout_policies: int
-    rollout_batch_size: int
-    rollout_agents_per_policy: int
-    num_train_agents: int
-    train_agents_per_policy: int
-    num_train_seqs_per_policy: int
-    num_bptt_steps: int
-    float_storage_type : jnp.dtype
-
-    def __init__(self, dev, cfg):
-        if cfg.pbt != None:
-            self.num_rollout_policies = (
-                cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
-            self.num_train_policies = cfg.pbt.num_train_policies
-        else:
-            self.num_rollout_policies = 1
-            self.num_train_policies = 1
-
-        self.rollout_batch_size = cfg.num_agents_per_world * cfg.num_worlds
-
-        self.rollout_agents_per_policy = (
-            self.rollout_batch_size // self.num_rollout_policies)
-
-        self.num_train_agents = self.rollout_batch_size # FIXME
-        self.train_agents_per_policy = (
-            self.num_train_agents // self.num_train_policies)
-
-        assert(cfg.steps_per_update % cfg.num_bptt_chunks == 0)
-        self.num_train_seqs_per_policy = (
-            self.train_agents_per_policy * cfg.num_bptt_chunks)
-
-        self.num_bptt_steps = cfg.steps_per_update // cfg.num_bptt_chunks
-
-        if cfg.mixed_precision:
-            if dev.platform == 'gpu':
-                self.float_storage_type = jnp.float16
-            else:
-                self.float_storage_type = jnp.bfloat16
-        else:
-            self.float_storage_type = jnp.float32
-
-
 def compute_returns(
     cfg: TrainConfig,
     rewards: jax.Array,
@@ -123,6 +79,7 @@ def compute_returns(
         0, T, return_step, (bootstrap_values, returns))
 
     return returns.reshape(num_chunks, steps_per_chunk, P, B)
+
 
 def compute_advantages(
     cfg: TrainConfig,
@@ -173,6 +130,7 @@ def compute_advantages(
         (jnp.zeros_like(bootstrap_values), bootstrap_values, advantages))
 
     return advantages.reshape(num_chunks, steps_per_chunk, P, B, 1)
+
 
 def zscore_data(data):
     mean = jnp.mean(data, dtype=jnp.float32)

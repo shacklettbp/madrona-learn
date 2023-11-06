@@ -7,34 +7,188 @@ from flax.core import frozen_dict, FrozenDict
 from dataclasses import dataclass
 from typing import List, Optional, Callable, Any
 from functools import partial
+import itertools
 
 from .cfg import TrainConfig
 from .actor_critic import ActorCritic
-from .algo_common import InternalConfig, compute_advantages, compute_returns
+from .algo_common import compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
 from .profile import profile
 from .train_state import TrainStateManager, PolicyState, PolicyTrainState
 from .utils import TypedShape, convert_float_leaves
+
+@dataclass(frozen = True)
+class RolloutConfig:
+    num_current_policies: int
+    num_past_policies: int
+    total_num_policies: int
+    num_teams: int
+    team_size: int
+    policy_batch_size: int
+    num_policy_batches: int
+    total_batch_size: int
+    self_play_batch_size: int
+    cross_play_batch_size: int
+    past_play_batch_size: int
+    num_cross_play_matches: int
+    num_past_play_matches: int
+    float_dtype: jnp.dtype
+
+    @staticmethod
+    def setup(
+        num_current_policies: int,
+        num_past_policies: int,
+        num_teams: int,
+        team_size: int,
+        total_batch_size: int,
+        self_play_portion: float,
+        cross_play_portion: float,
+        past_play_portion: float,
+        float_dtype: jnp.dtype,
+        policy_batch_size_override: int = 0,
+    ):
+        total_num_policies = num_current_policies + num_past_policies
+
+        assert (self_play_portion + cross_play_portion +
+            past_play_portion == 1.0)
+
+        self_play_batch_size = int(total_batch_size * self_play_portion)
+        cross_play_batch_size = int(total_batch_size * cross_play_portion)
+        past_play_batch_size = int(total_batch_size * past_play_portion)
+
+        assert (self_play_batch_size + cross_play_batch_size +
+                past_play_batch_size == total_batch_size)
+
+        agents_per_world = num_teams * team_size
+
+        assert cross_play_batch_size % agents_per_world == 0
+        assert past_play_batch_size % agents_per_world == 0
+
+        num_cross_play_matches = cross_play_batch_size // agents_per_world
+        num_past_play_matches = past_play_batch_size // agents_per_world
+
+        assert num_cross_play_matches % num_current_policies == 0
+        assert num_past_play_matches % num_current_policies == 0
+
+        if self_play_portion != 1.0:
+            assert num_teams > 1
+
+            min_policy_batch_size = min(
+                self_play_batch_size // num_current_policies,
+                cross_play_batch_size // num_current_policies)
+
+            if past_play_batch_size > 0:
+                # FIXME: this doesn't make much sense, think more
+                # about auto-picking policy batch size
+                min_policy_batch_size = min(min_policy_batch_size,
+                    past_play_batch_size // num_past_policies)
+
+            # Round to nearest power of 2
+            policy_batch_size = 1 << ((min_policy_batch_size - 1).bit_length())
+            policy_batch_size = max(
+                policy_batch_size, min(64, total_batch_size))
+        else:
+            assert num_past_policies == 0
+            min_policy_batch_size = 0
+            policy_batch_size = total_batch_size // num_current_policies
+
+        if policy_batch_size_override != 0:
+            assert policy_batch_size_override > min_policy_batch_size
+            policy_batch_size = policy_batch_size_override
+
+        assert total_batch_size % policy_batch_size == 0
+
+        num_policy_batches = total_batch_size // policy_batch_size
+
+        # Need to add buffer for uneven assignment
+        if cross_play_batch_size > 0 or past_play_batch_size > 0:
+            num_policy_batches += total_num_policies - 1
+
+        return RolloutConfig(
+            num_current_policies = num_current_policies,
+            num_past_policies = num_past_policies,
+            total_num_policies = total_num_policies,
+            num_teams = num_teams,
+            team_size = team_size,
+            policy_batch_size = policy_batch_size ,
+            num_policy_batches = num_policy_batches,
+            total_batch_size = total_batch_size,
+            self_play_batch_size = self_play_batch_size,
+            cross_play_batch_size = cross_play_batch_size,
+            past_play_batch_size = past_play_batch_size,
+            num_cross_play_matches = num_cross_play_matches,
+            num_past_play_matches = num_past_play_matches,
+            float_dtype = float_dtype,
+        )
+
+
+class PolicyBatchReorderState(flax.struct.PyTreeNode):
+    to_policy_idxs: jax.Array
+    to_sim_idxs: jax.Array
+
 
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
     prng_key: random.PRNGKey
     rnn_states: Any
     sim_data: FrozenDict
-    reorder_idxs: Optional[jax.Array]
+    reorder_state: Optional[PolicyBatchReorderState]
+    policy_assignments: Optional[jax.Array]
+    to_policy: Callable = flax.struct.field(pytree_node=False)
+    to_sim: Callable = flax.struct.field(pytree_node=False)
 
     @staticmethod
     def create(
+        rollout_cfg,
         step_fn,
         prng_key,
         rnn_states,
         init_sim_data,
     ):
         if 'policy_assignments' in init_sim_data:
-            reorder_idxs = jnp.argsort(
-                init_sim_data['policy_assignments'].squeeze(axis=-1))
+            policy_assignments = \
+                init_sim_data['policy_assignments'].squeeze(axis=-1)
+        elif (rollout_cfg.cross_play_batch_size > 0 or
+              rollout_cfg.past_play_batch_size > 0): 
+            prng_key, assign_rnd = random.split(prng_key)
+            policy_assignments = _init_matchmake_assignments(
+                assign_rnd, rollout_cfg)
         else:
-            reorder_idxs = None
+            policy_assignments = None
+
+        if policy_assignments:
+            def to_policy(args, reorder_state):
+                return jax.tree_map(
+                    lambda x: jnp.take(x, reorder_state.to_policy_idxs, 0),
+                    args,
+                )
+
+            def to_sim(args, reorder_state):
+                args = jax.tree_map(
+                    lambda x: x.reshape(-1, *x.shape[2:]), args)
+                return jax.tree_map(
+                    lambda x: jnp.take(x, reorder_state.to_sim_idxs, 0),
+                    args,
+                )
+
+            reorder_state = _compute_reorder_state(
+                policy_assignments,
+                rollout_cfg.total_num_policies,
+                rollout_cfg.policy_batch_size,
+                rollout_cfg.num_policy_batches,
+            )
+        else:
+            def to_policy(args, reorder_state):
+                assert reorder_state == None
+                return jax.tree_map(lambda x: x.reshape(
+                    num_policy_batches, policy_batch_size, *x.shape[1:]), args)
+
+            def to_sim(args, reorder_state):
+                assert reorder_state == None
+                return jax.tree_map(
+                    lambda x: x.reshape(-1, *x.shape[2:]), args)
+
+            reorder_state = None
 
         sim_data = jax.tree_map(jnp.copy, init_sim_data)
 
@@ -43,7 +197,11 @@ class RolloutState(flax.struct.PyTreeNode):
             prng_key = prng_key,
             rnn_states = rnn_states,
             sim_data = sim_data,
-            reorder_idxs = reorder_idxs,
+            reorder_state = reorder_state,
+            policy_assignments = (policy_assignments
+                if 'policy_assignments' not in init_sim_data else None),
+            to_policy = to_policy,
+            to_sim = to_sim,
         )
 
     def update(
@@ -51,20 +209,28 @@ class RolloutState(flax.struct.PyTreeNode):
         prng_key=None,
         rnn_states=None,
         sim_data=None,
-        reorder_idxs=None
+        reorder_state=None,
+        policy_assignments=None,
     ):
         return RolloutState(
             step_fn = self.step_fn,
             prng_key = prng_key if prng_key != None else self.prng_key,
             rnn_states = rnn_states if rnn_states != None else self.rnn_states,
             sim_data = sim_data if sim_data != None else self.sim_data,
-            reorder_idxs = (
-                reorder_idxs if reorder_idxs != None else self.reorder_idxs),
+            reorder_state = (
+                reorder_state if reorder_state != None else self.reorder_state),
+            policy_assignments = (
+                policy_assignments if policy_assignments != None else
+                    self.policy_assignments),
+            to_policy = self.to_policy,
+            to_sim = self.to_sim,
         )
 
 
 class RolloutData(flax.struct.PyTreeNode):
     data: FrozenDict[str, Any]
+    num_train_seqs_per_policy: int
+    num_train_policies: int
 
     def all(self):
         return self.data
@@ -106,34 +272,38 @@ class RolloutStore(flax.struct.PyTreeNode):
         return RolloutStore(store = new_store)
 
 
-class RolloutExecutor:
+class RolloutManager:
     def __init__(
         self,
-        cfg: TrainConfig,
-        icfg: InternalConfig,
+        train_cfg: TrainConfig,
+        rollout_cfg: RolloutConfig,
         train_state_mgr: TrainStateManager,
         init_rollout_state: RolloutState,
     ):
         cpu_dev = jax.devices('cpu')[0]
 
-        self._num_bptt_chunks = cfg.num_bptt_chunks
-        self._num_bptt_steps = icfg.num_bptt_steps
-        self._num_train_policies = icfg.num_train_policies
-        self._train_agents_per_policy = icfg.train_agents_per_policy
-        self._num_rollout_policies = icfg.num_rollout_policies
-        self._float_dtype = icfg.float_storage_type
-        self._use_advantages = cfg.compute_advantages
-        self._compute_advantages_fn = partial(compute_advantages, cfg)
-        self._compute_returns_fn = partial(compute_returns, cfg)
+        self._cfg = rollout_cfg
+
+        self._num_bptt_chunks = train_cfg.num_bptt_chunks
+        assert train_cfg.steps_per_update % train_cfg.num_bptt_chunks == 0
+        self._num_bptt_steps = (
+            train_cfg.steps_per_update // train_cfg.num_bptt_chunks)
+        self._num_train_policies = rollout_cfg.num_train_policies
+
+        self._num_train_agents_per_policy = \
+            _compute_num_train_agents_per_policy(rollout_cfg)
+
+        self._num_train_seqs_per_policy = (
+            self._num_train_agents_per_policy * self._num_bptt_chunks)
+
+        self._use_advantages = train_cfg.compute_advantages
+        self._compute_advantages_fn = partial(compute_advantages, train_cfg)
+        self._compute_returns_fn = partial(compute_returns, train_cfg)
 
         typed_shapes = {}
 
         sim_data = init_rollout_state.sim_data
         
-        self._is_dynamic_policy_assignment = \
-            init_rollout_state.reorder_idxs != None
-        assert(sim_data['actions'].shape[0] == icfg.rollout_batch_size)
-
         def get_typed_shape(x):
             return TypedShape(x.shape, x.dtype)
 
@@ -164,7 +334,7 @@ class RolloutExecutor:
                     self._num_bptt_chunks,
                     self._num_bptt_steps,
                     self._num_train_policies,
-                    self._train_agents_per_policy,
+                    self._num_train_agents_per_policy,
                     *x.shape[1:],
                 ), dtype=dtype)
 
@@ -178,7 +348,7 @@ class RolloutExecutor:
             lambda x: TypedShape((
                     self._num_bptt_chunks,
                     self._num_train_policies,
-                    self._train_agents_per_policy,
+                    self._num_train_agents_per_policy,
                     *x.shape[2:],
                 ), x.dtype),
             init_rollout_state.rnn_states)
@@ -187,7 +357,7 @@ class RolloutExecutor:
 
     def add_metrics(
         self, 
-        cfg: TrainConfig,
+        train_cfg: TrainConfig,
         metrics: FrozenDict[str, Metric],
     ):
         new_metrics = {
@@ -196,7 +366,7 @@ class RolloutExecutor:
             'Values': Metric.init(True),
         }
 
-        if cfg.compute_advantages:
+        if train_cfg.compute_advantages:
             new_metrics['Advantages'] = Metric.init(True)
 
         new_metrics['Bootstrap Values'] = Metric.init(True)
@@ -224,7 +394,7 @@ class RolloutExecutor:
 
             rollout_state, rollout_store = rollout_loop(
                 rollout_state, train_state_mgr.policy_states,
-                self._num_rollout_policies, self._num_bptt_steps, 
+                self._num_policy_batches, self._num_bptt_steps, 
                 post_inference_cb, post_step_cb, rollout_store,
                 self._float_dtype, sample_actions = True, return_debug = False)
 
@@ -268,7 +438,7 @@ class RolloutExecutor:
 
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
         prep_for_policy = _make_pbt_reorder_funcs(
-            rollout_state.reorder_idxs != None, self._num_rollout_policies)[0]
+            rollout_state.reorder_idxs != None, self._num_policy_batches)[0]
 
         rnn_states = rollout_state.rnn_states
         obs = rollout_state.sim_data['obs']
@@ -353,6 +523,8 @@ class RolloutExecutor:
             data = rollouts.copy({
                 'rnn_start_states': rnn_start_states,
             }),
+            num_train_seqs_per_policy = self._num_train_seqs_per_policy,
+            num_train_policies = self._num_train_policies,
         ), metrics
 
     def _post_inference_cb(
@@ -396,15 +568,15 @@ class RolloutExecutor:
             return rollout_store.save(
                 (bptt_chunk, bptt_step), save_data)
 
+
 def rollout_loop(
+    rollout_cfg: RolloutConfig,
     rollout_state: RolloutState,
     policy_states: PolicyState,
-    num_policies: int,
     num_steps: int,
     post_inference_cb: Callable,
     post_step_cb: Callable,
     cb_state: Any,
-    preferred_float_dtype: jnp.dtype,
     **policy_kwargs,
 ):
     def policy_fn(state, sample_key, rnn_states, obs):
@@ -422,10 +594,7 @@ def rollout_loop(
         )
 
     policy_fn = jax.vmap(policy_fn)
-    rnn_reset_fn = jax.vmap(policy_states.rnn_reset_fn)
-
-    prep_for_policy, prep_for_sim = _make_pbt_reorder_funcs(
-        rollout_state.reorder_idxs != None, num_policies)
+    rnn_reset_fn = policy_states.rnn_reset_fn
 
     def rollout_iter(step_idx, iter_state):
         rollout_state, cb_state = iter_state
@@ -433,39 +602,66 @@ def rollout_loop(
         prng_key = rollout_state.prng_key
         rnn_states = rollout_state.rnn_states
         sim_data = rollout_state.sim_data
-        reorder_idxs = rollout_state.reorder_idxs
+        reorder_state = rollout_state.reorder_state
+        policy_assignments = rollout_state.policy_assignments
+        to_policy = rollout_state.to_policy
+        to_sim = rollout_state.to_sim
 
         with profile('Policy Inference'):
             prng_key, step_key = random.split(prng_key)
-            step_keys = random.split(step_key, num_policies)
+            step_keys = random.split(
+                step_key, rollout_cfg.total_num_policies)
 
             policy_obs = convert_float_leaves(
-                sim_data['obs'], preferred_float_dtype)
+                sim_data['obs'], rollout_cfg.float_dtype)
 
-            policy_obs = prep_for_policy(policy_obs, reorder_idxs)
-            policy_out = policy_fn(
+            rnn_states, policy_obs = to_policy(
+                (rnn_states, policy_obs), reorder_state)
+
+            policy_out, rnn_states = policy_fn(
                 policy_states, step_keys, rnn_states, policy_obs)
 
             cb_state = post_inference_cb(
                 step_idx, policy_obs, policy_out, cb_state)
 
+            # rnn_states are kept across the loop in sim ordering,
+            # because the ordering is stable, unlike policy batches that 
+            # can shift when assignments change
+            rnn_states = to_sim(rnn_states, reorder_state)
+
         with profile('Rollout Step'):
             sim_data = sim_data.copy({
-                'actions': prep_for_sim(policy_out['actions'], reorder_idxs),
+                'actions': to_sim(policy_out['actions'], reorder_state),
             })
 
             sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
 
-            if reorder_idxs != None:
-                reorder_idxs = jnp.argsort(
-                    sim_data['policy_assignments'].squeeze(axis=-1))
-
             dones = sim_data['dones'].astype(jnp.bool_)
-            rewards = sim_data['rewards'].astype(preferred_float_dtype)
+            rewards = sim_data['rewards'].astype(rollout_cfg.float_dtype)
 
-            dones, rewards = prep_for_policy((dones, rewards), reorder_idxs)
-
+            # Perform the RNN reset here with the rnn states &
+            # dones in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
+
+            # FIXME: to_policy is redundant here. We should make
+            # sim => train, and policy => train mappings.
+            dones, rewards = to_policy((dones, rewards), reorder_state)
+
+            if reorder_state != None:
+                if 'policy_assignments' in sim_data:
+                    policy_assignments = \
+                        sim_data['policy_assignments'].squeeze(axis=-1)
+                else:
+                    assert policy_assignments != None
+                    policy_assignments, prng_key = _update_policy_assignments(
+                        policy_assignments, dones, prng_key, rollout_cfg)
+
+                reorder_state = _compute_reorder_state(
+                    policy_assignments,
+                    rollout_cfg.total_num_policies,
+                    rollout_cfg.policy_batch_size,
+                    rollout_cfg.num_policy_batches,
+                )
 
             cb_state = post_step_cb(step_idx, dones, rewards, cb_state)
 
@@ -473,35 +669,239 @@ def rollout_loop(
             prng_key = prng_key,
             rnn_states = rnn_states,
             sim_data = sim_data,
-            reorder_idxs = reorder_idxs,
+            reorder_state = reorder_state,
+            policy_assignments = (policy_assignments
+                if 'policy_assignments' not in sim_data else None),
         )
 
         return rollout_state, cb_state
 
     return lax.fori_loop(0, num_steps, rollout_iter, (rollout_state, cb_state))
 
-def _make_pbt_reorder_funcs(dyn_assignment, num_policies):
-    def group_into_policy_batches(args):
-        return jax.tree_map(
-            lambda x: x.reshape(num_policies, -1, *x.shape[1:]), args)
 
-    if dyn_assignment:
-        def prep_for_policy(args, sort_idxs):
-            reordered = jax.tree_map(lambda x: jnp.take(x, sort_idxs, 0), args)
-            return group_into_policy_batches(reordered)
+def _compute_num_train_agents_per_policy(rollout_cfg):
+    assert rollout_cfg.cross_play_batch_size % rollout_cfg.num_teams == 0
+    assert rollout_cfg.past_play_batch_size % rollout_cfg.num_teams == 0
 
-        def prep_for_sim(args, sort_idxs):
-            args = jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
+    # FIXME: currently we only collect training data for team 1 in each
+    # world in cross-play and past-play to avoid having variable amounts
+    # of training data in each step
+    total_num_train_agents = (
+        rollout_cfg.self_play_batch_size +
+        rollout_cfg.cross_play_batch_size // rollout_cfg.num_teams +
+        rollout_cfg.past_play_batch_size // rollout_cfg.num_teams
+    )
 
-            unsort_idxs = jnp.arange(sort_idxs.shape[0])[sort_idxs]
-            return jax.tree_map(lambda x: jnp.take(x, unsort_idxs, 0), args)
-    else:
-        def prep_for_policy(args, sort_idxs):
-            assert(sort_idxs == None)
-            return group_into_policy_batches(args)
+    assert total_num_train_agents % rollout_cfg.num_current_policies == 0
+    return total_num_train_agents // rollout_cfg.num_current_policies
 
-        def prep_for_sim(args, sort_idxs):
-            assert(sort_idxs == None)
-            return jax.tree_map(lambda x: x.reshape(-1, *x.shape[2:]), args)
 
-    return prep_for_policy, prep_for_sim
+def _cross_play_matchmake(
+    assignments,
+    dones,
+    assign_rnd,
+    rollout_cfg,
+):
+    num_matches = rollout_cfg.num_cross_play_matches
+    num_teams = rollout_cfg.num_teams
+    team_size = rollout_cfg.team_size
+
+    assignments = assignments.reshape(num_matches, num_teams, team_size)
+    dones = dones.reshape(num_matches, num_teams, team_size)
+
+    new_assignments = random.randint(assign_rnd, (num_matches, num_teams - 1),
+        0, rollout_cfg.num_current_policies - 1)
+
+    new_assignments = jnp.where(new_assignments >= assignments[:, 0:1, 0],
+        new_assignments + 1, new_assignments)
+
+    new_assignments = jnp.where(
+        dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
+
+    return assignments.at[:, 1:, :].set(new_assignments).reshape(-1)
+
+
+def _past_play_matchmake(
+    assignments,
+    dones,
+    assign_rnd,
+    rollout_cfg,
+):
+    num_matches = rollout_cfg.num_cross_play_matches
+    num_teams = rollout_cfg.num_teams
+    team_size = rollout_cfg.team_size
+    
+    assignments = assignments.reshape(num_matches, num_teams, team_size)
+    dones = dones.reshape(num_matches, num_teams, team_size)
+
+    new_assignments = random.randint(assign_rnd, (num_matches, num_teams - 1),
+        rollout_cfg.num_current_policies,
+        rollout_cfg.num_current_policies + rollout_cfg.num_past_policies)
+
+    new_assignments = jnp.where(
+        dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
+
+    return assignments.at[:, 1:, :].set(new_assignments).reshape(-1)
+
+
+def _init_matchmake_assignments(assign_rnd, rollout_cfg):
+    def self_play_matchmake(batch_size):
+        return jnp.repeat(
+            jnp.arange(rollout_cfg.num_current_policies),
+            batch_size // rollout_cfg.num_current_policies)
+
+    self_play_batch_size = rollout_cfg.self_play_batch_size
+    cross_play_batch_size = rollout_cfg.cross_play_batch_size
+    past_play_batch_size = rollout_cfg.past_play_batch_size
+
+    sub_assignments = []
+
+    if self_play_batch_size > 0:
+        self_assignments = self_play_matchmake(self_play_batch_size)
+        assert self_assignments.shape[0] == self_play_batch_size
+        sub_assignments.append(self_assignments)
+
+    if cross_play_batch_size > 0:
+        assign_rnd, cross_rnd = random.split(assign_rnd)
+
+        cross_assignments = self_play_matchmake(cross_play_batch_size)
+        assert cross_assignments.shape[0] == cross_play_batch_size
+        cross_assignments = _cross_play_matchmake(
+            cross_assignments,
+            jnp.ones(cross_play_batch_size, dtype=jnp.bool_),
+            cross_rnd,
+            rollout_cfg,
+        )
+
+        sub_assignments.append(cross_assignments)
+
+    if past_play_batch_size > 0:
+        past_assignments = self_play_matchmake(past_play_batch_size)
+        assert past_assignments.shape[0] == past_play_batch_size
+        past_assignments = _past_play_matchmake(
+            past_assignments,
+            jnp.ones(past_play_batch_size, dtype=jnp.bool_),
+            assign_rnd,
+            rollout_cfg,
+        )
+
+        sub_assignments.append(past_assignments)
+
+    policy_assignments = jnp.concatenate(sub_assignments, axis=0)
+
+    assert policy_assignments.shape[0] == rollout_cfg.total_batch_size
+    return policy_assignments
+
+
+def _update_policy_assignments(
+    assignments,
+    dones,
+    assign_rnd,
+    rollout_cfg,
+):
+    if rollout_cfg.cross_play_batch_size > 0:
+        assign_rnd, cross_rnd = random.split(assign_rnd)
+
+        cross_start = self_play_batch_size
+        cross_end = self_play_batch_size + cross_play_batch_size
+        assignments = assignments.at[cross_start:cross_end].set(
+            _cross_play_matchmake(assignments[cross_start:cross_end],
+                dones[cross_start:cross_end], cross_rnd, rollout_cfg))
+
+    if past_play_batch_size > 0:
+        assign_rnd, past_rnd = random.split(assign_rnd)
+
+        past_start = self_play_batch_size + cross_play_batch_size 
+        past_end = past_start + past_play_batch_size
+        assignments = assignments.at[past_start:past_end].set(
+            _past_play_matchmake(assignments[past_start:past_end],
+                dones[past_start:past_end], past_rnd, rollout_cfg))
+
+    return assignments, assign_rnd
+
+
+def _compute_reorder_state(
+    assignments,
+    num_policies,
+    policy_batch_size,
+    num_policy_batches,
+):
+    C = policy_batch_size
+    B = num_policy_batches
+
+    sort_idxs = jnp.argsort(assignments)
+    sorted_assignments = jnp.take_along_axis(assignments, sort_idxs, 0)
+
+    ne_mask = jnp.ones(assignments.shape[0], dtype=jnp.bool_).at[1:].set(
+        lax.ne(sorted_assignments[1:], sorted_assignments[:-1]))
+    transitions = jnp.nonzero(
+        ne_mask, size=num_policies + 1, fill_value=assignments.size)[0]
+    transitions_diff = jnp.diff(transitions)
+    transitions = transitions[:-1]
+
+    # Need to scatter here to handle the case where there are 0 instances
+    # of certain values
+    transition_assignments = sorted_assignments.at[transitions].get(
+        mode='fill', indices_are_sorted=True, fill_value=num_policies)
+    assignment_starts = jnp.zeros(num_policies, dtype=jnp.int32).at[
+        transition_assignments].set(transitions, mode='drop')
+    assignment_counts = jnp.zeros(num_policies, dtype=jnp.int32).at[
+        transition_assignments].set(transitions_diff, mode='drop')
+    
+    num_full_chunks, partial_sizes = jnp.divmod(assignment_counts, C)
+
+    # Compute each item's offset from the start of items in its class
+    expanded_assignment_starts = jnp.take(
+        assignment_starts, sorted_assignments, indices_are_sorted=True)
+    offsets_from_starts = (
+        jnp.arange(assignments.size) - expanded_assignment_starts)
+
+    full_chunk_counts = num_full_chunks * C
+    full_chunk_cumsum = jnp.cumsum(full_chunk_counts)
+    # Base offset for partial chunks is after all full chunks
+    partial_base = full_chunk_cumsum[-1]
+
+    # Prefix sum to get starting offsets for full chunks
+    full_chunk_starts = full_chunk_cumsum - full_chunk_counts
+
+    # Computer scatter indices for items in full chunks
+    expanded_full_chunk_starts = jnp.take(
+        full_chunk_starts, sorted_assignments, indices_are_sorted=True)
+    expanded_full_chunk_counts = jnp.take(
+        full_chunk_counts, sorted_assignments, indices_are_sorted=True)
+    full_chunk_indices = expanded_full_chunk_starts + offsets_from_starts
+
+    # Compute scatter indices for items in partial chunks
+    partial_chunk_starts = (
+        partial_base + C * jnp.arange(num_policies) - full_chunk_counts)
+
+    # Alternatively, if partial chunks need to be compacted
+    # to the beginning, do the following prefix sum over occupied chunks.
+    # Note that this doesn't change the worst-case size bounds.
+    # has_partial_mask = jnp.where(partial_sizes != 0, 1, 0)
+    # partial_chunk_prefix = jnp.cumsum(has_partial_mask) - has_partial_mask
+    # partial_chunk_starts = (
+    #     partial_base + C * partial_chunk_prefix - full_chunk_counts)
+
+    expanded_partial_chunk_starts = jnp.take(
+        partial_chunk_starts, sorted_assignments, indices_are_sorted=True)
+
+    partial_chunk_indices = (expanded_partial_chunk_starts +
+        offsets_from_starts)
+
+    full_partial_mask = jnp.logical_and(
+        expanded_full_chunk_counts > 0,
+        offsets_from_starts < expanded_full_chunk_counts)
+    scatter_positions = jnp.where(
+        full_partial_mask, full_chunk_indices, partial_chunk_indices)
+
+    to_policy_idxs = jnp.full((B * C), assignments.size, jnp.int32).at[
+        scatter_positions].set(sort_idxs)
+
+    to_sim_idxs = jnp.empty_like(assignments).at[sort_idxs].set(
+        scatter_positions, unique_indices=True)
+
+    return PolicyBatchReorderState(
+        to_policy_idxs = to_policy_idxs.reshape(B, C),
+        to_sim_idxs = to_sim_idxs,
+    )

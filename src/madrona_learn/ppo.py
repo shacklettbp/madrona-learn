@@ -16,11 +16,7 @@ from .profile import profile
 from .train_state import HyperParams, PolicyState, PolicyTrainState
 from .rollouts import RolloutData
 
-from .algo_common import (
-    AlgoBase,
-    InternalConfig,
-    zscore_data,
-)
+from .algo_common import AlgoBase, zscore_data
 
 __all__ = [ "PPOConfig" ]
 
@@ -239,7 +235,6 @@ def _ppo_update(
 
 def _ppo(
     cfg: TrainConfig,
-    icfg: InternalConfig,
     policy_state: PolicyState,
     train_state: PolicyTrainState,
     rollout_data: RolloutData,
@@ -252,7 +247,8 @@ def _ppo(
         mb_rnd, train_state = train_state.gen_update_rnd()
 
         with profile('Compute Minibatch Indices'):
-            all_inds = random.permutation(mb_rnd, icfg.num_train_seqs_per_policy)
+            all_inds = random.permutation(
+                mb_rnd, rollout_data.num_train_seqs_per_policy)
             mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
 
         def mb_iter(mb_i, inputs):

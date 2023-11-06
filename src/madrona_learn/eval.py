@@ -13,9 +13,8 @@ from functools import partial
 from typing import List, Optional, Dict, Callable, Any
 
 from .actor_critic import ActorCritic
-from .rollouts import RolloutState, rollout_loop
+from .rollouts import RolloutConfig, RolloutState, rollout_loop
 from .train_state import TrainStateManager
-from .utils import init_recurrent_states
 
 def eval_ckpt(
     dev: jax.Device,
@@ -59,22 +58,36 @@ def _eval_ckpt_impl(
 
     num_policies = len(load_policies)
 
-    batch_size_per_policy = \
-        init_sim_data['actions'].shape[0] // num_policies
-
-    rnn_states = init_recurrent_states(policy,
-        batch_size_per_policy, num_policies)
+    total_batch_size = init_sim_data['actions'].shape[0]
+    batch_size_per_policy = total_batch_size // num_policies
 
     policy_states = TrainStateManager.load_policies(policy, ckpt_path)
     policy_states = jax.tree_map(
         lambda x: x[load_policies], policy_states)
 
-    rollout_state = RolloutState.create(
-        step_fn = sim_step,
-        prng_key = random.PRNGKey(0),
-        rnn_states = rnn_states,
-        init_sim_data = init_sim_data,
+    rollout_cfg = RolloutConfig.setup(
+        num_current_policies = num_policies,
+        num_past_policies = 0,
+        num_teams = 0,
+        team_size = 0,
+        total_batch_size = total_batch_size,
+        self_play_portion = 1.0,
+        cross_play_portion = 0.0,
+        past_play_portion = 0.0,
+        float_dtype = policy_dtype,
     )
+
+    @jax.jit
+    def init_rollout_state(init_sim_data):
+        rnn_states = policy.init_recurrent_state(total_batch_size)
+
+        return RolloutState.create(
+            rollout_cfg = rollout_cfg,
+            step_fn = sim_step,
+            prng_key = random.PRNGKey(0),
+            rnn_states = rnn_states,
+            init_sim_data = init_sim_data,
+        )
 
     def post_policy_cb(step_idx, policy_obs, policy_out, cb_state):
         return policy_out.copy({
@@ -92,13 +105,13 @@ def _eval_ckpt_impl(
         return None
 
     rollout_loop_fn = partial(rollout_loop,
+        rollout_cfg = rollout_cfg,
         policy_states = policy_states,
         num_policies = num_policies,
         num_steps = num_eval_steps,
         post_inference_cb = post_policy_cb,
         post_step_cb = post_step_cb,
         cb_state = None,
-        preferred_float_dtype = policy_dtype,
         sample_actions = not use_deterministic_policy,
         return_debug = True,
     )

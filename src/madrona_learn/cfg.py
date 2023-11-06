@@ -14,10 +14,17 @@ class AlgoConfig:
 
 @dataclass(frozen=True)
 class PBTConfig:
+    num_teams: int
+    team_size: int
     num_train_policies: int
     num_past_policies: int
-    self_play_batch_size: int
-    update_interval: int
+    past_policy_update_interval: int
+    # Must add to 1 and cleanly subdivide total rollout batch size
+    self_play_portion: float
+    cross_play_portion: float
+    past_play_portion: float
+    # Purely a speed / memory parameter
+    rollout_policy_batch_size_override: int = 0
 
 
 @dataclass(frozen=True)

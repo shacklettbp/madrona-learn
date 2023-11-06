@@ -55,8 +55,7 @@ class ActorCritic(nn.Module):
 
         return FrozenDict({
             'actions': action_dists.best(),
-            'rnn_states': rnn_states_out,
-        })
+        }), rnn_states_out
 
     def critic_only(self, rnn_states_in, obs_in, train=False):
         critic_features, rnn_states_out = self.backbone.critic_only(
@@ -65,8 +64,7 @@ class ActorCritic(nn.Module):
 
         return FrozenDict({
             'values': values,
-            'rnn_states': rnn_states_out,
-        })
+        }), rnn_states_out
 
     def rollout(self, prng_key, rnn_states_in, obs_in, train=False,
                 sample_actions=True, return_debug=False):
@@ -86,13 +84,11 @@ class ActorCritic(nn.Module):
         results['actions'] = actions
         results['values'] = self.critic(critic_features)
 
-        results['rnn_states'] = rnn_states_out
-
         if return_debug:
             results['action_probs'] = action_dists.probs()
             results['action_logits'] = action_dists.logits()
 
-        return frozen_dict.freeze(results)
+        return frozen_dict.freeze(results), rnn_states_out
 
     def update(
             self,
