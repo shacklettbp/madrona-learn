@@ -24,8 +24,10 @@ class RolloutConfig:
     total_num_policies: int
     num_teams: int
     team_size: int
+    sim_batch_size: int
     policy_batch_size: int
-    total_batch_size: int
+    num_policy_batches: int
+    total_policy_batch_size: int
     self_play_batch_size: int
     cross_play_batch_size: int
     past_play_batch_size: int
@@ -40,7 +42,7 @@ class RolloutConfig:
         num_past_policies: int,
         num_teams: int,
         team_size: int,
-        total_batch_size: int,
+        sim_batch_size: int,
         self_play_portion: float,
         cross_play_portion: float,
         past_play_portion: float,
@@ -52,12 +54,12 @@ class RolloutConfig:
         assert (self_play_portion + cross_play_portion +
             past_play_portion == 1.0)
 
-        self_play_batch_size = int(total_batch_size * self_play_portion)
-        cross_play_batch_size = int(total_batch_size * cross_play_portion)
-        past_play_batch_size = int(total_batch_size * past_play_portion)
+        self_play_batch_size = int(sim_batch_size * self_play_portion)
+        cross_play_batch_size = int(sim_batch_size * cross_play_portion)
+        past_play_batch_size = int(sim_batch_size * past_play_portion)
 
         assert (self_play_batch_size + cross_play_batch_size +
-                past_play_batch_size == total_batch_size)
+                past_play_batch_size == sim_batch_size)
 
         agents_per_world = num_teams * team_size
 
@@ -89,18 +91,26 @@ class RolloutConfig:
             # Round to nearest power of 2
             policy_batch_size = 1 << ((min_policy_batch_size - 1).bit_length())
             policy_batch_size = max(
-                policy_batch_size, min(64, total_batch_size))
+                policy_batch_size, min(64, sim_batch_size))
         else:
             assert num_past_policies == 0
 
             min_policy_batch_size = 0
-            policy_batch_size = total_batch_size // num_current_policies
+            policy_batch_size = sim_batch_size // num_current_policies
 
         if policy_batch_size_override != 0:
             assert policy_batch_size_override > min_policy_batch_size
             policy_batch_size = policy_batch_size_override
 
-        assert total_batch_size % policy_batch_size == 0
+        assert sim_batch_size % policy_batch_size == 0
+        # Allocate enough policy sub-batches to evenly divide the full batch,
+        # plus num_policies - 1 extras to handle worst case usage from unused
+        # space in each subbatch
+        num_policy_batches = sim_batch_size // policy_batch_size
+        if has_matchmaking:
+            num_policy_batches += total_num_policies - 1
+
+        total_policy_batch_size = num_policy_batches * policy_batch_size
 
         return RolloutConfig(
             num_current_policies = num_current_policies,
@@ -108,8 +118,10 @@ class RolloutConfig:
             total_num_policies = total_num_policies,
             num_teams = num_teams,
             team_size = team_size,
-            policy_batch_size = policy_batch_size ,
-            total_batch_size = total_batch_size,
+            sim_batch_size = sim_batch_size,
+            policy_batch_size = policy_batch_size,
+            num_policy_batches = num_policy_batches,
+            total_policy_batch_size = total_policy_batch_size,
             self_play_batch_size = self_play_batch_size,
             cross_play_batch_size = cross_play_batch_size,
             past_play_batch_size = past_play_batch_size,
@@ -154,7 +166,7 @@ class RolloutState(flax.struct.PyTreeNode):
         else:
             policy_assignments = None
 
-        if policy_assignments:
+        if policy_assignments != None:
             def to_policy(args, reorder_state):
                 return jax.tree_map(
                     lambda x: jnp.take(x, reorder_state.to_policy_idxs, 0),
@@ -163,7 +175,7 @@ class RolloutState(flax.struct.PyTreeNode):
 
             def to_sim(args, reorder_state):
                 args = jax.tree_map(lambda x: x.reshape(
-                    rollout_cfg.total_batch_size, *x.shape[2:]), args)
+                    rollout_cfg.total_policy_batch_size, *x.shape[2:]), args)
                 return jax.tree_map(
                     lambda x: jnp.take(x, reorder_state.to_sim_idxs, 0),
                     args,
@@ -183,7 +195,7 @@ class RolloutState(flax.struct.PyTreeNode):
             def to_sim(args, reorder_state):
                 assert reorder_state == None
                 return jax.tree_map(lambda x: x.reshape(
-                    rollout_cfg.total_batch_size, *x.shape[2:]), args)
+                    rollout_cfg.total_policy_batch_size, *x.shape[2:]), args)
 
             reorder_state = None
 
@@ -397,7 +409,7 @@ class RolloutManager:
                 })
 
             rollout_state, rollout_store = rollout_loop(
-                self._cfg, rollout_state, train_state_mgr.policy_states,
+                rollout_state, train_state_mgr.policy_states, self._cfg,
                 self._num_bptt_steps,  post_inference_cb, post_step_cb,
                 rollout_store, sample_actions = True, return_debug = False)
 
@@ -441,8 +453,9 @@ class RolloutManager:
         
         def to_train(x):
             # FIXME
-            sim_ordering = x.reshape(self._cfg.total_batch_size, *x.shape[2:])[
-                reorder_state.to_sim_idxs]
+            sim_ordering = x.reshape(
+                self._cfg.total_policy_batch_size, *x.shape[2:])[
+                    reorder_state.to_sim_idxs]
 
             return sim_ordering[self._sim_to_train_idxs]
 
@@ -596,15 +609,18 @@ class RolloutManager:
 
 
 def rollout_loop(
-    rollout_cfg: RolloutConfig,
     rollout_state: RolloutState,
     policy_states: PolicyState,
+    rollout_cfg: RolloutConfig,
     num_steps: int,
     post_inference_cb: Callable,
     post_step_cb: Callable,
     cb_state: Any,
     **policy_kwargs,
 ):
+    to_policy = rollout_state.to_policy
+    to_sim = rollout_state.to_sim
+
     def policy_fn(state, sample_key, rnn_states, obs):
         return state.apply_fn(
             {
@@ -619,8 +635,15 @@ def rollout_loop(
             method = 'rollout',
         )
 
-    policy_fn = jax.vmap(policy_fn)
     rnn_reset_fn = policy_states.rnn_reset_fn
+
+    def policy_inference(states, assignments, reorder_state,
+                         sample_keys, rnn_states, obs):
+        if rollout_cfg.has_matchmaking:
+            state_idxs = to_policy(assignments, reorder_state)[:, 0]
+            states = jax.tree_map(lambda x: x[state_idxs], states)
+
+        return jax.vmap(policy_fn)(states, sample_keys, rnn_states, obs)
 
     def rollout_iter(step_idx, iter_state):
         rollout_state, cb_state = iter_state
@@ -630,13 +653,11 @@ def rollout_loop(
         sim_data = rollout_state.sim_data
         reorder_state = rollout_state.reorder_state
         policy_assignments = rollout_state.policy_assignments
-        to_policy = rollout_state.to_policy
-        to_sim = rollout_state.to_sim
 
         with profile('Policy Inference'):
             prng_key, step_key = random.split(prng_key)
             step_keys = random.split(
-                step_key, rollout_cfg.total_num_policies)
+                step_key, rollout_cfg.num_policy_batches)
 
             policy_obs = convert_float_leaves(
                 sim_data['obs'], rollout_cfg.float_dtype)
@@ -644,8 +665,9 @@ def rollout_loop(
             rnn_states, policy_obs = to_policy(
                 (rnn_states, policy_obs), reorder_state)
 
-            policy_out, rnn_states = policy_fn(
-                policy_states, step_keys, rnn_states, policy_obs)
+            policy_out, rnn_states = policy_inference(
+                policy_states, policy_assignments, reorder_state,
+                step_keys, rnn_states, policy_obs)
 
             cb_state = post_inference_cb(
                 step_idx, policy_obs, policy_out, reorder_state, cb_state)
@@ -717,7 +739,7 @@ def _compute_num_train_agents_per_policy(rollout_cfg):
 
 
 def _compute_sim_to_train_indices(rollout_cfg):
-    global_indices = jnp.arange(rollout_cfg.total_batch_size)
+    global_indices = jnp.arange(rollout_cfg.sim_batch_size)
 
     def setup_match_indices(start, stop):
         return global_indices[start:stop].reshape(
@@ -780,7 +802,7 @@ def _past_play_matchmake(
     assign_rnd,
     rollout_cfg,
 ):
-    num_matches = rollout_cfg.num_cross_play_matches
+    num_matches = rollout_cfg.num_past_play_matches
     num_teams = rollout_cfg.num_teams
     team_size = rollout_cfg.team_size
     
@@ -842,7 +864,7 @@ def _init_matchmake_assignments(assign_rnd, rollout_cfg):
 
     policy_assignments = jnp.concatenate(sub_assignments, axis=0)
 
-    assert policy_assignments.shape[0] == rollout_cfg.total_batch_size
+    assert policy_assignments.shape[0] == rollout_cfg.sim_batch_size
     return policy_assignments
 
 
@@ -852,20 +874,22 @@ def _update_policy_assignments(
     assign_rnd,
     rollout_cfg,
 ):
+    cross_start = rollout_cfg.self_play_batch_size
+    cross_end = cross_start + rollout_cfg.cross_play_batch_size
+    
+    past_start = cross_end
+    past_end = past_start + rollout_cfg.past_play_batch_size
+
     if rollout_cfg.cross_play_batch_size > 0:
         assign_rnd, cross_rnd = random.split(assign_rnd)
 
-        cross_start = self_play_batch_size
-        cross_end = self_play_batch_size + cross_play_batch_size
         assignments = assignments.at[cross_start:cross_end].set(
             _cross_play_matchmake(assignments[cross_start:cross_end],
                 dones[cross_start:cross_end], cross_rnd, rollout_cfg))
 
-    if past_play_batch_size > 0:
+    if rollout_cfg.past_play_batch_size > 0:
         assign_rnd, past_rnd = random.split(assign_rnd)
 
-        past_start = self_play_batch_size + cross_play_batch_size 
-        past_end = past_start + past_play_batch_size
         assignments = assignments.at[past_start:past_end].set(
             _past_play_matchmake(assignments[past_start:past_end],
                 dones[past_start:past_end], past_rnd, rollout_cfg))
@@ -956,19 +980,10 @@ def _compute_reorder_state(
     rollout_cfg,
 ):
     policy_batch_size = rollout_cfg.policy_batch_size
-    assert assignments.shape[0] % policy_batch_size == 0
-
-
-    # Allocate enough chunks to evenly divide the full batch, plus
-    # num_policies - 1 extras to handle worst case usage from unused space
-    # in chunks
-    num_policy_batches = assignments.shape[0] // policy_batch_size
-    if rollout_cfg.has_matchmaking:
-        num_policy_batches += rollout_cfg.total_num_policies - 1
 
     to_policy_idxs, to_sim_idxs = _compute_reorder_chunks(
         assignments, rollout_cfg.total_num_policies, 
-        rollout_cfg.policy_batch_size, num_policy_batches)
+        rollout_cfg.policy_batch_size, rollout_cfg.num_policy_batches)
 
     return PolicyBatchReorderState(
         to_policy_idxs = to_policy_idxs,

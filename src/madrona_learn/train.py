@@ -50,10 +50,10 @@ def _pbt_update(
     pbt_rng, save_idx_rng, store_idx_rng = random.split(pbt_rng, 3)
 
     save_idx = random.randint(
-        save_idx_rng, 1, 0, cfg.pbt.num_train_policies)
+        save_idx_rng, (), 0, cfg.pbt.num_train_policies)
 
     store_idx = random.randint(
-        store_idx_rng, 1, cfg.pbt.num_train_policies,
+        store_idx_rng, (), cfg.pbt.num_train_policies,
         cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
 
     def save_param(x):
@@ -177,7 +177,7 @@ def _setup_rollout_cfg(dev_type, cfg):
     else:
         float_dtype = jnp.float32
 
-    total_batch_size = cfg.num_agents_per_world * cfg.num_worlds
+    sim_batch_size = cfg.num_agents_per_world * cfg.num_worlds
 
     if cfg.pbt != None:
         assert (cfg.pbt.num_teams * cfg.pbt.team_size ==
@@ -188,7 +188,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             num_past_policies = cfg.pbt.num_past_policies,
             num_teams = cfg.pbt.num_teams,
             team_size = cfg.pbt.team_size,
-            total_batch_size = total_batch_size,
+            sim_batch_size = sim_batch_size,
             self_play_portion = cfg.pbt.self_play_portion,
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
@@ -200,7 +200,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             num_past_policies = 0,
             num_teams = 1,
             team_size = cfg.num_agents_per_world,
-            total_batch_size = total_batch_size,
+            sim_batch_size = sim_batch_size,
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
@@ -236,7 +236,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
     # in or throws a memcpy error (presumably due to dlpack imports?)
     @jax.jit
     def init_rollout_state():
-        rnn_states = policy.init_recurrent_state(rollout_cfg.total_batch_size)
+        rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,

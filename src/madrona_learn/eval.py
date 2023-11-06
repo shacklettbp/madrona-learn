@@ -58,8 +58,8 @@ def _eval_ckpt_impl(
 
     num_policies = len(load_policies)
 
-    total_batch_size = init_sim_data['actions'].shape[0]
-    batch_size_per_policy = total_batch_size // num_policies
+    sim_batch_size = init_sim_data['actions'].shape[0]
+    batch_size_per_policy = sim_batch_size // num_policies
 
     policy_states = TrainStateManager.load_policies(policy, ckpt_path)
     policy_states = jax.tree_map(
@@ -68,9 +68,9 @@ def _eval_ckpt_impl(
     rollout_cfg = RolloutConfig.setup(
         num_current_policies = num_policies,
         num_past_policies = 0,
-        num_teams = 0,
-        team_size = 0,
-        total_batch_size = total_batch_size,
+        num_teams = 1, # FIXME
+        team_size = 1,
+        sim_batch_size = sim_batch_size,
         self_play_portion = 1.0,
         cross_play_portion = 0.0,
         past_play_portion = 0.0,
@@ -79,7 +79,7 @@ def _eval_ckpt_impl(
 
     @jax.jit
     def init_rollout_state():
-        rnn_states = policy.init_recurrent_state(total_batch_size)
+        rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
@@ -108,9 +108,8 @@ def _eval_ckpt_impl(
         return None
 
     rollout_loop_fn = partial(rollout_loop,
-        rollout_cfg = rollout_cfg,
         policy_states = policy_states,
-        num_policies = num_policies,
+        rollout_cfg = rollout_cfg,
         num_steps = num_eval_steps,
         post_inference_cb = post_policy_cb,
         post_step_cb = post_step_cb,
