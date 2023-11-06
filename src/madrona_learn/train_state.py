@@ -175,7 +175,7 @@ def _setup_policy_state(
     obs,
 ):
     # The second prng key is passed as the key for sampling
-    fake_outs, variables = policy.init_with_output(
+    (fake_outs, rnn_states), variables = policy.init_with_output(
         prng_key, random.PRNGKey(0), rnn_states, obs,
         method='rollout')
 
@@ -191,7 +191,7 @@ def _setup_policy_state(
         rnn_reset_fn = policy.clear_recurrent_state,
         params = params,
         batch_stats = batch_stats,
-    ), fake_outs
+    ), fake_outs, rnn_states
 
 def _setup_train_state(
     cfg,
@@ -254,7 +254,7 @@ def _make_policies(
 
     policy_init_rngs = random.split(policy_init_base_rng, num_make)
 
-    policy_states, fake_policy_outs = setup_policy_states(
+    policy_states, fake_policy_outs, rnn_states = setup_policy_states(
         policy_init_rngs, rnn_states, obs)
 
     setup_train_state = partial(_setup_train_state, cfg, algo)
@@ -264,11 +264,12 @@ def _make_policies(
     train_states = setup_train_states(
         train_init_rngs, policy_states, fake_policy_outs)
 
-    num_repeats = -(num_past_copies // -num_make)
+    if num_past_copies > 0:
+        num_repeats = -(num_past_copies // -num_make)
 
-    policy_states = jax.tree_map(
-        lambda x: jnp.tile(x, (num_repeats, *([1] * (len(x.shape) - 1))))[
-            0:num_make + num_past_copies],
-        policy_states)
+        policy_states = jax.tree_map(
+            lambda x: jnp.tile(x, (num_repeats, *([1] * (len(x.shape) - 1))))[
+                0:num_make + num_past_copies],
+            policy_states)
 
     return policy_states, train_states

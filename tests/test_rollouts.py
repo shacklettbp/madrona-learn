@@ -6,8 +6,57 @@ from jax.experimental import checkify
 from madrona_learn.rollouts import (
     RolloutConfig,
     _init_matchmake_assignments,
+    _compute_reorder_chunks,
     _compute_reorder_state,
 )
+
+def check_reorder_chunks(arr, P, C):
+    B = arr.size // C + P - 1
+
+    @jax.jit
+    def reorder(arr):
+        return _compute_reorder_chunks(arr, P, C, B)
+
+    to_policy_idxs, to_sim_idxs = reorder(arr)
+
+    policy_batches = jnp.take(
+        arr, to_policy_idxs, mode='fill', fill_value=-1)
+
+    assert jnp.sum(jnp.where(policy_batches != -1, 1, 0))
+    arr_reconstructed = jnp.take(
+        policy_batches.reshape(-1), to_sim_idxs, 0)
+
+    #print(arr)
+    #print(arr_reconstructed)
+    #print(policy_batches)
+
+    assert jnp.all(jnp.equal(arr, arr_reconstructed))
+
+def test_reorder_chunks1():
+    P = 6
+    C = 4
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 5, 3, 2, 1, 0, 3, 3])
+    check_reorder_chunks(arr, P, C)
+
+def test_reorder_chunks2():
+    P = 6
+    C = 4
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 5, 2, 1, 0, 3])
+    check_reorder_chunks(arr, P, C)
+
+def test_reorder_chunks3():
+    P = 6
+    C = 4
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 3, 2, 1, 0, 3])
+    check_reorder_chunks(arr, P, C)
+
+def test_reorder_chunks4():
+    P = 6
+    C = 4
+    arr = jnp.array([0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5])
+    arr = random.permutation(random.PRNGKey(5), arr, independent=True)
+    check_reorder_chunks(arr, P, C)
+
 
 def check_reorder(
     arr,
@@ -47,30 +96,10 @@ def check_reorder(
 
     assert jnp.all(jnp.equal(arr, arr_reconstructed))
 
-
 def test_reorder1():
     P = 6
     C = 4
     arr = jnp.array([1, 1, 0, 0, 2, 2, 5, 3, 2, 1, 0, 3])
-    check_reorder(arr, P, 0, C)
-
-def test_reorder2():
-    P = 6
-    C = 4
-    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 5, 2, 1, 0, 3])
-    check_reorder(arr, P, 0, C)
-
-def test_reorder3():
-    P = 6
-    C = 4
-    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 3, 2, 1, 0, 3])
-    check_reorder(arr, P, 0, C)
-
-def test_reorder4():
-    P = 6
-    C = 4
-    arr = jnp.array([0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5])
-    arr = random.permutation(random.PRNGKey(5), arr, independent=True)
     check_reorder(arr, P, 0, C)
 
 
@@ -133,10 +162,10 @@ def test_init_matchmake2():
     print(matchmake[:4])
     print(matchmake[4:])
 
-test_reorder1()
-test_reorder2()
-test_reorder3()
-test_reorder4()
+test_reorder_chunks1()
+test_reorder_chunks2()
+test_reorder_chunks3()
+test_reorder_chunks4()
 
 #test_init_matchmake1()
 test_init_matchmake2()

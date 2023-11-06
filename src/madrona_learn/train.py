@@ -132,6 +132,7 @@ def _update_loop(
             train_state_mgr = TrainStateManager(
                 policy_states = policy_states,
                 train_states = updated_train_states,
+                pbt_rng = train_state_mgr.pbt_rng,
             )
             
         #update_end_time = time()
@@ -169,17 +170,18 @@ def _update_loop(
 
 def _setup_rollout_cfg(dev_type, cfg):
     if cfg.mixed_precision:
-        if dev.platform == 'gpu':
+        if dev_type == 'gpu':
             float_dtype = jnp.float16
         else:
             float_dtype = jnp.bfloat16
     else:
         float_dtype = jnp.float32
 
-    total_batch_size = cfg.agents_per_world * cfg.num_worlds
+    total_batch_size = cfg.num_agents_per_world * cfg.num_worlds
 
     if cfg.pbt != None:
-        assert cfg.pbt.num_teams * cfg.pbt.team_size == cfg.agents_per_world
+        assert (cfg.pbt.num_teams * cfg.pbt.team_size ==
+                cfg.num_agents_per_world)
 
         return RolloutConfig.setup(
             num_current_policies = cfg.pbt.num_train_policies,
@@ -197,7 +199,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             num_current_policies = 1,
             num_past_policies = 0,
             num_teams = 1,
-            team_size = cfg.agents_per_world,
+            team_size = cfg.num_agents_per_world,
             total_batch_size = total_batch_size,
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
@@ -226,29 +228,31 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
 
     init_sim_data = frozen_dict.freeze(init_sim_data)
 
-    rollout_rnd, init_rnd = random.split(random.PRNGKey(cfg.seed))
+    rollout_rng, init_rng = random.split(random.PRNGKey(cfg.seed))
 
     rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
+    # For some reason init_sim_data needs to be captured, can't be passed
+    # in or throws a memcpy error (presumably due to dlpack imports?)
     @jax.jit
-    def init_rollout_state(init_sim_data):
+    def init_rollout_state():
         rnn_states = policy.init_recurrent_state(rollout_cfg.total_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
             step_fn = sim_step,
-            prng_key = rollout_rnd,
+            prng_key = rollout_rng,
             rnn_states = rnn_states,
             init_sim_data = init_sim_data,
         )
 
-    rollout_state = init_rollout_state(init_sim_data)
+    rollout_state = init_rollout_state()
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
         cfg = cfg,
         algo = algo,
-        base_init_rng = init_rnd,
+        base_rng = init_rng,
         example_obs = rollout_state.sim_data['obs'],
         example_rnn_states = rollout_state.rnn_states,
         checkify_errors = checkify_errors,

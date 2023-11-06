@@ -78,7 +78,7 @@ def _eval_ckpt_impl(
     )
 
     @jax.jit
-    def init_rollout_state(init_sim_data):
+    def init_rollout_state():
         rnn_states = policy.init_recurrent_state(total_batch_size)
 
         return RolloutState.create(
@@ -89,12 +89,15 @@ def _eval_ckpt_impl(
             init_sim_data = init_sim_data,
         )
 
-    def post_policy_cb(step_idx, policy_obs, policy_out, cb_state):
+    rollout_state = init_rollout_state()
+
+    def post_policy_cb(step_idx, policy_obs, policy_out,
+                       reorder_state, cb_state):
         return policy_out.copy({
             'obs': policy_obs,
         })
 
-    def post_step_cb(step_idx, dones, rewards, cb_state):
+    def post_step_cb(step_idx, dones, rewards, reorder_state, cb_state):
         step_data = cb_state.copy({
             'dones': dones,
             'rewards': rewards,
