@@ -69,6 +69,7 @@ class RolloutConfig:
 
         assert num_cross_play_matches % num_current_policies == 0
         assert num_past_play_matches % num_current_policies == 0
+        
 
         if self_play_portion != 1.0:
             assert num_teams > 1
@@ -173,9 +174,7 @@ class RolloutState(flax.struct.PyTreeNode):
 
             reorder_state = _compute_reorder_state(
                 policy_assignments,
-                rollout_cfg.total_num_policies,
-                rollout_cfg.policy_batch_size,
-                rollout_cfg.num_policy_batches,
+                rollout_cfg,
             )
         else:
             def to_policy(args, reorder_state):
@@ -388,7 +387,7 @@ class RolloutManager:
 
             with profile("Cache RNN state"):
                 rollout_store = rollout_store.save(bptt_chunk, {
-                    'rnn_start_states': self._slice_train_policy_data(
+                    'rnn_start_states': self._sim_to_train(
                         rollout_state.rnn_states),
                 })
 
@@ -421,8 +420,11 @@ class RolloutManager:
 
         return rollout_state, rollout_data, metrics
 
-    def _slice_train_policy_data(self, data):
-        return jax.tree_map(lambda x: x[0:self._num_train_policies], data)
+    def _sim_to_train(self, data, reorder_state):
+        pass
+
+    def _policy_to_train(self, data, reorder_state):
+        pass
 
     def _invert_value_normalization(self, train_states, values):
         @jax.vmap
@@ -437,17 +439,16 @@ class RolloutManager:
         return invert_vn(train_states, values)
 
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
-        prep_for_policy = _make_pbt_reorder_funcs(
-            rollout_state.reorder_idxs != None, self._num_policy_batches)[0]
-
         rnn_states = rollout_state.rnn_states
         obs = rollout_state.sim_data['obs']
 
         obs = convert_float_leaves(obs, self._float_dtype)
-        obs = prep_for_policy(obs, rollout_state.reorder_idxs)
 
-        rnn_states, obs = self._slice_train_policy_data((rnn_states, obs))
-        policy_states = self._slice_train_policy_data(policy_states)
+        rnn_states, obs = self._sim_to_train(
+            (rnn_states, obs), rollout_state.reorder_state)
+
+        policy_states = jax.tree_map(
+            lambda x: x[0:self._num_train_policies], data)
 
         @jax.vmap
         def critic_fn(state, rnn_states, obs):
@@ -467,6 +468,47 @@ class RolloutManager:
         values = critic_fn(policy_states, rnn_states, obs)
 
         return self._invert_value_normalization(train_states, values)
+
+    def _post_inference_cb(
+        self,
+        train_states: PolicyTrainState,
+        bptt_chunk: int,
+        bptt_step: int,
+        policy_obs: FrozenDict[str, Any],
+        policy_out: FrozenDict[str, Any],
+        rollout_store: RolloutStore,
+    ):
+        with profile('Pre Step Rollout Store'):
+            values = self._policy_to_train(policy_out['values'])
+            values = self._invert_value_normalization(train_states, values)
+
+            obs, actions, log_probs = self._policy_to_train(
+                (policy_obs, policy_out['actions'], policy_out['log_probs']))
+
+            save_data = {
+                'obs': obs,
+                'actions': actions,
+                'log_probs': log_probs,
+                'values': values,
+            }
+
+            return rollout_store.save((bptt_chunk, bptt_step), save_data)
+
+    def _post_step_cb(
+        self,
+        bptt_chunk: int,
+        bptt_step: int,
+        dones: jax.Array,
+        rewards: jax.Array,
+        rollout_store: RolloutStore,
+    ):
+        with profile('Post Step Rollout Store'):
+            save_data = self._policy_to_train({
+                'dones': dones,
+                'rewards': rewards,
+            })
+            return rollout_store.save(
+                (bptt_chunk, bptt_step), save_data)
 
     def _finalize_rollouts(self, rollouts, metrics):
         rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
@@ -526,47 +568,6 @@ class RolloutManager:
             num_train_seqs_per_policy = self._num_train_seqs_per_policy,
             num_train_policies = self._num_train_policies,
         ), metrics
-
-    def _post_inference_cb(
-        self,
-        train_states: PolicyTrainState,
-        bptt_chunk: int,
-        bptt_step: int,
-        policy_obs: FrozenDict[str, Any],
-        policy_out: FrozenDict[str, Any],
-        rollout_store: RolloutStore,
-    ):
-        with profile('Pre Step Rollout Store'):
-            values = self._slice_train_policy_data(policy_out['values'])
-            values = self._invert_value_normalization(train_states, values)
-
-            obs, actions, log_probs = self._slice_train_policy_data(
-                (policy_obs, policy_out['actions'], policy_out['log_probs']))
-
-            save_data = {
-                'obs': obs,
-                'actions': actions,
-                'log_probs': log_probs,
-                'values': values,
-            }
-
-            return rollout_store.save((bptt_chunk, bptt_step), save_data)
-
-    def _post_step_cb(
-        self,
-        bptt_chunk: int,
-        bptt_step: int,
-        dones: jax.Array,
-        rewards: jax.Array,
-        rollout_store: RolloutStore,
-    ):
-        with profile('Post Step Rollout Store'):
-            save_data = self._slice_train_policy_data({
-                'dones': dones,
-                'rewards': rewards,
-            })
-            return rollout_store.save(
-                (bptt_chunk, bptt_step), save_data)
 
 
 def rollout_loop(
@@ -658,9 +659,7 @@ def rollout_loop(
 
                 reorder_state = _compute_reorder_state(
                     policy_assignments,
-                    rollout_cfg.total_num_policies,
-                    rollout_cfg.policy_batch_size,
-                    rollout_cfg.num_policy_batches,
+                    rollout_cfg,
                 )
 
             cb_state = post_step_cb(step_idx, dones, rewards, cb_state)
@@ -822,32 +821,34 @@ def _update_policy_assignments(
 
 def _compute_reorder_state(
     assignments,
-    num_policies,
-    policy_batch_size,
-    num_policy_batches,
+    rollout_cfg,
 ):
-    C = policy_batch_size
-    B = num_policy_batches
+    assert assignments.ndim == 1
+
+    P = rollout_cfg.total_num_policies
+    C = rollout_cfg.policy_batch_size
+    B = rollout_cfg.num_policy_batches
 
     sort_idxs = jnp.argsort(assignments)
-    sorted_assignments = jnp.take_along_axis(assignments, sort_idxs, 0)
+    sorted_assignments = assignments.at[sort_idxs].get(unique_indices=True)
 
     ne_mask = jnp.ones(assignments.shape[0], dtype=jnp.bool_).at[1:].set(
         lax.ne(sorted_assignments[1:], sorted_assignments[:-1]))
     transitions = jnp.nonzero(
-        ne_mask, size=num_policies + 1, fill_value=assignments.size)[0]
+        ne_mask, size=P + 1, fill_value=assignments.size)[0]
     transitions_diff = jnp.diff(transitions)
     transitions = transitions[:-1]
 
     # Need to scatter here to handle the case where there are 0 instances
-    # of certain values
+    # of certain values. Care is needed here since transitions will
+    # contain out of bounds indices in this case.
     transition_assignments = sorted_assignments.at[transitions].get(
-        mode='fill', indices_are_sorted=True, fill_value=num_policies)
-    assignment_starts = jnp.zeros(num_policies, dtype=jnp.int32).at[
+        mode='fill', indices_are_sorted=True, fill_value=P)
+    assignment_starts = jnp.full(P, assignments.size, dtype=jnp.int32).at[
         transition_assignments].set(transitions, mode='drop')
-    assignment_counts = jnp.zeros(num_policies, dtype=jnp.int32).at[
+    assignment_counts = jnp.zeros(P, dtype=jnp.int32).at[
         transition_assignments].set(transitions_diff, mode='drop')
-    
+
     num_full_chunks, partial_sizes = jnp.divmod(assignment_counts, C)
 
     # Compute each item's offset from the start of items in its class
@@ -873,7 +874,7 @@ def _compute_reorder_state(
 
     # Compute scatter indices for items in partial chunks
     partial_chunk_starts = (
-        partial_base + C * jnp.arange(num_policies) - full_chunk_counts)
+        partial_base + C * jnp.arange(P) - full_chunk_counts)
 
     # Alternatively, if partial chunks need to be compacted
     # to the beginning, do the following prefix sum over occupied chunks.

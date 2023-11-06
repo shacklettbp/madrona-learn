@@ -9,12 +9,28 @@ from madrona_learn.rollouts import (
     _compute_reorder_state,
 )
 
-def check_reorder(arr, M, C):
-    num_chunks = arr.size // C + M - 1
+def check_reorder(
+    arr,
+    num_current_policies,
+    num_past_policies,
+    policy_batch_size_override,
+):
+    rollout_cfg = RolloutConfig.setup(
+        num_current_policies = num_current_policies,
+        num_past_policies = num_past_policies,
+        num_teams = 2,
+        team_size = 1,
+        total_batch_size = arr.size,
+        self_play_portion = 0.0,
+        cross_play_portion = 1.0,
+        past_play_portion = 0.0,
+        float_dtype = jnp.float16,
+        policy_batch_size_override = policy_batch_size_override,
+    )
 
     @jax.jit
     def reorder(arr):
-        return _compute_reorder_state(arr, M, C, num_chunks)
+        return _compute_reorder_state(arr, rollout_cfg)
 
     reorder_state = reorder(arr)
 
@@ -26,35 +42,36 @@ def check_reorder(arr, M, C):
         policy_batches.reshape(-1), reorder_state.to_sim_idxs, 0)
 
     #print(arr)
+    #print(arr_reconstructed)
     #print(policy_batches)
 
     assert jnp.all(jnp.equal(arr, arr_reconstructed))
 
 
 def test_reorder1():
-    M = 6
+    P = 6
     C = 4
-    arr = jnp.array([1, 1, 0, 0, 2, 2, 5, 3, 3])
-    check_reorder(arr, M, C)
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 5, 3, 2, 1, 0, 3])
+    check_reorder(arr, P, 0, C)
 
 def test_reorder2():
-    M = 6
+    P = 6
     C = 4
-    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 5, 3, 3])
-    check_reorder(arr, M, C)
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 5, 2, 1, 0, 3])
+    check_reorder(arr, P, 0, C)
 
 def test_reorder3():
-    M = 6
+    P = 6
     C = 4
-    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 3, 3, 3])
-    check_reorder(arr, M, C)
+    arr = jnp.array([1, 1, 0, 0, 2, 2, 4, 3, 2, 1, 0, 3])
+    check_reorder(arr, P, 0, C)
 
 def test_reorder4():
-    M = 6
+    P = 6
     C = 4
-    arr = jnp.array([0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5])
+    arr = jnp.array([0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5])
     arr = random.permutation(random.PRNGKey(5), arr, independent=True)
-    check_reorder(arr, M, C)
+    check_reorder(arr, P, 0, C)
 
 
 def setup_init_matchmake(
@@ -116,10 +133,10 @@ def test_init_matchmake2():
     print(matchmake[:4])
     print(matchmake[4:])
 
-#test_reorder1()
-#test_reorder2()
-#test_reorder3()
-#test_reorder4()
+test_reorder1()
+test_reorder2()
+test_reorder3()
+test_reorder4()
 
 #test_init_matchmake1()
 test_init_matchmake2()
