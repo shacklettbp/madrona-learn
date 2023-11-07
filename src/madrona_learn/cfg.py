@@ -24,7 +24,7 @@ class PBTConfig:
     cross_play_portion: float
     past_play_portion: float
     # Purely a speed / memory parameter
-    rollout_policy_batch_size_override: int = 0
+    rollout_policy_chunk_size_override: int = 0
 
 
 @dataclass(frozen=True)

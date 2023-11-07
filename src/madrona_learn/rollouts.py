@@ -25,8 +25,8 @@ class RolloutConfig:
     num_teams: int
     team_size: int
     sim_batch_size: int
-    policy_batch_size: int
-    num_policy_batches: int
+    policy_chunk_size: int
+    num_policy_chunks: int
     total_policy_batch_size: int
     self_play_batch_size: int
     cross_play_batch_size: int
@@ -47,7 +47,7 @@ class RolloutConfig:
         cross_play_portion: float,
         past_play_portion: float,
         float_dtype: jnp.dtype,
-        policy_batch_size_override: int = 0,
+        policy_chunk_size_override: int = 0,
     ):
         total_num_policies = num_current_policies + num_past_policies
 
@@ -78,39 +78,39 @@ class RolloutConfig:
             assert num_teams > 1
             assert num_current_policies > 1 or num_past_policies > 0
 
-            min_policy_batch_size = min(
+            min_policy_chunk_size = min(
                 self_play_batch_size // num_current_policies,
                 cross_play_batch_size // num_current_policies)
 
             if past_play_batch_size > 0:
                 # FIXME: this doesn't make much sense, think more
                 # about auto-picking policy batch size
-                min_policy_batch_size = min(min_policy_batch_size,
+                min_policy_chunk_size = min(min_policy_chunk_size,
                     past_play_batch_size // num_past_policies)
 
             # Round to nearest power of 2
-            policy_batch_size = 1 << ((min_policy_batch_size - 1).bit_length())
-            policy_batch_size = max(
-                policy_batch_size, min(64, sim_batch_size))
+            policy_chunk_size = 1 << ((min_policy_chunk_size - 1).bit_length())
+            policy_chunk_size = max(
+                policy_chunk_size, min(64, sim_batch_size))
         else:
             assert num_past_policies == 0
 
-            min_policy_batch_size = 0
-            policy_batch_size = sim_batch_size // num_current_policies
+            min_policy_chunk_size = 0
+            policy_chunk_size = sim_batch_size // num_current_policies
 
-        if policy_batch_size_override != 0:
-            assert policy_batch_size_override > min_policy_batch_size
-            policy_batch_size = policy_batch_size_override
+        if policy_chunk_size_override != 0:
+            assert policy_chunk_size_override > min_policy_chunk_size
+            policy_chunk_size = policy_chunk_size_override
 
-        assert sim_batch_size % policy_batch_size == 0
+        assert sim_batch_size % policy_chunk_size == 0
         # Allocate enough policy sub-batches to evenly divide the full batch,
         # plus num_policies - 1 extras to handle worst case usage from unused
         # space in each subbatch
-        num_policy_batches = sim_batch_size // policy_batch_size
+        num_policy_chunks = sim_batch_size // policy_chunk_size
         if has_matchmaking:
-            num_policy_batches += total_num_policies - 1
+            num_policy_chunks += total_num_policies - 1
 
-        total_policy_batch_size = num_policy_batches * policy_batch_size
+        total_policy_batch_size = num_policy_chunks * policy_chunk_size
 
         return RolloutConfig(
             num_current_policies = num_current_policies,
@@ -119,8 +119,8 @@ class RolloutConfig:
             num_teams = num_teams,
             team_size = team_size,
             sim_batch_size = sim_batch_size,
-            policy_batch_size = policy_batch_size,
-            num_policy_batches = num_policy_batches,
+            policy_chunk_size = policy_chunk_size,
+            num_policy_chunks = num_policy_chunks,
             total_policy_batch_size = total_policy_batch_size,
             self_play_batch_size = self_play_batch_size,
             cross_play_batch_size = cross_play_batch_size,
@@ -619,6 +619,7 @@ def rollout_loop(
     def policy_inference(states, assignments, reorder_state,
                          sample_keys, rnn_states, obs):
         if rollout_cfg.has_matchmaking:
+            # FIXME: more efficient way to get this?
             state_idxs = reorder_state.to_policy(assignments)[:, 0]
             states = jax.tree_map(lambda x: x[state_idxs], states)
 
@@ -636,7 +637,7 @@ def rollout_loop(
         with profile('Policy Inference'):
             prng_key, step_key = random.split(prng_key)
             step_keys = random.split(
-                step_key, rollout_cfg.num_policy_batches)
+                step_key, rollout_cfg.num_policy_chunks)
 
             policy_obs = convert_float_leaves(
                 sim_data['obs'], rollout_cfg.float_dtype)
@@ -961,7 +962,7 @@ def _compute_reorder_state(
     if rollout_cfg.has_matchmaking:
         to_policy_idxs, to_sim_idxs = _compute_reorder_chunks(
             assignments, rollout_cfg.total_num_policies, 
-            rollout_cfg.policy_batch_size, rollout_cfg.num_policy_batches)
+            rollout_cfg.policy_chunk_size, rollout_cfg.num_policy_chunks)
     else:
         to_policy_idxs = None
         to_sim_idxs = None
@@ -970,7 +971,7 @@ def _compute_reorder_state(
         to_policy_idxs = to_policy_idxs,
         to_sim_idxs = to_sim_idxs,
         policy_dims = (
-            rollout_cfg.total_num_policies, rollout_cfg.policy_batch_size),
+            rollout_cfg.total_num_policies, rollout_cfg.policy_chunk_size),
         sim_dims = (rollout_cfg.sim_batch_size,),
     )
 
@@ -986,20 +987,20 @@ def _update_reorder_state(
         return reorder_state
 
     assert assignments.ndim == 1
-    policy_batch_size = rollout_cfg.policy_batch_size
+    policy_chunk_size = rollout_cfg.policy_chunk_size
     num_policies = rollout_cfg.total_num_policies
 
     reorder_assigns = assignments[rollout_cfg.self_play_batch_size:]
     num_reorder_matches = (rollout_cfg.num_cross_play_matches +
         rollout_cfg.num_past_play_matches)
 
-    assert matchmake_assigns.shape[0] % policy_batch_size == 0
+    assert matchmake_assigns.shape[0] % policy_chunk_size == 0
 
     # Allocate enough matchmake batches to evenly divide the non-self play
     # matches, plus num policies - 1 extras to handle worst case usage
     # from unused space in chunks
     num_matchmake_batches = (
-        matchmake_assigns.shape[0] // policy_batch_size + num_policies - 1)
+        matchmake_assigns.shape[0] // policy_chunk_size + num_policies - 1)
 
     non_self_play_assigns = non_self_play_assigns.reshape(
         num_matchmake_matches, rollout_cfg.num_teams, rollout_cfg.team_size)
@@ -1009,7 +1010,7 @@ def _update_reorder_state(
 
     reorder_policy_idxs, reorder_sim_idxs = _compute_reorder_chunks(
         reorder_assigns.reshape(-1), num_policies,
-        policy_batch_size, num_reorder_batches)
+        policy_chunk_size, num_reorder_batches)
 
     to_policy_idxs = reorder_state.to_policy_idxs.at[
         rollout_cfg.num_static_policy_batches:].set(reorder_policy_idxs)

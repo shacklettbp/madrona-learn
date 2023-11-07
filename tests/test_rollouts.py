@@ -2,8 +2,10 @@ import jax
 import jax.numpy as jnp
 from jax import lax, random
 from jax.experimental import checkify
+import flax
 
 from madrona_learn.rollouts import (
+    ActorCritic,
     RolloutConfig,
     _init_matchmake_assignments,
     _compute_reorder_chunks,
@@ -62,7 +64,7 @@ def check_reorder(
     arr,
     num_current_policies,
     num_past_policies,
-    policy_batch_size_override,
+    policy_chunk_size_override,
 ):
     rollout_cfg = RolloutConfig.setup(
         num_current_policies = num_current_policies,
@@ -74,7 +76,7 @@ def check_reorder(
         cross_play_portion = 1.0,
         past_play_portion = 0.0,
         float_dtype = jnp.float16,
-        policy_batch_size_override = policy_batch_size_override,
+        policy_chunk_size_override = policy_chunk_size_override,
     )
 
     @jax.jit
@@ -112,7 +114,7 @@ def setup_init_matchmake(
     self_play,
     cross_play,
     past_play,
-    policy_batch_size_override = 0
+    policy_chunk_size_override = 0
 ): 
     rollout_cfg = RolloutConfig.setup(
         num_current_policies = num_current_policies,
@@ -124,7 +126,7 @@ def setup_init_matchmake(
         cross_play_portion = cross_play,
         past_play_portion = past_play,
         float_dtype = jnp.float16,
-        policy_batch_size_override = policy_batch_size_override,
+        policy_chunk_size_override = policy_chunk_size_override,
     )
 
     @jax.jit
@@ -162,6 +164,79 @@ def test_init_matchmake2():
     print(matchmake[:4])
     print(matchmake[4:])
 
+
+def check_end_to_end(
+    num_current_policies,
+    num_past_policies,
+    num_teams,
+    team_size,
+    batch_size,
+    self_play,
+    cross_play,
+    past_play,
+    policy_chunk_size_override = 0,
+):
+    rollout_cfg = RolloutConfig.setup(
+        num_current_policies = num_current_policies,
+        num_past_policies = num_past_policies,
+        num_teams = num_teams,
+        team_size = team_size,
+        total_batch_size = batch_size,
+        self_play_portion = self_play,
+        cross_play_portion = cross_play,
+        past_play_portion = past_play,
+        float_dtype = jnp.float16,
+        policy_chunk_size_override = policy_chunk_size_override,
+    )
+
+    def fake_backbone():
+        pass
+
+    def fake_actor():
+        pass
+
+    def fake_critic():
+        pass
+
+    fake_sim_data = 0
+
+    def fake_sim(sim_data):
+        return sim_data
+
+    fake_ac = ActorCritic(
+        backbone = fake_backbone(),
+        actor = fake_actor(),
+        critic = fake_critic(),
+    )
+
+    @jax.jit
+    def init_rollout_state():
+        fake_rnn_states = fake_ac.init_recurrent_state(
+            rollout_cfg.sim_batch_size)
+
+        return RolloutState.create(
+            rollout_cfg = rollout_cfg,
+            step_fn = fake_sim,
+            prng_key = random.PRNGKey(0),
+            rnn_states = fake_rnn_states,
+            init_sim_data = fake_sim_data,
+        )
+
+    rollout_state = init_rollout_state()
+
+
+def test_end_to_end1():
+    check_end_to_end(
+        num_current_policies = 4,
+        num_past_policies = 3,
+        num_teams = 2,
+        team_size = 2,
+        batch_size = 32,
+        self_play = 0.0,
+        cross_play = 0.5,
+        past_play = 0.5,
+    )
+
 test_reorder_chunks1()
 test_reorder_chunks2()
 test_reorder_chunks3()
@@ -169,3 +244,5 @@ test_reorder_chunks4()
 
 #test_init_matchmake1()
 test_init_matchmake2()
+
+test_end_to_end1()

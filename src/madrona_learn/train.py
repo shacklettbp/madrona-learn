@@ -193,6 +193,8 @@ def _setup_rollout_cfg(dev_type, cfg):
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
             float_dtype = float_dtype,
+            policy_chunk_size_override = \
+                cfg.pbt.rollout_policy_chunk_size_override,
         )
     else:
         return RolloutConfig.setup(
