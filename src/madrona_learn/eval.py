@@ -93,9 +93,9 @@ def _eval_ckpt_impl(
 
     def post_policy_cb(step_idx, policy_obs, policy_out,
                        reorder_state, cb_state):
-        return policy_out.copy({
+        return reorder_state.to_sim(policy_out.copy({
             'obs': policy_obs,
-        })
+        }))
 
     def post_step_cb(step_idx, dones, rewards, reorder_state, cb_state):
         step_data = cb_state.copy({

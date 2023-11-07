@@ -5,7 +5,7 @@ from flax import linen as nn
 from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Any
+from typing import List, Tuple, Optional, Callable, Any
 from functools import partial
 import itertools
 
@@ -133,8 +133,30 @@ class RolloutConfig:
 
 
 class PolicyBatchReorderState(flax.struct.PyTreeNode):
-    to_policy_idxs: jax.Array
-    to_sim_idxs: jax.Array
+    to_policy_idxs: Optional[jax.Array]
+    to_sim_idxs: Optional[jax.Array]
+    policy_dims: Tuple[int] = flax.struct.field(pytree_node=False)
+    sim_dims: Tuple[int] = flax.struct.field(pytree_node=False)
+
+    def to_policy(self, data):
+        def txfm(x):
+            if self.to_policy_idxs == None:
+                return x.reshape(*self.policy_dims, *x.shape[1:])
+            else:
+                return x[self.to_policy_idxs]
+
+        return jax.tree_map(txfm, data)
+
+    def to_sim(self, data):
+        def txfm(x):
+            if self.to_sim_idxs == None:
+                return x.reshape(*self.sim_dims, *x.shape[2:])
+            else:
+                return x.reshape(self.to_policy_idxs.shape[0] *
+                        self.to_policy_idxs.shape[1],
+                    *x.shape[2:])[self.to_sim_idxs]
+
+        return jax.tree_map(txfm, data)
 
 
 class RolloutState(flax.struct.PyTreeNode):
@@ -142,10 +164,8 @@ class RolloutState(flax.struct.PyTreeNode):
     prng_key: random.PRNGKey
     rnn_states: Any
     sim_data: FrozenDict
-    reorder_state: Optional[PolicyBatchReorderState]
+    reorder_state: PolicyBatchReorderState
     policy_assignments: Optional[jax.Array]
-    to_policy: Callable = flax.struct.field(pytree_node=False)
-    to_sim: Callable = flax.struct.field(pytree_node=False)
 
     @staticmethod
     def create(
@@ -166,38 +186,7 @@ class RolloutState(flax.struct.PyTreeNode):
         else:
             policy_assignments = None
 
-        if policy_assignments != None:
-            def to_policy(args, reorder_state):
-                return jax.tree_map(
-                    lambda x: jnp.take(x, reorder_state.to_policy_idxs, 0),
-                    args,
-                )
-
-            def to_sim(args, reorder_state):
-                args = jax.tree_map(lambda x: x.reshape(
-                    rollout_cfg.total_policy_batch_size, *x.shape[2:]), args)
-                return jax.tree_map(
-                    lambda x: jnp.take(x, reorder_state.to_sim_idxs, 0),
-                    args,
-                )
-
-            reorder_state = _compute_reorder_state(
-                policy_assignments,
-                rollout_cfg,
-            )
-        else:
-            def to_policy(args, reorder_state):
-                assert reorder_state == None
-                return jax.tree_map(lambda x: x.reshape(
-                    rollout_cfg.total_num_policies,
-                    rollout_cfg.policy_batch_size, *x.shape[1:]), args)
-
-            def to_sim(args, reorder_state):
-                assert reorder_state == None
-                return jax.tree_map(lambda x: x.reshape(
-                    rollout_cfg.total_policy_batch_size, *x.shape[2:]), args)
-
-            reorder_state = None
+        reorder_state = _compute_reorder_state(policy_assignments, rollout_cfg)
 
         sim_data = jax.tree_map(jnp.copy, init_sim_data)
 
@@ -209,8 +198,6 @@ class RolloutState(flax.struct.PyTreeNode):
             reorder_state = reorder_state,
             policy_assignments = (policy_assignments
                 if 'policy_assignments' not in init_sim_data else None),
-            to_policy = to_policy,
-            to_sim = to_sim,
         )
 
     def update(
@@ -231,8 +218,6 @@ class RolloutState(flax.struct.PyTreeNode):
             policy_assignments = (
                 policy_assignments if policy_assignments != None else
                     self.policy_assignments),
-            to_policy = self.to_policy,
-            to_sim = self.to_sim,
         )
 
 
@@ -453,10 +438,7 @@ class RolloutManager:
         
         def to_train(x):
             # FIXME
-            sim_ordering = x.reshape(
-                self._cfg.total_policy_batch_size, *x.shape[2:])[
-                    reorder_state.to_sim_idxs]
-
+            sim_ordering = reorder_state.to_sim(x)
             return sim_ordering[self._sim_to_train_idxs]
 
         return jax.tree_map(to_train, data)
@@ -476,11 +458,11 @@ class RolloutManager:
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
         rnn_states = rollout_state.rnn_states
         obs = rollout_state.sim_data['obs']
+        reorder_state = rollout_state.reorder_state
 
         obs = convert_float_leaves(obs, self._cfg.float_dtype)
 
-        rnn_states, obs = self._sim_to_train(
-            (rnn_states, obs), rollout_state.reorder_state)
+        rnn_states, obs = self._sim_to_train((rnn_states, obs), reorder_state)
 
         policy_states = jax.tree_map(
             lambda x: x[0:self._num_train_policies], policy_states)
@@ -618,9 +600,6 @@ def rollout_loop(
     cb_state: Any,
     **policy_kwargs,
 ):
-    to_policy = rollout_state.to_policy
-    to_sim = rollout_state.to_sim
-
     def policy_fn(state, sample_key, rnn_states, obs):
         return state.apply_fn(
             {
@@ -640,7 +619,7 @@ def rollout_loop(
     def policy_inference(states, assignments, reorder_state,
                          sample_keys, rnn_states, obs):
         if rollout_cfg.has_matchmaking:
-            state_idxs = to_policy(assignments, reorder_state)[:, 0]
+            state_idxs = reorder_state.to_policy(assignments)[:, 0]
             states = jax.tree_map(lambda x: x[state_idxs], states)
 
         return jax.vmap(policy_fn)(states, sample_keys, rnn_states, obs)
@@ -662,8 +641,8 @@ def rollout_loop(
             policy_obs = convert_float_leaves(
                 sim_data['obs'], rollout_cfg.float_dtype)
 
-            rnn_states, policy_obs = to_policy(
-                (rnn_states, policy_obs), reorder_state)
+            rnn_states, policy_obs = reorder_state.to_policy(
+                (rnn_states, policy_obs))
 
             policy_out, rnn_states = policy_inference(
                 policy_states, policy_assignments, reorder_state,
@@ -675,11 +654,11 @@ def rollout_loop(
             # rnn_states are kept across the loop in sim ordering,
             # because the ordering is stable, unlike policy batches that 
             # can shift when assignments change
-            rnn_states = to_sim(rnn_states, reorder_state)
+            rnn_states = reorder_state.to_sim(rnn_states)
 
         with profile('Rollout Step'):
             sim_data = sim_data.copy({
-                'actions': to_sim(policy_out['actions'], reorder_state),
+                'actions': reorder_state.to_sim(policy_out['actions']),
             })
 
             sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
@@ -687,10 +666,10 @@ def rollout_loop(
             dones = sim_data['dones'].astype(jnp.bool_)
             rewards = sim_data['rewards'].astype(rollout_cfg.float_dtype)
 
-            # rnn states kept in sim ordering
+            # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
 
-            if reorder_state != None:
+            if rollout_cfg.has_matchmaking:
                 if 'policy_assignments' in sim_data:
                     policy_assignments = \
                         sim_data['policy_assignments'].squeeze(axis=-1)
@@ -979,15 +958,20 @@ def _compute_reorder_state(
     assignments,
     rollout_cfg,
 ):
-    policy_batch_size = rollout_cfg.policy_batch_size
-
-    to_policy_idxs, to_sim_idxs = _compute_reorder_chunks(
-        assignments, rollout_cfg.total_num_policies, 
-        rollout_cfg.policy_batch_size, rollout_cfg.num_policy_batches)
+    if rollout_cfg.has_matchmaking:
+        to_policy_idxs, to_sim_idxs = _compute_reorder_chunks(
+            assignments, rollout_cfg.total_num_policies, 
+            rollout_cfg.policy_batch_size, rollout_cfg.num_policy_batches)
+    else:
+        to_policy_idxs = None
+        to_sim_idxs = None
 
     return PolicyBatchReorderState(
         to_policy_idxs = to_policy_idxs,
         to_sim_idxs = to_sim_idxs,
+        policy_dims = (
+            rollout_cfg.total_num_policies, rollout_cfg.policy_batch_size),
+        sim_dims = (rollout_cfg.sim_batch_size,),
     )
 
 
