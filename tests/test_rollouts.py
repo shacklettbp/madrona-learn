@@ -206,14 +206,12 @@ class FakeRNN(nn.Module):
         return jnp.where(
             should_clear, jnp.zeros((), dtype=jnp.int32), rnn_states)
 
-    def setup(self):
-        pass
-
+    @nn.compact
     def __call__(self, cur_hiddens, in_features, train):
         y = in_features[..., 0:1] + cur_hiddens
-        y = jnp.concatenate([y, in_features[..., 1:2], cur_hiddens], axis=-1)
+        new_hiddens = cur_hiddens + 2 * in_features[..., 0:1]
 
-        new_hiddens = cur_hiddens + 1
+        y = jnp.concatenate([y, in_features[..., 1:2], new_hiddens], axis=-1)
 
         return y, new_hiddens
 
@@ -308,6 +306,7 @@ def check_rollout_loop(
         )
 
     rollout_state = init_rollout_state()
+    init_rnn_states = jnp.copy(rollout_state.rnn_states)
     
     def make_policy(policy_idx, init_rnd):
         variables = policy.init(
@@ -332,8 +331,8 @@ def check_rollout_loop(
     make_policies = jax.jit(jax.vmap(make_policy))
 
     policy_states = make_policies(
-        jnp.arange(num_current_policies),
-        random.split(rnd_init, num_current_policies))
+        jnp.arange(rollout_cfg.total_num_policies),
+        random.split(rnd_init, rollout_cfg.total_num_policies))
 
     def post_inference_cb(step_idx, policy_obs, policy_out,
                           reorder_state, rollout_store):
@@ -380,26 +379,60 @@ def check_rollout_loop(
 
     assert jnp.all(rollout_store['obs'][0] == init_obs)
 
-    def compute_gt_rnn(step_idx):
-        return jnp.arange(batch_size) + step_idx + 1
+    actions_out = rollout_store['actions'][..., 0]
+    assignments_out = rollout_store['actions'][..., 1]
+    values_out = rollout_store['values'][..., 0]
 
-    compute_gt_rnn = jax.jit(jax.vmap(compute_gt_rnn))
-    gt_rnn = compute_gt_rnn(jnp.arange(num_steps))
+    def gt_iter(global_step_idx, gt_state):
+        cur_assignment = assignments_out[global_step_idx]
+        is_done = jnp.logical_and(global_step_idx != 0,
+                                  global_step_idx % episode_len == 0)
 
-    assert jnp.all(gt_rnn == rollout_store['values'][..., 0])
+        policy_param = policy_states.params[
+            'backbone']['encoder']['net']['bias'][cur_assignment][:, None]
 
-    def compute_gt_out(step_idx, policy_idx):
-        return (jnp.arange(batch_size) +
-                (step_idx + 1) *
-                (step_idx + 2 * (jnp.arange(batch_size) + 1) +
-                 2 * policy_idx) // 2)
+        prev_actions = gt_state['actions'][global_step_idx]
+        prev_values = gt_state['values'][global_step_idx]
 
-    compute_gt_out = jax.jit(jax.vmap(compute_gt_out))
+        prev_values = jnp.where(is_done, jnp.zeros((), jnp.int32), prev_values)
 
-    gt_out = compute_gt_out(
-        jnp.arange(num_steps), rollout_store['actions'][..., 1])
-    actual_out = rollout_store['actions'][..., 0]
-    assert jnp.all(gt_out == actual_out)
+        obs = prev_actions + 1
+        step_actions = obs + policy_param
+
+        step_values = prev_values + 2 * step_actions
+        step_actions = step_actions + prev_values
+
+        return gt_state.copy({
+            'actions': gt_state['actions'].at[global_step_idx + 1].set(
+                step_actions),
+            'values': gt_state['values'].at[global_step_idx + 1].set(
+                step_values),
+        })
+
+    def compute_gt_state(gt_state):
+        return lax.fori_loop(0, num_steps, gt_iter, gt_state)
+
+    gt_state = frozen_dict.freeze({
+        'actions': jnp.zeros((num_steps + 1, batch_size, 1), dtype=jnp.int32),
+        'values': jnp.zeros((num_steps + 1, batch_size, 1), dtype=jnp.int32),
+    })
+
+    gt_state = gt_state.copy({
+        # Initial "actions" are just the initial obs - 1 to handle gt_iter
+        # always adding one to compute the obs
+        'actions': gt_state['actions'].at[0].set(init_obs - 1),
+        'values': gt_state['values'].at[0].set(init_rnn_states),
+    })
+
+    gt_state = jax.jit(compute_gt_state, donate_argnums=0)(gt_state)
+    gt_state = frozen_dict.freeze({
+        'actions': gt_state['actions'][1:, ..., 0],
+        # Critic adds 1
+        'values': gt_state['values'][1:, ..., 0] + 1,
+    })
+
+    assert jnp.all(gt_state['values'] == values_out)
+    assert jnp.all(gt_state['actions'] == actions_out)
 
     return rollout_state, rollout_store
     
@@ -422,18 +455,19 @@ def test_rollout_loop1():
     final_values = rollout_store['values'][-1, ...]
     final_rnn_states = rollout_state.rnn_states
 
-    assert jnp.all(final_values == final_rnn_states)
+    # Critic adds one so need to subtract 1
+    assert jnp.all(final_values - 1 == final_rnn_states)
 
 def test_rollout_loop2():
     rollout_state, rollout_store = check_rollout_loop(
         random.PRNGKey(5),
-        num_steps = 20,
+        num_steps = 200,
         episode_len = 10,
-        num_current_policies = 4,
-        num_past_policies = 0,
+        num_current_policies = 16,
+        num_past_policies = 7,
         num_teams = 2,
         team_size = 2,
-        batch_size = 32,
+        batch_size = 16384,
         self_play = 0.0,
         cross_play = 1.0,
         past_play = 0.0,
