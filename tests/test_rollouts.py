@@ -230,6 +230,8 @@ def check_rollout_loop(
     past_play,
     policy_chunk_size_override = 0,
 ):
+    rnd = random.PRNGKey(rnd)
+
     rollout_cfg = RolloutConfig.setup(
         num_current_policies = num_current_policies,
         num_past_policies = num_past_policies,
@@ -388,6 +390,12 @@ def check_rollout_loop(
         is_done = jnp.logical_and(global_step_idx != 0,
                                   global_step_idx % episode_len == 0)
 
+        episode_start_idx = (global_step_idx // episode_len) * episode_len
+
+        checkify.check(
+            jnp.all(assignments_out[episode_start_idx] == cur_assignment),
+            "Policy assignment should not change during episode")
+
         policy_param = policy_states.params[
             'backbone']['encoder']['net']['bias'][cur_assignment][:, None]
 
@@ -424,7 +432,9 @@ def check_rollout_loop(
         'values': gt_state['values'].at[0].set(init_rnn_states),
     })
 
-    gt_state = jax.jit(compute_gt_state, donate_argnums=0)(gt_state)
+    err, gt_state = jax.jit(checkify.checkify(compute_gt_state),
+        donate_argnums=0)(gt_state)
+    err.throw()
     gt_state = frozen_dict.freeze({
         'actions': gt_state['actions'][1:, ..., 0],
         # Critic adds 1
@@ -434,44 +444,35 @@ def check_rollout_loop(
     assert jnp.all(gt_state['values'] == values_out)
     assert jnp.all(gt_state['actions'] == actions_out)
 
-    return rollout_state, rollout_store
-    
-
-def test_rollout_loop1():
-    rollout_state, rollout_store = check_rollout_loop(
-        random.PRNGKey(5),
-        num_steps = 10,
-        episode_len = 11,
-        num_current_policies = 4,
-        num_past_policies = 0,
-        num_teams = 2,
-        team_size = 2,
-        batch_size = 32,
-        self_play = 0.0,
-        cross_play = 1.0,
-        past_play = 0.0,
-    )
-
     final_values = rollout_store['values'][-1, ...]
     final_rnn_states = rollout_state.rnn_states
 
-    # Critic adds one so need to subtract 1
-    assert jnp.all(final_values - 1 == final_rnn_states)
+    rnn_check = jnp.where(rollout_state.sim_data['dones'],
+        jnp.zeros((), jnp.int32), final_values - 1)
 
-def test_rollout_loop2():
-    rollout_state, rollout_store = check_rollout_loop(
-        random.PRNGKey(5),
-        num_steps = 200,
-        episode_len = 10,
-        num_current_policies = 16,
-        num_past_policies = 7,
-        num_teams = 2,
-        team_size = 2,
-        batch_size = 16384,
-        self_play = 0.0,
-        cross_play = 1.0,
-        past_play = 0.0,
-    )
+    assert jnp.all(rnn_check == final_rnn_states)
+
+    assert jnp.all(rollout_store['actions'][..., 0:1].astype(jnp.float16) ==
+                   rollout_store['rewards'])
+
+    return rollout_state, rollout_store
+    
+
+def test_rollout_loop():
+    keys = ['rnd', 'num_steps', 'episode_len', 'num_current_policies',
+            'num_past_policies', 'num_teams', 'team_size', 'batch_size',
+            'self_play', 'cross_play', 'past_play']
+
+    configs = [
+        [5, 10,  11,  4, 0, 2, 2,    32, 0.0, 1.0, 0.0],
+        [5, 200, 10, 16, 7, 2, 2, 16384, 0.0, 1.0, 0.0],
+        [5, 200, 15, 16, 7, 4, 2, 16384, 0.0, 1.0, 0.0],
+        [7, 200, 15, 16, 0, 4, 2, 128, 1.0, 0.0, 0.0],
+    ]
+
+    for args in configs:
+        kwargs = {k: v for k, v in zip(keys, args)}
+        check_rollout_loop(**kwargs)
 
 #test_reorder_chunks1()
 #test_reorder_chunks2()
@@ -481,5 +482,4 @@ def test_rollout_loop2():
 #test_init_matchmake1()
 #test_init_matchmake2()
 
-test_rollout_loop1()
-test_rollout_loop2()
+test_rollout_loop()

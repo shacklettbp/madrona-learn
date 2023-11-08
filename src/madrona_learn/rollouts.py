@@ -150,8 +150,9 @@ class PolicyBatchReorderState(flax.struct.PyTreeNode):
         return jax.tree_map(txfm, data)
 
     def to_sim(self, data):
-        num_flattened_policy_chunks = (
-            self.to_policy_idxs.shape[0] * self.to_policy_idxs.shape[1])
+        if self.to_policy_idxs != None:
+            num_flattened_policy_chunks = (
+                self.to_policy_idxs.shape[0] * self.to_policy_idxs.shape[1])
         def txfm(x):
             if self.to_sim_idxs == None:
                 return x.reshape(*self.sim_dims, *x.shape[2:])
