@@ -143,18 +143,24 @@ class PolicyBatchReorderState(flax.struct.PyTreeNode):
             if self.to_policy_idxs == None:
                 return x.reshape(*self.policy_dims, *x.shape[1:])
             else:
-                return x[self.to_policy_idxs]
+                # FIXME: can we clean to to_policy_idxs to not have OOB
+                # indices?
+                return x.at[self.to_policy_idxs].get(mode='clip')
 
         return jax.tree_map(txfm, data)
 
     def to_sim(self, data):
+        num_flattened_policy_chunks = (
+            self.to_policy_idxs.shape[0] * self.to_policy_idxs.shape[1])
         def txfm(x):
             if self.to_sim_idxs == None:
                 return x.reshape(*self.sim_dims, *x.shape[2:])
             else:
-                return x.reshape(self.to_policy_idxs.shape[0] *
-                        self.to_policy_idxs.shape[1],
-                    *x.shape[2:])[self.to_sim_idxs]
+                flattened_chunks = x.reshape(
+                    num_flattened_policy_chunks, *x.shape[2:])
+
+                return flattened_chunks.at[self.to_sim_idxs].get(
+                    unique_indices=True)
 
         return jax.tree_map(txfm, data)
 

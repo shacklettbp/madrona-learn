@@ -14,26 +14,31 @@ class Backbone(nn.Module):
     def _flatten_obs_sequence(self, obs):
         return jax.tree_map(lambda o: o.reshape(-1, *o.shape[2:]), obs)
 
-    def forward(self, rnn_states_in, obs_in):
+    @nn.nowrap
+    def init_recurrent_state(self, N):
         raise NotImplementedError
 
-    def fwd_actor_only(self, rnn_states_out, rnn_states_in, obs_in):
+    @nn.nowrap
+    def clear_recurrent_state(self, recurrent_states, should_clear):
         raise NotImplementedError
 
-    def fwd_critic_only(self, rnn_states_out, rnn_states_in, obs_in):
+    def __call__(self, rnn_states, inputs, train):
         raise NotImplementedError
 
-    def fwd_rollout(self, rnn_states_out, rnn_states_in, obs_in):
-        raise NotImplementedError
-
-    def fwd_sequence(self, rnn_start_states, dones, obs_in):
+    def sequence(
+        self,
+        rnn_start_states,
+        sequence_ends,
+        flattened_inputs,
+        train,
+    ):
         raise NotImplementedError
 
 
 class ActorCritic(nn.Module):
-    backbone : nn.Module
-    actor : nn.Module
-    critic : nn.Module
+    backbone: Backbone
+    actor: nn.Module
+    critic: nn.Module
 
     @nn.nowrap
     def init_recurrent_state(self, N):
@@ -71,7 +76,7 @@ class ActorCritic(nn.Module):
         actor_features, critic_features, rnn_states_out = self.backbone(
             rnn_states_in, obs_in, train=train)
 
-        action_dists = self.actor(actor_features)
+        action_dists = self.actor(actor_features, train=train)
 
         results = {}
 
@@ -82,7 +87,7 @@ class ActorCritic(nn.Module):
             actions = action_dists.best()
 
         results['actions'] = actions
-        results['values'] = self.critic(critic_features)
+        results['values'] = self.critic(critic_features, train=train)
 
         if return_debug:
             results['action_probs'] = action_dists.probs()
@@ -122,7 +127,7 @@ class ActorCritic(nn.Module):
 
 
 class BackboneEncoder(nn.Module):
-    net : nn.Module
+    net: nn.Module
 
     @nn.nowrap
     def init_recurrent_state(self, N):
@@ -145,9 +150,10 @@ class BackboneEncoder(nn.Module):
     ):
         return self.net(flattened_inputs, train=train)
 
+
 class RecurrentBackboneEncoder(nn.Module):
-    net : nn.Module
-    rnn : nn.Module
+    net: nn.Module
+    rnn: nn.Module
 
     @nn.nowrap
     def init_recurrent_state(self, N):
@@ -188,8 +194,8 @@ class RecurrentBackboneEncoder(nn.Module):
 
 
 class BackboneShared(Backbone):
-    prefix : Union[nn.Module, Callable]
-    encoder : nn.Module
+    prefix: Union[nn.Module, Callable]
+    encoder: nn.Module
 
     @nn.nowrap
     def init_recurrent_state(self, N):
@@ -233,9 +239,9 @@ class BackboneShared(Backbone):
 
 
 class BackboneSeparate(Backbone):
-    prefix : Union[nn.Module, Callable]
-    actor_encoder : nn.Module
-    critic_encoder : nn.Module
+    prefix: Union[nn.Module, Callable]
+    actor_encoder: nn.Module
+    critic_encoder: nn.Module
 
     @nn.nowrap
     def init_recurrent_state(self, N):
