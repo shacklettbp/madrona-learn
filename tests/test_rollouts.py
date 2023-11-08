@@ -23,56 +23,6 @@ from madrona_learn.rollouts import (
     _compute_reorder_state,
 )
 
-@dataclass(frozen=True)
-class FakeActionDist:
-    action: jax.Array
-
-    def best(self):
-        return self.action
-
-
-class FakeNet(nn.Module):
-    @nn.compact
-    def __call__(self, inputs, train):
-        bias = self.param('bias',
-            jax.nn.initializers.constant(0), (), jnp.int32)
-
-        return inputs + bias
-
-
-class FakeRNN(nn.Module):
-    @nn.nowrap
-    def init_recurrent_state(self, N):
-        return jnp.zeros((N, 1), dtype=jnp.int32)
-
-    @nn.nowrap
-    def clear_recurrent_state(self, rnn_states, should_clear):
-        return jnp.where(
-            should_clear, jnp.zeros((), dtype=jnp.int32), rnn_states)
-
-    def setup(self):
-        pass
-
-    def __call__(self, cur_hiddens, in_features, train):
-        y = jnp.concatenate([in_features, cur_hiddens], axis=-1)
-
-        new_hiddens = cur_hiddens + 1
-
-        return y, new_hiddens
-
-    def sequence(self, start_hiddens, seq_ends, seq_x, train):
-        def process_step(carry, x, end):
-            y = jnp.concatenate([x, carry], axis=-1)
-
-            carry = carry + 1
-            carry = self.clear_recurrent_state(carry, end)
-
-            return carry, y
-
-        _, outputs = lax.scan(process_step, start_hiddens, seq_x, seq_ends)
-        return outputs
-
-
 def check_reorder_chunks(arr, P, C):
     B = arr.size // C + P - 1
 
@@ -226,9 +176,52 @@ def test_init_matchmake2():
     print(matchmake[4:])
 
 
-def dummy_rollout_loop(
+@dataclass(frozen=True)
+class FakeActionDist:
+    action: jax.Array
+
+    def best(self):
+        return self.action
+
+
+class FakeNet(nn.Module):
+    @nn.compact
+    def __call__(self, inputs, train):
+        bias = self.param('bias',
+            jax.nn.initializers.constant(0), (), jnp.int32)
+
+        return jnp.concatenate([
+            inputs + bias,
+            jnp.broadcast_to(bias[None, None], inputs.shape),
+        ], axis=-1)
+
+
+class FakeRNN(nn.Module):
+    @nn.nowrap
+    def init_recurrent_state(self, N):
+        return jnp.zeros((N, 1), dtype=jnp.int32)
+
+    @nn.nowrap
+    def clear_recurrent_state(self, rnn_states, should_clear):
+        return jnp.where(
+            should_clear, jnp.zeros((), dtype=jnp.int32), rnn_states)
+
+    def setup(self):
+        pass
+
+    def __call__(self, cur_hiddens, in_features, train):
+        y = in_features[..., 0:1] + cur_hiddens
+        y = jnp.concatenate([y, in_features[..., 1:2], cur_hiddens], axis=-1)
+
+        new_hiddens = cur_hiddens + 1
+
+        return y, new_hiddens
+
+
+def check_rollout_loop(
     rnd,
     num_steps,
+    episode_len,
     num_current_policies,
     num_past_policies,
     num_teams,
@@ -252,19 +245,29 @@ def dummy_rollout_loop(
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
-    rnd, rnd_obs = random.split(rnd)
+    init_obs = jnp.arange(batch_size).reshape((batch_size, 1)) + 1
 
     init_sim_data = frozen_dict.freeze({
-        'obs': random.randint(rnd_obs, (batch_size, 1), 0, 10000),
+        'obs': init_obs,
         'rewards': jnp.zeros((batch_size, 1), dtype=jnp.float16),
         'dones': jnp.zeros((batch_size, 1), dtype=jnp.bool_),
-        'actions': jnp.zeros((batch_size, 1), dtype=jnp.int32),
+        'actions': jnp.zeros((batch_size, 2), dtype=jnp.int32),
+        'counter': jnp.zeros((batch_size, 1), dtype=jnp.int32),
     })
 
     def fake_sim(sim_data):
         sim_data = jax.tree_map(jnp.copy, sim_data)
+
+        new_counter = sim_data['counter'] + 1
+        new_dones = new_counter == episode_len
+
+        new_counter %= episode_len
+
         return sim_data.copy({
-            'rewards': sim_data['actions'].astype(jnp.float16),
+            'obs': sim_data['actions'][..., 0:1] + 1,
+            'rewards': sim_data['actions'][..., 0:1].astype(jnp.float16),
+            'counter': new_counter,
+            'dones': new_dones,
         })
 
     fake_backbone = BackboneShared(
@@ -276,10 +279,10 @@ def dummy_rollout_loop(
     )
 
     def fake_actor(features, train):
-        return FakeActionDist(features[..., 0:1])
+        return FakeActionDist(features[..., 0:2])
 
     def fake_critic(features, train):
-        return features[..., 1:2]
+        return features[..., 2:3] + 1
 
     policy = ActorCritic(
         backbone = fake_backbone,
@@ -287,20 +290,19 @@ def dummy_rollout_loop(
         critic = fake_critic,
     )
 
-    rnd, rnd_rnn = random.split(rnd)
+    rnd, rnd_rollout = random.split(rnd)
 
     @jax.jit
     def init_rollout_state():
         rnn_states = policy.init_recurrent_state(batch_size)
 
         rnn_states = jax.tree_map(
-            lambda x: random.randint(rnd_rnn, (x.shape), 0, 10000),
-            rnn_states)
+            lambda x: jnp.arange(x.shape[0]).reshape(-1, 1), rnn_states)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
             step_fn = fake_sim,
-            prng_key = random.PRNGKey(0),
+            prng_key = rnd_rollout,
             rnn_states = rnn_states,
             init_sim_data = init_sim_data,
         )
@@ -351,8 +353,8 @@ def dummy_rollout_loop(
 
     rollout_store = frozen_dict.freeze({
         'obs': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
-        'values': jnp.zeros((num_steps, batch_size, 1)),
-        'actions': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+        'values': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+        'actions': jnp.zeros((num_steps, batch_size, 2), dtype=jnp.int32),
         'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.float16),
     })
 
@@ -373,25 +375,69 @@ def dummy_rollout_loop(
         checkify.checkify(rollout_loop_wrapper),
         donate_argnums=0)
 
-    return rollout_loop_wrapper(rollout_state)
+    err, (rollout_state, rollout_store) = rollout_loop_wrapper(rollout_state)
+    err.throw()
+
+    assert jnp.all(rollout_store['obs'][0] == init_obs)
+
+    def compute_gt_rnn(step_idx):
+        return jnp.arange(batch_size) + step_idx + 1
+
+    compute_gt_rnn = jax.jit(jax.vmap(compute_gt_rnn))
+    gt_rnn = compute_gt_rnn(jnp.arange(num_steps))
+
+    assert jnp.all(gt_rnn == rollout_store['values'][..., 0])
+
+    def compute_gt_out(step_idx, policy_idx):
+        return (jnp.arange(batch_size) +
+                (step_idx + 1) *
+                (step_idx + 2 * (jnp.arange(batch_size) + 1) +
+                 2 * policy_idx) // 2)
+
+    compute_gt_out = jax.jit(jax.vmap(compute_gt_out))
+
+    gt_out = compute_gt_out(
+        jnp.arange(num_steps), rollout_store['actions'][..., 1])
+    actual_out = rollout_store['actions'][..., 0]
+    assert jnp.all(gt_out == actual_out)
+
+    return rollout_state, rollout_store
     
 
 def test_rollout_loop1():
-    rollout_state, rollout_store = dummy_rollout_loop(
+    rollout_state, rollout_store = check_rollout_loop(
         random.PRNGKey(5),
-        num_steps = 2,
+        num_steps = 10,
+        episode_len = 11,
         num_current_policies = 4,
-        num_past_policies = 3,
+        num_past_policies = 0,
         num_teams = 2,
         team_size = 2,
         batch_size = 32,
         self_play = 0.0,
-        cross_play = 0.5,
-        past_play = 0.5,
+        cross_play = 1.0,
+        past_play = 0.0,
     )
 
-    print(rollout_store)
+    final_values = rollout_store['values'][-1, ...]
+    final_rnn_states = rollout_state.rnn_states
 
+    assert jnp.all(final_values == final_rnn_states)
+
+def test_rollout_loop2():
+    rollout_state, rollout_store = check_rollout_loop(
+        random.PRNGKey(5),
+        num_steps = 20,
+        episode_len = 10,
+        num_current_policies = 4,
+        num_past_policies = 0,
+        num_teams = 2,
+        team_size = 2,
+        batch_size = 32,
+        self_play = 0.0,
+        cross_play = 1.0,
+        past_play = 0.0,
+    )
 
 #test_reorder_chunks1()
 #test_reorder_chunks2()
@@ -402,3 +448,4 @@ def test_rollout_loop1():
 #test_init_matchmake2()
 
 test_rollout_loop1()
+test_rollout_loop2()
