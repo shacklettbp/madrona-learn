@@ -166,7 +166,9 @@ def _setup_value_normalizer(hyper_params, rng_key, fake_values):
     value_normalizer_vars = value_normalizer.init(
         rng_key, 'normalize', False, fake_values)
 
-    return value_normalizer.apply, value_normalizer_vars['batch_stats']
+    value_normalizer_stats = value_normalizer_vars.get('batch_stats', {})
+
+    return value_normalizer.apply, value_normalizer_stats
 
 def _setup_policy_state(
     policy,
