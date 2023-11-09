@@ -7,9 +7,12 @@ from flax.core import frozen_dict, FrozenDict
 from dataclasses import dataclass
 
 from madrona_learn import (
+    init,
     ActorCritic, RecurrentBackboneEncoder, BackboneShared,
     TrainConfig, PBTConfig,
 )
+
+init(0.5)
 
 from madrona_learn.train_state import (
     PolicyState, PolicyTrainState, TrainStateManager,
@@ -247,7 +250,7 @@ def fake_rollout_setup(
         self_play_portion = self_play,
         cross_play_portion = cross_play,
         past_play_portion = past_play,
-        float_dtype = jnp.float16,
+        float_dtype = jnp.int32,
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
@@ -257,7 +260,7 @@ def fake_rollout_setup(
 
     init_sim_data = frozen_dict.freeze({
         'obs': init_obs,
-        'rewards': jnp.zeros((batch_size, 1), dtype=jnp.float16),
+        'rewards': jnp.zeros((batch_size, 1), dtype=jnp.int32),
         'dones': jnp.zeros((batch_size, 1), dtype=jnp.bool_),
         'actions': jnp.zeros((batch_size, 2), dtype=jnp.int32),
         'counter': jnp.zeros((batch_size, 1), dtype=jnp.int32),
@@ -273,7 +276,7 @@ def fake_rollout_setup(
 
         return sim_data.copy({
             'obs': sim_data['actions'][..., 0:1] + 1,
-            'rewards': sim_data['actions'][..., 0:1].astype(jnp.float16),
+            'rewards': sim_data['actions'][..., 0:1] + 2,
             'counter': new_counter,
             'dones': new_dones,
         })
@@ -348,7 +351,8 @@ def fake_rollout_setup(
 
 def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
                         init_rnn_states, num_steps, episode_len, batch_size):
-    assert jnp.all(rollout_store['obs'][0] == init_obs)
+    checkify.check(jnp.all(rollout_store['obs'][0] == init_obs),
+                   "Init observation mismatch")
 
     actions_out = rollout_store['actions'][..., 0]
     assignments_out = rollout_store['actions'][..., 1]
@@ -401,17 +405,18 @@ def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
         'values': gt_state['values'].at[0].set(init_rnn_states),
     })
 
-    err, gt_state = jax.jit(checkify.checkify(compute_gt_state),
-        donate_argnums=0)(gt_state)
-    err.throw()
+    gt_state = compute_gt_state(gt_state)
+
     gt_state = frozen_dict.freeze({
         'actions': gt_state['actions'][1:, ..., 0],
         # Critic adds 1
         'values': gt_state['values'][1:, ..., 0] + 1,
     })
 
-    assert jnp.all(gt_state['values'] == values_out)
-    assert jnp.all(gt_state['actions'] == actions_out)
+    checkify.check(jnp.all(gt_state['values'] == values_out),
+        "Value mismatch")
+    checkify.check(jnp.all(gt_state['actions'] == actions_out),
+        "Action mismatch")
 
     final_values = rollout_store['values'][-1, ...]
     final_rnn_states = rollout_state.rnn_states
@@ -419,10 +424,10 @@ def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
     rnn_check = jnp.where(rollout_state.sim_data['dones'],
         jnp.zeros((), jnp.int32), final_values - 1)
 
-    assert jnp.all(rnn_check == final_rnn_states)
+    checkify.check(jnp.all(rnn_check == final_rnn_states), "RNN mismatch")
 
-    assert jnp.all(rollout_store['actions'][..., 0:1].astype(jnp.float16) ==
-                   rollout_store['rewards'])
+    checkify.check(jnp.all(rollout_store['actions'][..., 0:1] + 2 ==
+        rollout_store['rewards']), "Reward mismatch")
 
 
 def check_rollout_loop(
@@ -454,53 +459,6 @@ def check_rollout_loop(
         policy_chunk_size_override,
     )
 
-    def post_inference_cb(step_idx, policy_obs, policy_out,
-                          reorder_state, rollout_store):
-        obs, actions, values = reorder_state.to_sim(
-            (policy_obs, policy_out['actions'], policy_out['values']))
-        
-        return rollout_store.copy({
-            'obs': rollout_store['obs'].at[step_idx].set(obs),
-            'actions': rollout_store['actions'].at[step_idx].set(actions),
-            'values': rollout_store['values'].at[step_idx].set(values),
-        })
-
-    def post_step_cb(step_idx, dones, rewards, reorder_state, rollout_store):
-        return rollout_store.copy({
-            'rewards': rollout_store['rewards'].at[step_idx].set(rewards),
-        })
-    rollout_store = frozen_dict.freeze({
-        'obs': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
-        'values': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
-        'actions': jnp.zeros((num_steps, batch_size, 2), dtype=jnp.int32),
-        'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.float16),
-    })
-
-    def rollout_loop_wrapper(rollout_state):
-        return rollout_loop(
-            rollout_state = rollout_state,
-            policy_states = policy_states,
-            rollout_cfg = rollout_cfg,
-            num_steps = num_steps,
-            post_inference_cb = post_inference_cb,
-            post_step_cb = post_step_cb,
-            cb_state = rollout_store,
-            sample_actions = False,
-            return_debug = False,
-        )
-
-    rollout_loop_wrapper = jax.jit(
-        checkify.checkify(rollout_loop_wrapper),
-        donate_argnums=0)
-
-    err, (rollout_state, rollout_store) = rollout_loop_wrapper(rollout_state)
-    err.throw()
-
-    verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
-        init_rnn_states, num_steps, episode_len, batch_size)
-
-    all_assignments = rollout_store['actions'][..., 1]
-    
     def check_assignments(assigns):
         assigns = assigns.reshape(-1, num_teams, team_size)
 
@@ -561,8 +519,54 @@ def check_rollout_loop(
             jnp.all(pp_matches[:, :, 0, :] == policy_indices),
             "Incorrect past play train policies")
 
-    check_assignments = jax.jit(checkify.checkify(jax.vmap(check_assignments)))
-    err, _ = check_assignments(all_assignments)
+    def post_inference_cb(step_idx, policy_obs, policy_out,
+                          reorder_state, rollout_store):
+        obs, actions, values = reorder_state.to_sim(
+            (policy_obs, policy_out['actions'], policy_out['values']))
+        
+        return rollout_store.copy({
+            'obs': rollout_store['obs'].at[step_idx].set(obs),
+            'actions': rollout_store['actions'].at[step_idx].set(actions),
+            'values': rollout_store['values'].at[step_idx].set(values),
+        })
+
+    def post_step_cb(step_idx, dones, rewards, reorder_state, rollout_store):
+        return rollout_store.copy({
+            'rewards': rollout_store['rewards'].at[step_idx].set(rewards),
+        })
+
+    def loop_wrapper(rollout_state, policy_states, init_obs, init_rnn_states):
+        rollout_store = frozen_dict.freeze({
+            'obs': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+            'values': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+            'actions': jnp.zeros((num_steps, batch_size, 2), dtype=jnp.int32),
+            'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+        })
+
+        rollout_state, rollout_store = rollout_loop(
+            rollout_state = rollout_state,
+            policy_states = policy_states,
+            rollout_cfg = rollout_cfg,
+            num_steps = num_steps,
+            post_inference_cb = post_inference_cb,
+            post_step_cb = post_step_cb,
+            cb_state = rollout_store,
+            sample_actions = False,
+            return_debug = False,
+        )
+
+        verify_rollout_data(rollout_state, rollout_store, policy_states,
+            init_obs, init_rnn_states, num_steps, episode_len, batch_size)
+
+        all_assignments = rollout_store['actions'][..., 1]
+        jax.vmap(check_assignments)(all_assignments)
+
+        return rollout_state, rollout_store
+
+    loop_wrapper = jax.jit(checkify.checkify(loop_wrapper), donate_argnums=0)
+
+    err, (rollout_state, rollout_store) = loop_wrapper(
+        rollout_state, policy_states, init_obs, init_rnn_states)
     err.throw()
 
     return rollout_state, rollout_store
@@ -590,9 +594,9 @@ def check_rollout_mgr(
         lr = 0,
         algo = None,
         num_bptt_chunks = 1,
-        gamma = 0.998,
+        gamma = 1,
         seed = rnd,
-        gae_lambda = 0.95,
+        gae_lambda = 1,
         pbt = PBTConfig(
             num_teams = num_teams,
             team_size = team_size,
@@ -649,17 +653,41 @@ def check_rollout_mgr(
         pbt_rng = pbt_rnd,
     )
 
-    def rollout_collect(rollout_state):
+    def collect_wrapper(rollout_state, train_state_mgr,
+                        init_obs, init_rnn_states):
         metrics = rollout_mgr.add_metrics(train_cfg, FrozenDict())
         metrics = TrainingMetrics.create(train_cfg, metrics)
 
         rollout_state, rollout_data, metrics = rollout_mgr.collect(
             train_state_mgr, rollout_state, metrics)
 
+        train_slice = lambda x: x[rollout_mgr._sim_to_train_idxs]
+
+        sliced_rollout_state = jax.tree_map(train_slice, rollout_state)
+        sliced_init_obs = jax.tree_map(train_slice, init_obs)
+        sliced_init_rnns = jax.tree_map(train_slice, init_rnn_states)
+
+        def verify_wrapper(rollout_policy_data, sliced_rollout_state,
+                           sliced_init_obs, sliced_init_rnns):
+            rollout_policy_data = jax.tree_map(
+                lambda x: jnp.swapaxes(x, 0, 1), rollout_policy_data)
+
+            verify_rollout_data(sliced_rollout_state, rollout_policy_data,
+                policy_states, sliced_init_obs, sliced_init_rnns, num_steps,
+                episode_len, rollout_data.data['actions'].shape[1])
+
+        verify_wrapper = jax.vmap(verify_wrapper)
+        verify_wrapper(rollout_data.data, sliced_rollout_state,
+            sliced_init_obs, sliced_init_rnns)
+
         return rollout_state, rollout_data
 
-    rollout_collect = jax.jit(rollout_collect, donate_argnums=0)
-    rollout_state, rollout_data = rollout_collect(rollout_state)
+    collect_wrapper = jax.jit(
+        checkify.checkify(collect_wrapper), donate_argnums=0)
+    err, (rollout_state, rollout_data) = collect_wrapper(
+        rollout_state, train_state_mgr, init_obs, init_rnn_states)
+    err.throw()
+
 
 def test_rollouts():
     keys = ['rnd', 'num_steps', 'episode_len', 'num_current_policies',
@@ -667,7 +695,8 @@ def test_rollouts():
             'self_play', 'cross_play', 'past_play']
 
     configs = [
-        [5, 10,  11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
+        [5,   3, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
+        [5,  10, 11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
         [5, 200, 10, 16, 7, 2, 2, 16384, 0.0,  1.0, 0.0],
         [5, 200, 15, 16, 7, 4, 2, 16384, 0.0,  1.0, 0.0],
         [7, 200, 15, 16, 0, 4, 2,   128, 1.0,  0.0, 0.0],
@@ -679,6 +708,7 @@ def test_rollouts():
 
     for args in configs:
         kwargs = {k: v for k, v in zip(keys, args)}
+        print(kwargs)
         check_rollout_loop(**kwargs)
         check_rollout_mgr(**kwargs)
 
