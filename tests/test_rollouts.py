@@ -667,8 +667,8 @@ def check_rollout_mgr(
         sliced_init_obs = jax.tree_map(train_slice, init_obs)
         sliced_init_rnns = jax.tree_map(train_slice, init_rnn_states)
 
-        def verify_wrapper(rollout_policy_data, sliced_rollout_state,
-                           sliced_init_obs, sliced_init_rnns):
+        def verify_wrapper(policy_idx, rollout_policy_data,
+                sliced_rollout_state, sliced_init_obs, sliced_init_rnns):
             rollout_policy_data = jax.tree_map(
                 lambda x: jnp.swapaxes(x, 0, 1), rollout_policy_data)
 
@@ -676,8 +676,13 @@ def check_rollout_mgr(
                 policy_states, sliced_init_obs, sliced_init_rnns, num_steps,
                 episode_len, rollout_data.data['actions'].shape[1])
 
+            all_assignments = rollout_policy_data['actions'][..., 1]
+            checkify.check(jnp.all(all_assignments == policy_idx),
+                "Mismatched policy index")
+
         verify_wrapper = jax.vmap(verify_wrapper)
-        verify_wrapper(rollout_data.data, sliced_rollout_state,
+        verify_wrapper(jnp.arange(num_current_policies),
+            rollout_data.data, sliced_rollout_state,
             sliced_init_obs, sliced_init_rnns)
 
         return rollout_state, rollout_data
@@ -704,6 +709,8 @@ def test_rollouts():
         [7, 200, 15, 16, 7, 4, 2,  1024, 0.5, 0.25, 0.25],
         [7, 200, 15, 16, 7, 4, 4,  1024, 0.5, 0.25, 0.25],
         [7, 200, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
+        [7, 1000, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
+        [7, 1000, 15, 16, 7, 4, 4,  4096, 0.0,  1.0, 0.0],
     ]
 
     for args in configs:
