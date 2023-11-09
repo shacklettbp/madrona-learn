@@ -245,7 +245,9 @@ def check_rollout_loop(
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
-    init_obs = jnp.arange(batch_size).reshape((batch_size, 1)) + 1
+    rnd, rnd_obs = random.split(rnd)
+
+    init_obs = random.randint(rnd_obs, (batch_size, 1), 0, 10000)
 
     init_sim_data = frozen_dict.freeze({
         'obs': init_obs,
@@ -290,14 +292,14 @@ def check_rollout_loop(
         critic = fake_critic,
     )
 
-    rnd, rnd_rollout = random.split(rnd)
+    rnd, rnd_rollout, rnd_rnn = random.split(rnd, 3)
 
     @jax.jit
     def init_rollout_state():
         rnn_states = policy.init_recurrent_state(batch_size)
 
         rnn_states = jax.tree_map(
-            lambda x: jnp.arange(x.shape[0]).reshape(-1, 1), rnn_states)
+            lambda x: random.randint(rnd_rnn, x.shape, 0, 10000), rnn_states)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
@@ -455,6 +457,72 @@ def check_rollout_loop(
     assert jnp.all(rollout_store['actions'][..., 0:1].astype(jnp.float16) ==
                    rollout_store['rewards'])
 
+    all_assignments = rollout_store['actions'][..., 1]
+    
+    def check_assignments(assigns):
+        assigns = assigns.reshape(-1, num_teams, team_size)
+
+        checkify.check(
+            jnp.all(assigns[:, :, 0:1] == assigns[:, :, 1:]),
+            "All team members should be using the same policy")
+
+        num_sp_matches = int(assigns.shape[0] * self_play)
+        num_cp_matches = int(assigns.shape[0] * cross_play)
+        num_pp_matches = int(assigns.shape[0] * past_play)
+
+        sp_matches = assigns[:num_sp_matches]
+        cp_matches = assigns[num_sp_matches:num_sp_matches + num_cp_matches]
+        pp_matches = assigns[num_sp_matches + num_cp_matches:num_sp_matches + num_cp_matches + num_pp_matches]
+
+        checkify.check(
+            jnp.all(sp_matches[:, 0:1, :] == sp_matches[:, 1:, :]),
+            "All teams in self play matches should have same policy")
+
+        checkify.check(
+            jnp.all(cp_matches[:, 0:1, :] != cp_matches[:, 1:, :]),
+            "Cross play opponents should have different policies than team 0")
+
+        checkify.check(
+            jnp.all(pp_matches[:, 0:1, :] != pp_matches[:, 1:, :]),
+            "Past play opponents should have different policies than team 0")
+
+        checkify.check(jnp.all(jnp.logical_and(
+                cp_matches[:, 1:, :] >= 0,
+                cp_matches[:, 1:, :] < num_current_policies,
+            )),
+            "Invalid cross play policies")
+
+        checkify.check(jnp.all(jnp.logical_and(
+                pp_matches[:, 1:, :] >= num_current_policies,
+                pp_matches[:, 1:, :] < num_current_policies + num_past_policies,
+            )),
+            "Invalid past play policies")
+
+        sp_matches = sp_matches.reshape(
+            num_current_policies, -1, *sp_matches.shape[1:])
+        cp_matches = cp_matches.reshape(
+            num_current_policies, -1, *cp_matches.shape[1:])
+        pp_matches = pp_matches.reshape(
+            num_current_policies, -1, *pp_matches.shape[1:])
+
+        policy_indices = jnp.arange(num_current_policies).reshape(-1, 1, 1)
+
+        checkify.check(
+            jnp.all(sp_matches[:, :, 0, :] == policy_indices),
+            "Incorrect self play train policies")
+
+        checkify.check(
+            jnp.all(cp_matches[:, :, 0, :] == policy_indices),
+            "Incorrect cross play train policies")
+
+        checkify.check(
+            jnp.all(pp_matches[:, :, 0, :] == policy_indices),
+            "Incorrect past play train policies")
+
+    check_assignments = jax.jit(checkify.checkify(jax.vmap(check_assignments)))
+    err, _ = check_assignments(all_assignments)
+    err.throw()
+
     return rollout_state, rollout_store
     
 
@@ -464,10 +532,13 @@ def test_rollout_loop():
             'self_play', 'cross_play', 'past_play']
 
     configs = [
-        [5, 10,  11,  4, 0, 2, 2,    32, 0.0, 1.0, 0.0],
-        [5, 200, 10, 16, 7, 2, 2, 16384, 0.0, 1.0, 0.0],
-        [5, 200, 15, 16, 7, 4, 2, 16384, 0.0, 1.0, 0.0],
-        [7, 200, 15, 16, 0, 4, 2, 128, 1.0, 0.0, 0.0],
+        [5, 10,  11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
+        [5, 200, 10, 16, 7, 2, 2, 16384, 0.0,  1.0, 0.0],
+        [5, 200, 15, 16, 7, 4, 2, 16384, 0.0,  1.0, 0.0],
+        [7, 200, 15, 16, 0, 4, 2,   128, 1.0,  0.0, 0.0],
+        [7, 200, 15, 16, 7, 4, 2,  1024, 0.0,  0.5, 0.5],
+        [7, 200, 15, 16, 7, 4, 2,  1024, 0.5, 0.25, 0.25],
+        [7, 200, 15, 16, 7, 4, 4,  1024, 0.5, 0.25, 0.25],
     ]
 
     for args in configs:
