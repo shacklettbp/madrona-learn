@@ -676,6 +676,9 @@ def check_rollout_mgr(
             rollout_policy_data, rnn_start_states = rollout_policy_data.pop(
                 'rnn_start_states')
 
+            rnn_start_states = rnn_start_states.reshape(
+                num_chunks, per_policy_batch_size, *rnn_start_states.shape[1:])
+
             # Need to invert the transformation applied by
             # RolloutManager._finalize_rollouts
             def txfm(x):
@@ -686,7 +689,7 @@ def check_rollout_mgr(
                 orig = pre_permute.transpose(
                     0, 2, 1, *range(3, len(pre_permute.shape)))
 
-                return orig.reshape(-1, per_policy_batch_size, *orig.shape[3:])
+                return orig.reshape(num_steps, per_policy_batch_size, *orig.shape[3:])
 
             rollout_policy_data = jax.tree_map(txfm, rollout_policy_data)
 
@@ -697,6 +700,22 @@ def check_rollout_mgr(
             all_assignments = rollout_policy_data['actions'][..., 1]
             checkify.check(jnp.all(all_assignments == policy_idx),
                 "Mismatched policy index for train data")
+
+            ref_rnn_states = jnp.concatenate([
+                    sliced_init_rnns[None, ...],
+                    rollout_policy_data['values'] - 1, # Critic adds one
+                ], axis=0)
+
+            ref_rnn_states = ref_rnn_states.at[1:].set(
+                jnp.where(rollout_policy_data['dones'],
+                          jnp.zeros_like(ref_rnn_states[1:]),
+                          ref_rnn_states[1:]))
+
+            ref_rnn_states = ref_rnn_states[
+                jnp.arange(0, num_steps, num_steps // num_chunks)]
+
+            checkify.check(jnp.all(rnn_start_states == ref_rnn_states),
+                "Invalid RNN start states")
 
         verify_wrapper = jax.vmap(verify_wrapper)
         verify_wrapper(jnp.arange(num_current_policies),
