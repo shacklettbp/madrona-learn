@@ -278,7 +278,6 @@ class RolloutManager:
         self,
         train_cfg: TrainConfig,
         rollout_cfg: RolloutConfig,
-        train_state_mgr: TrainStateManager,
         init_rollout_state: RolloutState,
     ):
         cpu_dev = jax.devices('cpu')[0]
@@ -357,7 +356,7 @@ class RolloutManager:
                     self._num_bptt_chunks,
                     self._num_train_policies,
                     self._num_train_agents_per_policy,
-                    *x.shape[2:],
+                    *x.shape[1:],
                 ), x.dtype),
             init_rollout_state.rnn_states)
 

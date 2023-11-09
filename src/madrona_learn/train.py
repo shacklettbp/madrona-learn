@@ -268,7 +268,6 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
     rollout_mgr = RolloutManager(
         train_cfg = cfg,
         rollout_cfg = rollout_cfg,
-        train_state_mgr = train_state_mgr,
         init_rollout_state = rollout_state,
     )
 
