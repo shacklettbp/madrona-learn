@@ -433,6 +433,7 @@ def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
 def check_rollout_loop(
     rnd,
     num_steps,
+    num_chunks, # Ignored
     episode_len,
     num_current_policies,
     num_past_policies,
@@ -575,6 +576,7 @@ def check_rollout_loop(
 def check_rollout_mgr(
     rnd,
     num_steps,
+    num_chunks,
     episode_len,
     num_current_policies,
     num_past_policies,
@@ -593,7 +595,7 @@ def check_rollout_mgr(
         steps_per_update = num_steps,
         lr = 0,
         algo = None,
-        num_bptt_chunks = 1,
+        num_bptt_chunks = num_chunks,
         gamma = 1,
         seed = rnd,
         gae_lambda = 1,
@@ -669,16 +671,32 @@ def check_rollout_mgr(
 
         def verify_wrapper(policy_idx, rollout_policy_data,
                 sliced_rollout_state, sliced_init_obs, sliced_init_rnns):
-            rollout_policy_data = jax.tree_map(
-                lambda x: jnp.swapaxes(x, 0, 1), rollout_policy_data)
+            per_policy_batch_size = rollout_mgr._num_train_agents_per_policy
+
+            rollout_policy_data, rnn_start_states = rollout_policy_data.pop(
+                'rnn_start_states')
+
+            # Need to invert the transformation applied by
+            # RolloutManager._finalize_rollouts
+            def txfm(x):
+                pre_permute = x.reshape(num_chunks, per_policy_batch_size,
+                    num_steps // num_chunks, *x.shape[2:])
+
+                # [C, T/C, B, ...]
+                orig = pre_permute.transpose(
+                    0, 2, 1, *range(3, len(pre_permute.shape)))
+
+                return orig.reshape(-1, per_policy_batch_size, *orig.shape[3:])
+
+            rollout_policy_data = jax.tree_map(txfm, rollout_policy_data)
 
             verify_rollout_data(sliced_rollout_state, rollout_policy_data,
                 policy_states, sliced_init_obs, sliced_init_rnns, num_steps,
-                episode_len, rollout_data.data['actions'].shape[1])
+                episode_len, per_policy_batch_size)
 
             all_assignments = rollout_policy_data['actions'][..., 1]
             checkify.check(jnp.all(all_assignments == policy_idx),
-                "Mismatched policy index")
+                "Mismatched policy index for train data")
 
         verify_wrapper = jax.vmap(verify_wrapper)
         verify_wrapper(jnp.arange(num_current_policies),
@@ -695,22 +713,24 @@ def check_rollout_mgr(
 
 
 def test_rollouts():
-    keys = ['rnd', 'num_steps', 'episode_len', 'num_current_policies',
-            'num_past_policies', 'num_teams', 'team_size', 'batch_size',
+    keys = ['rnd', 'num_steps', 'num_chunks', 'episode_len',
+            'num_current_policies', 'num_past_policies',
+            'num_teams', 'team_size', 'batch_size',
             'self_play', 'cross_play', 'past_play']
 
     configs = [
-        [5,   3, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
-        [5,  10, 11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
-        [5, 200, 10, 16, 7, 2, 2, 16384, 0.0,  1.0, 0.0],
-        [5, 200, 15, 16, 7, 4, 2, 16384, 0.0,  1.0, 0.0],
-        [7, 200, 15, 16, 0, 4, 2,   128, 1.0,  0.0, 0.0],
-        [7, 200, 15, 16, 7, 4, 2,  1024, 0.0,  0.5, 0.5],
-        [7, 200, 15, 16, 7, 4, 2,  1024, 0.5, 0.25, 0.25],
-        [7, 200, 15, 16, 7, 4, 4,  1024, 0.5, 0.25, 0.25],
-        [7, 200, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
-        [7, 1000, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
-        [7, 1000, 15, 16, 7, 4, 4,  4096, 0.0,  1.0, 0.0],
+        [5,   3,  1, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
+        [5,   4,  2, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
+        [5,  10,  2, 11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
+        [5, 200,  1, 10, 16, 7, 2, 2, 16384, 0.0,  1.0, 0.0],
+        [5, 200,  1, 15, 16, 7, 4, 2, 16384, 0.0,  1.0, 0.0],
+        [7, 200,  1, 15, 16, 0, 4, 2,   128, 1.0,  0.0, 0.0],
+        [7, 200,  1, 15, 16, 7, 4, 2,  1024, 0.0,  0.5, 0.5],
+        [7, 200,  1, 15, 16, 7, 4, 2,  1024, 0.5, 0.25, 0.25],
+        [7, 200,  1, 15, 16, 7, 4, 4,  1024, 0.5, 0.25, 0.25],
+        [7, 200,  4, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
+        [7, 1000, 1, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
+        [7, 1000, 4, 15, 16, 7, 4, 4,  4096, 0.0,  1.0, 0.0],
     ]
 
     for args in configs:
