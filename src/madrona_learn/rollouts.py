@@ -931,7 +931,7 @@ def _compute_reorder_chunks(assignments, P, C, B):
 
     # Compute scatter indices for items in partial chunks
     partial_chunk_starts = (
-        partial_base + C * jnp.arange(P) - full_chunk_counts)
+        partial_base + jnp.arange(0, P * C, C) - full_chunk_counts)
 
     # Alternatively, if partial chunks need to be compacted
     # to the beginning, do the following prefix sum over occupied chunks.
@@ -947,14 +947,21 @@ def _compute_reorder_chunks(assignments, P, C, B):
     partial_chunk_indices = (expanded_partial_chunk_starts +
         offsets_from_starts)
 
-    full_partial_mask = jnp.logical_and(
-        expanded_full_chunk_counts > 0,
-        offsets_from_starts < expanded_full_chunk_counts)
+    full_partial_mask = offsets_from_starts < expanded_full_chunk_counts
     scatter_positions = jnp.where(
         full_partial_mask, full_chunk_indices, partial_chunk_indices)
 
     to_policy_idxs = jnp.full((B * C), assignments.size, jnp.int32).at[
         scatter_positions].set(sort_idxs, unique_indices=True).reshape(B, C)
+
+    # This last step isn't strictly necessary, but ensures that each chunk will
+    # only gather data for its own policy. Could go a step further and also 
+    # remove OOB indices from empty chunks, but it will still work correctly
+    # because JAX clamps out of bounds indices. It's worth noting this makes
+    # it harder to identify invalid training data if trying to go from
+    # policy => train ordering directly in future.
+    to_policy_idxs = jnp.where(to_policy_idxs != assignments.size,
+        to_policy_idxs, to_policy_idxs[:, 0:1])
 
     to_sim_idxs = jnp.empty_like(assignments).at[
         sort_idxs].set(scatter_positions, unique_indices=True)

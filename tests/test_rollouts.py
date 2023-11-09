@@ -539,16 +539,17 @@ def test_rollout_loop():
         [7, 200, 15, 16, 7, 4, 2,  1024, 0.0,  0.5, 0.5],
         [7, 200, 15, 16, 7, 4, 2,  1024, 0.5, 0.25, 0.25],
         [7, 200, 15, 16, 7, 4, 4,  1024, 0.5, 0.25, 0.25],
+        [7, 200, 15, 16, 7, 4, 4,  1024, 0.0,  0.0, 1.0],
     ]
 
     for args in configs:
         kwargs = {k: v for k, v in zip(keys, args)}
         check_rollout_loop(**kwargs)
 
-#test_reorder_chunks1()
-#test_reorder_chunks2()
-#test_reorder_chunks3()
-#test_reorder_chunks4()
+test_reorder_chunks1()
+test_reorder_chunks2()
+test_reorder_chunks3()
+test_reorder_chunks4()
 
 #test_init_matchmake1()
 #test_init_matchmake2()
