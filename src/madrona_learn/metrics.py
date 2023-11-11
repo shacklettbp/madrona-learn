@@ -108,10 +108,8 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
             # If this is a per-policy metric and record isn't being
             # called in a vmap'd region, _update_metric needs to be vmapped
-            if old_metric.per_policy and old_metric.mean.ndim == 2:
-                @jax.vmap
-                def update_metric(cur_metric, new_data):
-                    self._update_metric(old_metric, data[k])
+            if old_metric.per_policy and old_metric.mean.ndim > 0:
+                update_metric = jax.vmap(self._update_metric)
             else:
                 update_metric = self._update_metric
 

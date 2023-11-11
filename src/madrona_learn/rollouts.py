@@ -547,10 +547,6 @@ class RolloutManager:
                 'advantages': advantages,
             })
 
-            metrics = metrics.record({
-                'Advantages': advantages,
-            })
-
             returns = advantages + rollouts['values']
         else:
             returns = self._compute_returns_fn(rollouts['rewards'],
@@ -558,13 +554,6 @@ class RolloutManager:
 
         rollouts = rollouts.copy({
             'returns': returns,
-        })
-
-        metrics = metrics.record({
-            'Rewards': rollouts['rewards'],
-            'Values': rollouts['values'],
-            'Returns': rollouts['returns'],
-            'Bootstrap Values': bootstrap_values,
         })
 
         rollouts, rnn_start_states = rollouts.pop('rnn_start_states')
@@ -586,7 +575,19 @@ class RolloutManager:
             return t.reshape(t.shape[0], -1, *t.shape[3:])
 
         rnn_start_states = jax.tree_map(reorder_rnn_data, rnn_start_states)
-            
+
+        metrics = metrics.record({
+            'Rewards': rollouts['rewards'],
+            'Values': rollouts['values'],
+            'Returns': rollouts['returns'],
+            'Bootstrap Values': bootstrap_values,
+        })
+
+        if self._use_advantages:
+            metrics = metrics.record({
+                'Advantages': rollouts['advantages'],
+            })
+
         return RolloutData(
             data = rollouts.copy({
                 'rnn_start_states': rnn_start_states,
