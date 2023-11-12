@@ -57,7 +57,7 @@ class TrainConfig:
                     rep += f"\n    {algo_cfg_k}: {algo_cfg_v}"
             elif k == 'pbt':
                 if v == None:
-                    rep += "\n  ppt: Disabled"
+                    rep += "\n  pbt: Disabled"
                 else:
                     rep += "\n  pbt:"
                     for pbt_k, pbt_v in self.pbt.__dict__.items():
