@@ -151,11 +151,13 @@ class DenseLayerCritic(nn.Module):
 
 class EMANormalizeTree(nn.Module):
     decay: jnp.float32
+    out_dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, tree, train):
         return jax.tree_map(
-            lambda x: EMANormalizer(self.decay)('normalize', train, x), tree)
+            lambda x: EMANormalizer(self.decay, self.out_dtype)(
+                'normalize', train, x), tree)
 
 
 # Based on the Emergent Tool Use policy paper

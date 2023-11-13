@@ -7,6 +7,7 @@ from flax import linen as nn
 # values and observations
 class EMANormalizer(nn.Module):
     decay: jnp.float32
+    out_dtype: jnp.dtype
     eps: jnp.float32 = 1e-5
     disable: bool = False
 
@@ -28,7 +29,8 @@ class EMANormalizer(nn.Module):
         assert(x_mean.shape == mu.value.shape)
 
         N.value = N.value + 1
-        bias_correction = -jnp.expm1(N.value * jnp.log(self.decay))
+        bias_correction = -jnp.expm1(
+            N.value.astype(jnp.float32) * jnp.log(self.decay))
 
         mu_biased.value = (mu_biased.value * self.decay +
             x_mean * one_minus_decay)
@@ -43,8 +45,7 @@ class EMANormalizer(nn.Module):
         prev_mu = jnp.where(N.value == 0, new_mu, mu.value)
 
         sigma_sq_new = jnp.mean(
-            (x - jnp.asarray(prev_mu, dtype=x.dtype)) *
-            (x - jnp.asarray(new_mu, dtype=x.dtype)),
+            (x - prev_mu.astype(x.dtype)) * (x - new_mu.astype(x.dtype)),
             axis=reduce_axes, dtype=jnp.float32)
 
         assert(sigma_sq_new.shape == sigma_sq_biased.value.shape)
@@ -64,7 +65,9 @@ class EMANormalizer(nn.Module):
         if self.disable:
             return x 
 
-        input_dtype = jnp.result_type(x)
+        if not jnp.issubdtype(x.dtype, jnp.floating):
+            x = x.astype(jnp.float32)
+
         dim = x.shape[-1]
 
         # Current parameter estimates. Initialized to mu 0, sigma 1 as a
@@ -84,16 +87,16 @@ class EMANormalizer(nn.Module):
             lambda: jnp.zeros((dim,), jnp.float32))
 
         N = self.variable("batch_stats", "N",
-            lambda: jnp.zeros((), jnp.float32))
+            lambda: jnp.zeros((), jnp.int32))
 
         if mode == 'normalize':
             if update_stats:
                 self._update_stats(x, mu, inv_sigma,
                     sigma, mu_biased, sigma_sq_biased, N)
-            return ((x - jnp.asarray(mu.value, input_dtype)) *
-                    jnp.asarray(inv_sigma.value, input_dtype))
+            return ((x - mu.value.astype(x.dtype)) *
+                    inv_sigma.value.astype(x.dtype)).astype(self.out_dtype)
         elif mode == 'invert':
-            return (x * jnp.asarray(sigma.value, input_dtype) +
-                    jnp.asarray(mu.value, input_dtype))
+            return (x * sigma.value.astype(x.dtype) +
+                    mu.value.astype(x.dtype)).astype(self.out_dtype)
         else:
             raise Exception("Invalid mode")

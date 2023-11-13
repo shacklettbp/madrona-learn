@@ -161,7 +161,10 @@ def _setup_value_normalizer(hyper_params, rng_key, fake_values):
                         if hyper_params.normalize_values else 1.0)
 
     value_normalizer = EMANormalizer(
-        value_norm_decay, disable=not hyper_params.normalize_values)
+        decay = value_norm_decay,
+        out_dtype = fake_values.dtype,
+        disable = not hyper_params.normalize_values,
+    )
 
     value_normalizer_vars = value_normalizer.init(
         rng_key, 'normalize', False, fake_values)
