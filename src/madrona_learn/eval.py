@@ -23,6 +23,7 @@ def eval_ckpt(
     sim_step: Callable,
     init_sim_data: FrozenDict,
     policy: ActorCritic,
+    obs_preprocess: Optional[nn.Module],
     step_cb: Callable,
     policy_dtype: jnp.dtype,
     load_policies: List[int] = [0],
@@ -30,8 +31,8 @@ def eval_ckpt(
 ):
     with jax.default_device(dev):
         _eval_ckpt_impl(ckpt_path, num_eval_steps, sim_step,
-            init_sim_data, policy, step_cb, policy_dtype, load_policies,
-            use_deterministic_policy)
+            init_sim_data, policy, obs_preprocess, step_cb, policy_dtype,
+            load_policies, use_deterministic_policy)
 
 def _eval_ckpt_impl(
     ckpt_path: str,
@@ -39,6 +40,7 @@ def _eval_ckpt_impl(
     sim_step: Callable,
     init_sim_data: FrozenDict,
     policy: ActorCritic,
+    obs_preprocess: Optional[nn.Module],
     step_cb: Callable,
     policy_dtype: jnp.dtype,
     load_policies: List[int],
@@ -61,7 +63,8 @@ def _eval_ckpt_impl(
     sim_batch_size = init_sim_data['actions'].shape[0]
     batch_size_per_policy = sim_batch_size // num_policies
 
-    policy_states = TrainStateManager.load_policies(policy, ckpt_path)
+    policy_states = TrainStateManager.load_policies(
+        policy, obs_preprocess, ckpt_path)
     policy_states = jax.tree_map(
         lambda x: x[load_policies], policy_states)
 
@@ -91,10 +94,10 @@ def _eval_ckpt_impl(
 
     rollout_state = init_rollout_state()
 
-    def post_policy_cb(step_idx, policy_obs, policy_out,
+    def post_policy_cb(step_idx, obs, preprocessed_obs, policy_out,
                        reorder_state, cb_state):
         return reorder_state.to_sim(policy_out.copy({
-            'obs': policy_obs,
+            'obs': obs,
         }))
 
     def post_step_cb(step_idx, dones, rewards, reorder_state, cb_state):

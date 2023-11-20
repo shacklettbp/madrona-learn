@@ -27,6 +27,7 @@ def train(
     sim_step: Callable,
     init_sim_data: FrozenDict,
     policy: ActorCritic,
+    obs_preprocess: Optional[nn.Module],
     iter_cb: Callable,
     metrics_cfg: CustomMetricConfig,
     restore_ckpt: str = None,
@@ -36,7 +37,8 @@ def train(
 
     with jax.default_device(dev):
         return _train_impl(dev.platform, cfg, sim_step, init_sim_data,
-            policy, iter_cb, metrics_cfg, restore_ckpt, profile_port)
+            policy, obs_preprocess, iter_cb, metrics_cfg, restore_ckpt,
+            profile_port)
 
 def _pbt_update(
     cfg: TrainConfig,
@@ -112,7 +114,8 @@ def _update_loop(
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
-                rollout_state, rollout_data, metrics = rollout_mgr.collect(
+                (train_state_mgr, rollout_state,
+                 rollout_data, metrics) = rollout_mgr.collect(
                     train_state_mgr, rollout_state, metrics)
 
             with profile('Learn'):
@@ -120,7 +123,8 @@ def _update_loop(
                     lambda x: x[0:num_train_policies],
                     train_state_mgr.policy_states)
 
-                train_policy_states, updated_train_states, metrics = algo_wrapper(
+                (train_policy_states, updated_train_states,
+                 metrics) = algo_wrapper(
                     train_policy_states, train_state_mgr.train_states,
                     rollout_data, metrics)
 
@@ -211,7 +215,8 @@ def _setup_rollout_cfg(dev_type, cfg):
 
 
 def _train_impl(dev_type, cfg, sim_step, init_sim_data,
-                policy, iter_cb, metrics_cfg, restore_ckpt, profile_port):
+                policy, obs_preprocess, iter_cb, metrics_cfg,
+                restore_ckpt, profile_port):
     if profile_port != None:
         jax.profiler.start_server(profile_port)
         env_vars['TF_GPU_CUPTI_FORCE_CONCURRENT_KERNEL'] = '1'
@@ -252,6 +257,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
+        obs_preprocess = obs_preprocess,
         cfg = cfg,
         algo = algo,
         base_rng = init_rng,

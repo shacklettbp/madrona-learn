@@ -1,102 +1,142 @@
 import jax
 from jax import lax, random, numpy as jnp
 import flax
-from flax import linen as nn
+from flax.core import FrozenDict
+from dataclasses import dataclass
 
 # Exponential Moving Average mean and variance estimator for
 # values and observations
-class EMANormalizer(nn.Module):
-    decay: jnp.float32
+@dataclass(frozen=True)
+class EMANormalizer:
+    decay: float
     out_dtype: jnp.dtype
-    eps: jnp.float32 = 1e-5
+    eps: float = 1e-5
     disable: bool = False
 
-    def _update_stats(
-        self,
-        x,
-        mu,
-        inv_sigma,
-        sigma,
-        mu_biased,
-        sigma_sq_biased,
-        N,
-    ):
-        one_minus_decay = jnp.float32(1) - self.decay
-
-        reduce_axes = tuple(range(len(x.shape) - 1))
-        x_mean = jnp.mean(x, axis=reduce_axes, dtype=jnp.float32)
-
-        assert(x_mean.shape == mu.value.shape)
-
-        N.value = N.value + 1
-        bias_correction = -jnp.expm1(
-            N.value.astype(jnp.float32) * jnp.log(self.decay))
-
-        mu_biased.value = (mu_biased.value * self.decay +
-            x_mean * one_minus_decay)
-
-        new_mu = mu_biased.value / bias_correction
-
-        # prev_mu needs to be unbiased (bias_correction only accounts
-        # for the initial EMA with 0), since otherwise variance would
-        # be off by a squared factor.
-        # On the first iteration, simply treat x's variance as the 
-        # full estimate of variance
-        prev_mu = jnp.where(N.value == 0, new_mu, mu.value)
-
-        sigma_sq_new = jnp.mean(
-            (x - prev_mu.astype(x.dtype)) * (x - new_mu.astype(x.dtype)),
-            axis=reduce_axes, dtype=jnp.float32)
-
-        assert(sigma_sq_new.shape == sigma_sq_biased.value.shape)
-
-        sigma_sq_biased.value = (sigma_sq_biased.value * self.decay +
-            sigma_sq_new * one_minus_decay)
-
-        sigma_sq = sigma_sq_biased.value / bias_correction
-
-        # Write out new unbiased params
-        mu.value = new_mu
-        inv_sigma.value = lax.rsqrt(lax.max(sigma_sq, self.eps))
-        sigma.value = jnp.reciprocal(inv_sigma.value)
-
-    @nn.compact
-    def __call__(self, mode, update_stats, x):
+    def init_estimates(self, x):
         if self.disable:
-            return x 
-
-        if not jnp.issubdtype(x.dtype, jnp.floating):
-            x = x.astype(jnp.float32)
+            return {}
 
         dim = x.shape[-1]
 
-        # Current parameter estimates. Initialized to mu 0, sigma 1 as a
-        # noop. On first call where update_stats == True, these values
-        # are overwritten
-        mu = self.variable("batch_stats", "mu",
-            lambda: jnp.zeros((dim,), jnp.float32))
-        inv_sigma = self.variable("batch_stats", "inv_sigma", 
-            lambda: jnp.ones((dim,), jnp.float32))
-        sigma = self.variable("batch_stats", "sigma",
-            lambda: jnp.ones((dim,), jnp.float32))
+        # Parameter estimates. Initialized to mu 0, sigma 1 as a
+        # noop. Note that these values do not bias the overall estimate,
+        # they will be immediately overwritten by values derived from
+        # mu_biased and sigma_sq_biased when update_stats is called.
 
-        # Intermediate values used to compute the moving average
-        mu_biased = self.variable("batch_stats", "mu_biased",
-            lambda: jnp.zeros((dim,), jnp.float32))
-        sigma_sq_biased = self.variable("batch_stats", "sigma_sq_biased",
-            lambda: jnp.zeros((dim,), jnp.float32))
+        return FrozenDict(
+            mu = jnp.zeros((dim,), jnp.float32),
+            inv_sigma = jnp.ones((dim,), jnp.float32),
+            sigma = jnp.ones((dim,), jnp.float32),
+            # Intermediate values used to compute the moving average
+            mu_biased = jnp.zeros((dim,), jnp.float32),
+            sigma_sq_biased = jnp.zeros((dim,), jnp.float32),
+            N = jnp.zeros((), jnp.int32),
+        )
 
-        N = self.variable("batch_stats", "N",
-            lambda: jnp.zeros((), jnp.int32))
+    def normalize(self, est, x):
+        x = self._convert_nonfloat(x)
+        return ((x - est['mu'].astype(x.dtype)) *
+            est['inv_sigma'].astype(x.dtype)).astype(self.out_dtype)
 
-        if mode == 'normalize':
-            if update_stats:
-                self._update_stats(x, mu, inv_sigma,
-                    sigma, mu_biased, sigma_sq_biased, N)
-            return ((x - mu.value.astype(x.dtype)) *
-                    inv_sigma.value.astype(x.dtype)).astype(self.out_dtype)
-        elif mode == 'invert':
-            return (x * sigma.value.astype(x.dtype) +
-                    mu.value.astype(x.dtype)).astype(self.out_dtype)
+    def invert(self, est, x):
+        x = self._convert_nonfloat(x)
+        return (x * est['sigma'].astype(x.dtype) +
+            est['mu'].astype(x.dtype)).astype(self.out_dtype)
+
+    def init_input_stats(self, est):
+        return jnp.zeros_like(est['mu']), jnp.zeros_like(est['mu'])
+
+    def update_input_stats(self, cur_stats, num_prev_updates, x):
+        a_mean, a_var = cur_stats
+
+        reduce_axes = tuple(range(len(x.shape) - 1))
+
+        x = self._convert_nonfloat(x)
+
+        b_mean = jnp.mean(x, axis=reduce_axes, dtype=jnp.float32)
+        b_var = jnp.mean(jnp.square(x - b_mean),
+            axis=reduce_axes, dtype=jnp.float32)
+
+        delta = b_mean - a_mean
+
+        n_a = num_prev_updates
+        n_ab = n_a + 1
+
+        b_weight = jnp.reciprocal(jnp.float32(n_ab))
+        a_weight = jnp.float32(1) - b_weight
+
+        ab_mean = a_mean + delta * b_weight
+        ab_var = (a_weight * a_var + b_weight * b_var +
+                  jnp.square(delta) * a_weight * b_weight)
+
+        return ab_mean, ab_var
+
+    def update_estimates(self, est, input_stats):
+        # This code is derived from the generalized formulas provided in
+        # Numerically Stable Parallel Computation of Co-Variance,
+        # Schubert & Gertz, 2018.
+        # Basically this paper is a generalization of Chan's algorithm to
+        # arbitrary weights on each item, which makes it easy to combine
+        # Chan's algorithm + EMA. One non-obvious thing from the paper is
+        # that VW_a (sum of squared differences from the mean) can simply be
+        # rescaled by (1 - alpha) from the prior iteration because the
+        # weight changes in the mean are cancelled out.
+        x_mean, x_var = input_stats
+
+        mean_delta = x_mean - est['mu']
+
+        one_minus_alpha = jnp.float32(self.decay)
+        alpha = jnp.float32(1) - one_minus_alpha
+
+        new_N = est['N'] + 1
+
+        new_mu_biased = (
+            one_minus_alpha * est['mu_biased'] + alpha * x_mean
+        )
+
+        new_sigma_sq_biased = (
+            one_minus_alpha * est['sigma_sq_biased'] + alpha * x_var +
+            (est['N'].astype(jnp.float32) / new_N.astype(jnp.float32)) *
+                (one_minus_alpha * alpha) * jnp.square(mean_delta)
+        )
+        
+        bias_correction = -1 / jnp.expm1(
+            new_N.astype(jnp.float32) * jnp.log(one_minus_alpha))
+
+        new_mu = new_mu_biased * bias_correction
+        new_sigma_sq = new_sigma_sq_biased * bias_correction
+
+        # Write out new unbiased params
+        new_inv_sigma = lax.rsqrt(lax.max(new_sigma_sq, jnp.float32(self.eps)))
+        new_sigma = jnp.reciprocal(new_inv_sigma)
+
+        return FrozenDict(
+            mu = new_mu,
+            inv_sigma = new_inv_sigma,
+            sigma = new_sigma,
+            # Intermediate values used to compute the moving average
+            mu_biased = new_mu_biased,
+            sigma_sq_biased = new_sigma_sq_biased,
+            N = new_N,
+        )
+
+    def _convert_nonfloat(self, x):
+        if jnp.issubdtype(x.dtype, jnp.floating):
+            return x
         else:
-            raise Exception("Invalid mode")
+            return x.astype(jnp.float32)
+
+    # Generalization of chan's algorithm to compute variance of N sets
+    #def merge_means_vars(self, inputs_means_vars):
+    #    x_means, x_vars = inputs_means_vars
+
+    #    merged_mean = jnp.mean(x_means, axis=0, dtype=jnp.float32)
+
+    #    num_merge = x_means.shape[0]
+    #    merged_var = jnp.float32(1) / jnp.float32(num_merge) * jnp.sum(
+    #        x_vars + jnp.square(x_means - merged_mean[None, :]),
+    #        axis=0, dtype=jnp.float32)
+
+    #    return merged_mean, merged_var
+

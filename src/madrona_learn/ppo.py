@@ -95,6 +95,8 @@ def _ppo_update(
     train_state: PolicyTrainState,
     metrics: TrainingMetrics,
 ):
+    value_norm = train_state.value_normalizer
+
     def fwd_pass(params):
         with profile('AC Forward'):
             return policy_state.apply_fn(
@@ -133,25 +135,26 @@ def _ppo_update(
         action_obj = jnp.minimum(surr1, surr2)
 
         if cfg.algo.clip_value_loss:
-            old_values_normalized = train_state.value_normalize_fn(
-                { 'batch_stats': train_state.value_normalize_stats },
-                mode='normalize',
-                update_stats=False,
-                x=mb['values'],
-            )
+            old_values_normalized = value_norm.normalize(
+                train_state.value_normalizer_state, mb['values'])
 
             low = old_values_normalized - train_state.hyper_params.clip_coef
             high = old_values_normalized + train_state.hyper_params.clip_coef
 
             new_values = jnp.clip(new_values, low, high)
 
-        normalized_returns, value_norm_mutable_new = train_state.value_normalize_fn(
-            { 'batch_stats': train_state.value_normalize_stats },
-            mode='normalize',
-            update_stats=True,
-            x=mb['returns'],
-            mutable=['batch_stats'],
+        return_norm_stats = value_normalizer.update_input_states(
+            value_normalizer.init_input_stats(
+                train_state.value_normalizer_state),
+            0,
+            mb['returns'],
         )
+
+        new_value_norm_state = value_normalizer.update_estimates(
+            train_state.value_normalize_state, return_norm_stats)
+
+        normalized_returns = value_normalizer.normalize(
+            new_value_norm_state, mb['returns'])
 
         if cfg.algo.huber_value_loss:
             value_loss = optax.huber_loss(
@@ -174,7 +177,7 @@ def _ppo_update(
 
         return loss, (
             ac_mutable_new['batch_stats'],
-            value_norm_mutable_new['batch_stats'],
+            new_value_norm_state,
             loss,
             action_loss,
             value_loss,
@@ -205,7 +208,7 @@ def _ppo_update(
 
         (
             new_ac_batch_stats,
-            new_vn_batch_stats,
+            new_value_norm_state,
             combined_loss,
             action_loss,
             value_loss,
@@ -218,7 +221,7 @@ def _ppo_update(
         )
 
         train_state = train_state.update(
-            value_normalize_stats = new_vn_batch_stats,
+            value_normalize_state = new_value_norm_state,
             opt_state = new_opt_state,
             scaler = scaler,
         )

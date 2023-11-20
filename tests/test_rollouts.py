@@ -15,7 +15,7 @@ from madrona_learn import (
 init(0.5)
 
 from madrona_learn.train_state import (
-    PolicyState, PolicyTrainState, TrainStateManager,
+    PolicyState, PolicyTrainState, TrainStateManager, ObsPreprocessNoop,
 )
 
 from madrona_learn.rollouts import (
@@ -332,11 +332,18 @@ def fake_rollout_setup(
         params['backbone']['encoder']['net']['bias'] = jnp.array(
             policy_idx, dtype=jnp.int32)
 
+        obs_preprocess = ObsPreprocessNoop().init(
+            rollout_state.sim_data['obs'])
+        obs_preprocess_state = obs_preprocess.init_state(
+            rollout_state.sim_data['obs'])
+
         return PolicyState(
             apply_fn = policy.apply,
             rnn_reset_fn = policy.clear_recurrent_state,
             params = params,
-            batch_stats = {}
+            batch_stats = {},
+            obs_preprocess = obs_preprocess,
+            obs_preprocess_state = obs_preprocess_state,
         )
 
     rnd, rnd_init = random.split(rnd)

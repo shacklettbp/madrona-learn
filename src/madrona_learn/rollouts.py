@@ -15,7 +15,8 @@ from .algo_common import compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
 from .profile import profile
 from .train_state import TrainStateManager, PolicyState, PolicyTrainState
-from .utils import TypedShape, convert_float_leaves
+from .utils import TypedShape
+from .observations import ObservationsPreprocess
 
 @dataclass(frozen = True)
 class RolloutConfig:
@@ -249,14 +250,16 @@ class RolloutData(flax.struct.PyTreeNode):
         })
 
 
-class RolloutStore(flax.struct.PyTreeNode):
-    store : FrozenDict
+class RolloutCollectState(flax.struct.PyTreeNode):
+    store: FrozenDict[str, Any]
+    obs_stats: FrozenDict[str, Any]
 
     @staticmethod
-    def create_from_tree(typed_shapes : FrozenDict):
-        return RolloutStore(
+    def create(store_typed_shapes, init_obs_stats):
+        return RolloutCollectState(
             store = jax.tree_map(
-                lambda x: jnp.empty(x.shape, x.dtype), typed_shapes),
+                lambda x: jnp.empty(x.shape, x.dtype), store_typed_shapes),
+            obs_stats = init_obs_stats,
         )
 
     def save(self, indices, data):
@@ -270,7 +273,10 @@ class RolloutStore(flax.struct.PyTreeNode):
             new_store = new_store.copy(
                 {k: jax.tree_map(save_leaf, v, new_store[k])})
 
-        return RolloutStore(store = new_store)
+        return self.replace(store=new_store)
+
+    def update_obs_stats(self, obs_stats):
+        return self.replace(obs_stats = obs_stats)
 
 
 class RolloutManager:
@@ -386,46 +392,72 @@ class RolloutManager:
         rollout_state: RolloutState,
         metrics: TrainingMetrics,
     ):
+        obs_preprocess = train_state_mgr.policy_states.obs_preprocess
+        obs_preprocess_updateable_state = jax.tree_map(
+            lambda s: s[0:self._num_train_policies],
+            train_state_mgr.policy_states.obs_preprocess_state)
+
         def iter_bptt_chunk(bptt_chunk, inputs):
-            rollout_state, rollout_store = inputs
+            rollout_state, collect_state = inputs
 
             post_inference_cb = partial(self._post_inference_cb,
-                train_state_mgr.train_states, bptt_chunk)
+                obs_preprocess,
+                obs_preprocess_updateable_state,
+                train_state_mgr.train_states,
+                bptt_chunk)
             post_step_cb = partial(self._post_step_cb, bptt_chunk)
 
             with profile("Cache RNN state"):
-                rollout_store = rollout_store.save(bptt_chunk, {
+                collect_state = collect_state.save(bptt_chunk, {
                     'rnn_start_states': self._sim_to_train(
                         rollout_state.rnn_states, rollout_state.reorder_state),
                 })
 
-            rollout_state, rollout_store = rollout_loop(
+            rollout_state, collect_state = rollout_loop(
                 rollout_state, train_state_mgr.policy_states, self._cfg,
                 self._num_bptt_steps,  post_inference_cb, post_step_cb,
-                rollout_store, sample_actions = True, return_debug = False)
+                collect_state, sample_actions = True, return_debug = False)
 
-            return rollout_state, rollout_store
+            return rollout_state, collect_state 
 
-        rollout_store = RolloutStore.create_from_tree(
-            self._store_typed_shape_tree)
+        collect_state = RolloutCollectState.create(
+            self._store_typed_shape_tree,
+            jax.vmap(obs_preprocess.init_obs_stats)(
+                obs_preprocess_updateable_state),
+        )
 
-        rollout_state, rollout_store = lax.fori_loop(
+        rollout_state, collect_state = lax.fori_loop(
             0, self._num_bptt_chunks, iter_bptt_chunk,
-            (rollout_state, rollout_store))
+            (rollout_state, collect_state))
 
         with profile("Bootstrap Values"):
             bootstrap_values = self._bootstrap_values(
                 train_state_mgr.policy_states, train_state_mgr.train_states,
                 rollout_state)
 
-            rollout_store = rollout_store.save(
+            collect_state = collect_state.save(
                 slice(None), {'bootstrap_values': bootstrap_values})
+
+        with profile('Update Observation Preprocess State'):
+            new_obs_preprocess_state = jax.vmap(obs_preprocess.update_state)(
+                obs_preprocess_updateable_state, collect_state.obs_stats)
+
+            new_obs_preprocess_state = jax.tree_map(
+                lambda old, new: old.at[0:self._num_train_policies].set(new),
+                train_state_mgr.policy_states.obs_preprocess_state,
+                new_obs_preprocess_state)
+
+            train_state_mgr = train_state_mgr.replace(
+                policy_states = train_state_mgr.policy_states.update(
+                    obs_preprocess_state = new_obs_preprocess_state,
+                ),
+            )
 
         with profile("Finalize Rollouts"):
             rollout_data, metrics = self._finalize_rollouts(
-                rollout_store.store, metrics)
+                collect_state.store, metrics)
 
-        return rollout_state, rollout_data, metrics
+        return train_state_mgr, rollout_state, rollout_data, metrics
 
     def _sim_to_train(self, data, reorder_state):
         if self._cfg.has_matchmaking:
@@ -452,12 +484,8 @@ class RolloutManager:
     def _invert_value_normalization(self, train_states, values):
         @jax.vmap
         def invert_vn(train_state, v):
-            return train_state.value_normalize_fn(
-                { 'batch_stats': train_state.value_normalize_stats },
-                mode='invert',
-                update_stats=False,
-                x=v,
-            )
+            return train_state.value_normalizer.invert(
+                train_state.value_normalizer_state, v)
 
         return invert_vn(train_states, values)
 
@@ -466,8 +494,6 @@ class RolloutManager:
         obs = rollout_state.sim_data['obs']
         reorder_state = rollout_state.reorder_state
 
-        obs = convert_float_leaves(obs, self._cfg.float_dtype)
-
         rnn_states, obs = self._sim_to_train((rnn_states, obs), reorder_state)
 
         policy_states = jax.tree_map(
@@ -475,14 +501,17 @@ class RolloutManager:
 
         @jax.vmap
         def critic_fn(state, rnn_states, obs):
+            preprocessed_obs = state.obs_preprocess.preprocess(
+                state.obs_preprocess_state, obs)
+
             policy_out, rnn_states = state.apply_fn(
                 {
                     'params': state.params,
                     'batch_stats': state.batch_stats,
                 },
                 rnn_states,
-                obs,
-                train=False,
+                preprocessed_obs,
+                train = False,
                 method='critic_only',
             )
 
@@ -494,30 +523,45 @@ class RolloutManager:
 
     def _post_inference_cb(
         self,
+        obs_preprocess: ObservationsPreprocess,
+        obs_preprocess_state: FrozenDict[str, Any],
         train_states: PolicyTrainState,
         bptt_chunk: int,
         bptt_step: int,
-        policy_obs: FrozenDict[str, Any],
+        obs: FrozenDict[str, Any],
+        preprocessed_obs: FrozenDict[str, Any],
         policy_out: FrozenDict[str, Any],
         reorder_state: PolicyBatchReorderState,
-        rollout_store: RolloutStore,
+        collect_state: RolloutCollectState,
     ):
         with profile('Pre Step Rollout Store'):
             values = self._policy_to_train(policy_out['values'], reorder_state)
             values = self._invert_value_normalization(train_states, values)
 
-            obs, actions, log_probs = self._policy_to_train(
-                (policy_obs, policy_out['actions'], policy_out['log_probs']),
+            preprocessed_obs, actions, log_probs = self._policy_to_train(
+                (preprocessed_obs,
+                 policy_out['actions'],
+                 policy_out['log_probs']),
                 reorder_state)
 
             save_data = {
-                'obs': obs,
+                'obs': preprocessed_obs,
                 'actions': actions,
                 'log_probs': log_probs,
                 'values': values,
             }
 
-            return rollout_store.save((bptt_chunk, bptt_step), save_data)
+            collect_state = collect_state.save(
+                (bptt_chunk, bptt_step), save_data)
+
+            new_obs_stats = obs_preprocess.update_obs_stats(
+                obs_preprocess_state, collect_state.obs_stats,
+                bptt_chunk * self._num_bptt_steps + bptt_step,
+                self._policy_to_train(obs, reorder_state))
+
+            collect_state = collect_state.update_obs_stats(new_obs_stats)
+
+            return collect_state
 
     def _post_step_cb(
         self,
@@ -526,14 +570,14 @@ class RolloutManager:
         dones: jax.Array,
         rewards: jax.Array,
         reorder_state: PolicyBatchReorderState,
-        rollout_store: RolloutStore,
+        collect_state: RolloutCollectState,
     ):
         with profile('Post Step Rollout Store'):
             save_data = self._sim_to_train({
                 'dones': dones,
                 'rewards': rewards,
             }, reorder_state)
-            return rollout_store.save(
+            return collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
     def _finalize_rollouts(self, rollouts, metrics):
@@ -607,7 +651,11 @@ def rollout_loop(
     cb_state: Any,
     **policy_kwargs,
 ):
-    def policy_fn(state, sample_key, rnn_states, obs):
+    def obs_preprocess_fn(state, obs):
+        return state.obs_preprocess.preprocess(
+            state.obs_preprocess_state, obs)
+
+    def policy_fn(state, sample_key, rnn_states, preprocessed_obs):
         return state.apply_fn(
             {
                 'params': state.params,
@@ -615,22 +663,23 @@ def rollout_loop(
             },
             sample_key,
             rnn_states,
-            obs,
+            preprocessed_obs,
             train = False,
             **policy_kwargs,
             method = 'rollout',
         )
 
+    obs_preprocess_fn = jax.vmap(obs_preprocess_fn)
+    policy_fn = jax.vmap(policy_fn)
     rnn_reset_fn = policy_states.rnn_reset_fn
 
-    def policy_inference(states, assignments, reorder_state,
-                         sample_keys, rnn_states, obs):
-        if rollout_cfg.has_matchmaking:
+    def reorder_policy_states(states, assignments, reorder_state):
+        if not rollout_cfg.has_matchmaking:
+            return states 
+        else:
             # FIXME: more efficient way to get this?
             state_idxs = reorder_state.to_policy(assignments)[:, 0]
-            states = jax.tree_map(lambda x: x[state_idxs], states)
-
-        return jax.vmap(policy_fn)(states, sample_keys, rnn_states, obs)
+            return jax.tree_map(lambda x: x[state_idxs], states)
 
     def rollout_iter(step_idx, iter_state):
         rollout_state, cb_state = iter_state
@@ -646,18 +695,21 @@ def rollout_loop(
             step_keys = random.split(
                 step_key, rollout_cfg.num_policy_chunks)
 
-            policy_obs = convert_float_leaves(
-                sim_data['obs'], rollout_cfg.float_dtype)
+            reordered_policy_states = reorder_policy_states(
+                policy_states, policy_assignments, reorder_state)
 
             rnn_states, policy_obs = reorder_state.to_policy(
-                (rnn_states, policy_obs))
+                (rnn_states, sim_data['obs']))
 
-            policy_out, rnn_states = policy_inference(
-                policy_states, policy_assignments, reorder_state,
-                step_keys, rnn_states, policy_obs)
+            preprocessed_obs = obs_preprocess_fn(
+                reordered_policy_states, policy_obs)
+
+            policy_out, rnn_states = policy_fn(reordered_policy_states,
+                step_keys, rnn_states, preprocessed_obs)
 
             cb_state = post_inference_cb(
-                step_idx, policy_obs, policy_out, reorder_state, cb_state)
+                step_idx, policy_obs, preprocessed_obs,
+                policy_out, reorder_state, cb_state)
 
             # rnn_states are kept across the loop in sim ordering,
             # because the ordering is stable, unlike policy batches that 
@@ -882,6 +934,7 @@ def _update_policy_assignments(
                 dones[past_start:past_end], past_rnd, rollout_cfg))
 
     return assignments, assign_rnd
+
 
 def _compute_reorder_chunks(assignments, P, C, B):
     assert assignments.ndim == 1

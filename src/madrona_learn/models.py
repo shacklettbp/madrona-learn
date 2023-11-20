@@ -2,12 +2,11 @@ import jax
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
+from flax.core import FrozenDict
 
-from typing import List, Callable
-from functools import partial
+from typing import List, Callable, Any
 
 from .action import DiscreteActionDistributions
-from .moving_avg import EMANormalizer
 
 from .pallas import monkeypatch as _pl_patch
 from .pallas import layer_norm as pl_layer_norm
@@ -147,17 +146,6 @@ class DenseLayerCritic(nn.Module):
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )(features)
-
-
-class EMANormalizeTree(nn.Module):
-    decay: jnp.float32
-    out_dtype: jnp.dtype
-
-    @nn.compact
-    def __call__(self, tree, train):
-        return jax.tree_map(
-            lambda x: EMANormalizer(self.decay, self.out_dtype)(
-                'normalize', train, x), tree)
 
 
 # Based on the Emergent Tool Use policy paper
