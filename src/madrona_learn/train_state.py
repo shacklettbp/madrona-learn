@@ -38,13 +38,12 @@ class PolicyState(flax.struct.PyTreeNode):
         return PolicyState(
             apply_fn = self.apply_fn,
             rnn_reset_fn = self.rnn_reset_fn,
-            process_obs_fn = self.process_obs_fn,
             params = params if params != None else self.params,
             batch_stats = (
                 batch_stats if batch_stats != None else self.batch_stats
             ),
             obs_preprocess = self.obs_preprocess,
-            obs_preprocess_stats = (
+            obs_preprocess_state = (
                 obs_preprocess_state if obs_preprocess_state != None else
                     self.obs_preprocess_state
             ),
@@ -98,12 +97,13 @@ class PolicyTrainState(flax.struct.PyTreeNode):
 class ObsPreprocessNoop:
     def init(self, obs):
         return ObservationsPreprocess(
-            preprocessors = jax.tree_map(lambda o: None, obs),
-            init_state_fn = lambda *args: None,
-            update_state_fn = lambda *args: None,
-            init_obs_stats_fn = lambda *args: None,
-            update_obs_stats_fn = lambda *args: None,
-            preprocess_fn = lambda preproc, state, ob: ob,
+            preprocessors = jax.tree_map(lambda o: self, obs),
+            init_state_fn = lambda _, ob: jnp.array(()),
+            update_state_fn = lambda _, state, stats: state,
+            init_obs_stats_fn = lambda _, stats: jnp.array(()),
+            update_obs_stats_fn = \
+                lambda _, state, stats, prev_updates, o: stats,
+            preprocess_fn = lambda _, state, ob: ob,
         )
 
 

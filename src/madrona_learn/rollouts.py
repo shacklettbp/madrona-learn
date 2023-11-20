@@ -554,9 +554,14 @@ class RolloutManager:
             collect_state = collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
-            new_obs_stats = obs_preprocess.update_obs_stats(
+            @jax.vmap
+            def update_obs_stats(preproc_state, obs_stats, obs):
+                return obs_preprocess.update_obs_stats(
+                    preproc_state, obs_stats,
+                    bptt_chunk * self._num_bptt_steps + bptt_step, obs)
+
+            new_obs_stats = update_obs_stats(
                 obs_preprocess_state, collect_state.obs_stats,
-                bptt_chunk * self._num_bptt_steps + bptt_step,
                 self._policy_to_train(obs, reorder_state))
 
             collect_state = collect_state.update_obs_stats(new_obs_stats)

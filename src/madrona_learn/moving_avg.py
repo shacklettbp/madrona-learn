@@ -35,19 +35,31 @@ class EMANormalizer:
         )
 
     def normalize(self, est, x):
+        if self.disable:
+            return x
+
         x = self._convert_nonfloat(x)
         return ((x - est['mu'].astype(x.dtype)) *
             est['inv_sigma'].astype(x.dtype)).astype(self.out_dtype)
 
     def invert(self, est, x):
+        if self.disable:
+            return x
+
         x = self._convert_nonfloat(x)
         return (x * est['sigma'].astype(x.dtype) +
             est['mu'].astype(x.dtype)).astype(self.out_dtype)
 
     def init_input_stats(self, est):
+        if self.disable:
+            return {}
+
         return jnp.zeros_like(est['mu']), jnp.zeros_like(est['mu'])
 
     def update_input_stats(self, cur_stats, num_prev_updates, x):
+        if self.disable:
+            return {}
+
         a_mean, a_var = cur_stats
 
         reduce_axes = tuple(range(len(x.shape) - 1))
@@ -73,6 +85,9 @@ class EMANormalizer:
         return ab_mean, ab_var
 
     def update_estimates(self, est, input_stats):
+        if self.disable:
+            return {}
+
         # This code is derived from the generalized formulas provided in
         # Numerically Stable Parallel Computation of Co-Variance,
         # Schubert & Gertz, 2018.
@@ -120,6 +135,17 @@ class EMANormalizer:
             sigma_sq_biased = new_sigma_sq_biased,
             N = new_N,
         )
+
+    def normalize_and_update_estimates(self, est, inputs):
+        if self.disable:
+            return inputs
+
+        norm_stats = self.update_input_states(
+            self.init_input_stats(est), 0, inputs)
+
+        est = self.update_estimates(est, norm_stats)
+
+        return est, self.normalize(est, inputs)
 
     def _convert_nonfloat(self, x):
         if jnp.issubdtype(x.dtype, jnp.floating):

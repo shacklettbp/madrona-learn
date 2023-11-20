@@ -28,7 +28,7 @@ class ObservationsPreprocess:
     def init_obs_stats(self, states):
         return jax.tree_map(self.init_obs_stats_fn, self.preprocessors, states)
 
-    def update_obs_stats(self, state, cur_obs_stats, num_prev_updates, obs):
+    def update_obs_stats(self, states, cur_obs_stats, num_prev_updates, obs):
         return jax.tree_map(
             lambda preproc, state, o_stats, o: self.update_obs_stats_fn(
                 preproc, state, o_stats, num_prev_updates, o),

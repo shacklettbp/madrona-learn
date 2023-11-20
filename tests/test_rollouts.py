@@ -29,6 +29,7 @@ from madrona_learn.rollouts import (
 )
 
 from madrona_learn.metrics import TrainingMetrics
+from madrona_learn.moving_avg import EMANormalizer
 
 def check_reorder_chunks(arr, P, C):
     B = arr.size // C + P - 1
@@ -527,10 +528,10 @@ def check_rollout_loop(
             jnp.all(pp_matches[:, :, 0, :] == policy_indices),
             "Incorrect past play train policies")
 
-    def post_inference_cb(step_idx, policy_obs, policy_out,
+    def post_inference_cb(step_idx, policy_obs, preprocessed_obs, policy_out,
                           reorder_state, rollout_store):
         obs, actions, values = reorder_state.to_sim(
-            (policy_obs, policy_out['actions'], policy_out['values']))
+            (preprocessed_obs, policy_out['actions'], policy_out['values']))
         
         return rollout_store.copy({
             'obs': rollout_store['obs'].at[step_idx].set(obs),
@@ -619,7 +620,8 @@ def check_rollout_mgr(
         ),
     )
 
-    rnd, policy_states, rollout_state, rollout_cfg, init_obs, init_rnn_states = fake_rollout_setup(
+    (rnd, policy_states, rollout_state,
+     rollout_cfg, init_obs, init_rnn_states) = fake_rollout_setup(
         rnd,
         num_steps,
         episode_len,
@@ -642,13 +644,12 @@ def check_rollout_mgr(
 
     rnd, pbt_rnd = random.split(rnd, 2)
 
-    def value_normalize_fn(params, mode, update_stats, x):
-        return x
+    value_normalizer = EMANormalizer(1, jnp.int32, disable=True)
 
     train_states = PolicyTrainState(
-        value_normalize_fn = value_normalize_fn,
+        value_normalizer = value_normalizer,
         tx = None,
-        value_normalize_stats = {},
+        value_normalizer_state = value_normalizer.init_estimates(init_obs),
         hyper_params = None,
         opt_state = None,
         scheduler = None,
@@ -667,7 +668,7 @@ def check_rollout_mgr(
         metrics = rollout_mgr.add_metrics(train_cfg, FrozenDict())
         metrics = TrainingMetrics.create(train_cfg, metrics)
 
-        rollout_state, rollout_data, metrics = rollout_mgr.collect(
+        train_state_mgr, rollout_state, rollout_data, metrics = rollout_mgr.collect(
             train_state_mgr, rollout_state, metrics)
 
         train_slice = lambda x: x[rollout_mgr._sim_to_train_idxs]
@@ -729,11 +730,11 @@ def check_rollout_mgr(
             rollout_data.data, sliced_rollout_state,
             sliced_init_obs, sliced_init_rnns)
 
-        return rollout_state, rollout_data
+        return rollout_state, train_state_mgr, rollout_data
 
     collect_wrapper = jax.jit(
         checkify.checkify(collect_wrapper), donate_argnums=0)
-    err, (rollout_state, rollout_data) = collect_wrapper(
+    err, (rollout_state, train_state_mgr, rollout_data) = collect_wrapper(
         rollout_state, train_state_mgr, init_obs, init_rnn_states)
     err.throw()
 

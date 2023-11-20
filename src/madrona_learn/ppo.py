@@ -143,18 +143,9 @@ def _ppo_update(
 
             new_values = jnp.clip(new_values, low, high)
 
-        return_norm_stats = value_normalizer.update_input_states(
-            value_normalizer.init_input_stats(
-                train_state.value_normalizer_state),
-            0,
-            mb['returns'],
-        )
-
-        new_value_norm_state = value_normalizer.update_estimates(
-            train_state.value_normalize_state, return_norm_stats)
-
-        normalized_returns = value_normalizer.normalize(
-            new_value_norm_state, mb['returns'])
+        new_value_norm_state, normalized_returns = (
+            value_normalizer.normalize_and_update_estimates(
+                train_state.value_normalizer_state, mb['returns']))
 
         if cfg.algo.huber_value_loss:
             value_loss = optax.huber_loss(
