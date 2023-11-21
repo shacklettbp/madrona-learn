@@ -113,6 +113,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             'next_update': update_idx + 1,
             'policy_states': self.policy_states,
             'train_states': self.train_states,
+            'pbt_rng': self.pbt_rng,
         }
 
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -126,6 +127,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             'next_update': 0,
             'policy_states': self.policy_states,
             'train_states': self.train_states,
+            'pbt_rng': self.pbt_rng,
         }
         
         loaded = checkpointer.restore(path, item=restore_desc)
@@ -133,6 +135,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
         return TrainStateManager(
             policy_states = loaded['policy_states'],
             train_states = loaded['train_states'],
+            pbt_rng = loaded['pbt_rng'],
         ), loaded['next_update']
 
     @staticmethod
