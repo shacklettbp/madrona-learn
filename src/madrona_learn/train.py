@@ -187,14 +187,6 @@ def _update_loop(
 
 
 def _setup_rollout_cfg(dev_type, cfg):
-    if cfg.mixed_precision:
-        if dev_type == 'gpu':
-            float_dtype = jnp.float16
-        else:
-            float_dtype = jnp.bfloat16
-    else:
-        float_dtype = jnp.float32
-
     sim_batch_size = cfg.num_agents_per_world * cfg.num_worlds
 
     if cfg.pbt != None:
@@ -210,7 +202,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             self_play_portion = cfg.pbt.self_play_portion,
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
-            float_dtype = float_dtype,
+            float_dtype = cfg.compute_dtype,
             policy_chunk_size_override = \
                 cfg.pbt.rollout_policy_chunk_size_override,
         )
@@ -224,7 +216,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
-            float_dtype = float_dtype,
+            float_dtype = cfg.compute_dtype,
         )
 
 

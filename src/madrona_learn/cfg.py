@@ -45,7 +45,7 @@ class TrainConfig:
     normalize_returns: bool = True # Only used if compute_advantages = False
     normalize_values: bool = True
     value_normalizer_decay: float = 0.99999
-    mixed_precision: bool = False
+    compute_dtype: jnp.dtype = jnp.float32
 
     def __repr__(self):
         rep = "TrainConfig:"
@@ -62,6 +62,14 @@ class TrainConfig:
                     rep += "\n  pbt:"
                     for pbt_k, pbt_v in self.pbt.__dict__.items():
                         rep += f"\n    {pbt_k}: {pbt_v}"
+            elif k == 'compute_dtype':
+                rep += '\n  compute_dtype: '
+                if v == jnp.float32:
+                    rep += 'fp32'
+                elif v == jnp.float16:
+                    rep += 'fp16'
+                elif v == jnp.bfloat16:
+                    rep += 'bf16'
             else:
                 rep += f"\n  {k}: {v}" 
 

@@ -246,7 +246,7 @@ def _setup_train_state(
 
     opt_state = optimizer.init(policy_state.params)
 
-    if cfg.mixed_precision:
+    if cfg.compute_dtype == jnp.float16:
         scaler = DynamicScale()
     else:
         scaler = None
