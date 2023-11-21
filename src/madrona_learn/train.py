@@ -97,16 +97,8 @@ def _update_loop(
             metrics,
         )
 
-    @partial(jax.vmap, axis_size = num_train_policies)
-    def metric_init_wrapper(train_state):
-        return TrainingMetrics.create(
-            cfg.algo.metrics() + metrics_cfg.custom_metrics)
-
     def inner_update_iter(update_idx, inputs):
         rollout_state, train_state_mgr = inputs
-
-        #update_start_time = time()
-        update_start_time = 0
 
         metrics = algo.add_metrics(cfg, FrozenDict())
         metrics = rollout_mgr.add_metrics(cfg, metrics)
@@ -153,10 +145,7 @@ def _update_loop(
                 pbt_rng = train_state_mgr.pbt_rng,
             )
             
-        #update_end_time = time()
-        update_end_time = 0
-        update_time = update_end_time - update_start_time
-        iter_cb(update_idx, update_time, metrics, train_state_mgr)
+        iter_cb(update_idx, metrics, train_state_mgr)
 
         return rollout_state, train_state_mgr
 
