@@ -123,6 +123,9 @@ def _update_loop(
                 train_state_mgr.policy_states)
 
             with profile('Update Observations Stats'):
+                # Policy optimization only uses preprocessed observations,
+                # so it is safe to update the preprocess state immediately,
+                # because this will only affect the next set of rollouts
                 train_policy_states = \
                     train_policy_states.update(obs_preprocess_state = \
                         train_policy_states.obs_preprocess.update_state(

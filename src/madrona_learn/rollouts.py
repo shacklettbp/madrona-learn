@@ -341,18 +341,13 @@ class RolloutManager:
             typed_shapes['rewards'].shape, self._cfg.float_dtype)
 
         def expand_per_step_shapes(x):
-            if jnp.issubdtype(x.dtype, jnp.floating):
-                dtype = self._cfg.float_dtype
-            else:
-                dtype = x.dtype
-
             return TypedShape((
                     self._num_bptt_chunks,
                     self._num_bptt_steps,
                     self._num_train_policies,
                     self._num_train_agents_per_policy,
                     *x.shape[1:],
-                ), dtype=dtype)
+                ), dtype=x.dtype)
 
         typed_shapes = jax.tree_map(expand_per_step_shapes, typed_shapes)
 

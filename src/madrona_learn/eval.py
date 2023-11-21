@@ -64,7 +64,7 @@ def _eval_ckpt_impl(
     batch_size_per_policy = sim_batch_size // num_policies
 
     policy_states = TrainStateManager.load_policies(
-        policy, obs_preprocess, ckpt_path)
+        policy, obs_preprocess, init_sim_data['obs'], ckpt_path)
     policy_states = jax.tree_map(
         lambda x: x[load_policies], policy_states)
 
