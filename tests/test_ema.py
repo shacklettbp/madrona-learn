@@ -5,7 +5,7 @@ from madrona_learn.moving_avg import EMANormalizer
 decay = 0.999
 batch_size = 1024
 num_subchunks = 32
-num_iters = 2
+num_iters = 100
 num_dims = 2
 
 jax.config.update("jax_enable_x64", True)
@@ -13,8 +13,8 @@ jax.config.update("jax_enable_x64", True)
 rnd = random.PRNGKey(5)
 rnd, mean_rnd, stddev_rnd = random.split(rnd, 3)
 
-means = random.uniform(mean_rnd, (num_iters, num_dims)) * 10 - 5
-stddevs = random.uniform(stddev_rnd, (num_iters, num_dims)) * 2 + 2
+means = random.uniform(mean_rnd, (num_iters, num_dims)) * 100 - 5
+stddevs = random.uniform(stddev_rnd, (num_iters, num_dims)) * 2000 + 2
 
 means = means.at[-1].set(-20)
 stddevs = stddevs.at[-1].set(0.01)

@@ -110,7 +110,7 @@ class ObservationsNormalizer:
             init_obs_stats_fn = lambda norm, est: (
                 norm.init_input_stats(est)),
             update_obs_stats_fn = lambda norm, _, o_stats, prev_updates, o: (
-                norm.update_init_stats(o_states, prev_updates, o)),
+                norm.update_input_stats(o_stats, prev_updates, o)),
         )
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@ from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
 import flax
 from flax import linen as nn
-from flax.core import FrozenDict
+from flax.core import FrozenDict, frozen_dict
 from flax.training.dynamic_scale import DynamicScale
 import flax.training.train_state
 from flax.training import orbax_utils
@@ -152,7 +152,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             params = loaded['policy_states']['params'],
             batch_stats = loaded['policy_states']['batch_stats'],
             obs_preprocess = obs_preprocess,
-            obs_preprocess_state = (
+            obs_preprocess_state = frozen_dict.freeze(
                 loaded['policy_states']['obs_preprocess_state']),
         )
 
