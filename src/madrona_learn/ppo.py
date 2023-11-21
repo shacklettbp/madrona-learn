@@ -180,6 +180,10 @@ def _ppo_update(
         scaler = train_state.scaler
         opt_state = train_state.opt_state
 
+        # FIXME: consider converting params to cfg.compute_dtype when using
+        # bfloat16 before computing gradients. Gradients are currently being
+        # computed and / or stored in fp32. Would bias params need to be
+        # handled differently?
         if scaler != None:
             grad_fn = scaler.value_and_grad(loss_fn, has_aux=True)
             scaler, is_finite, aux, grads = grad_fn(params)
