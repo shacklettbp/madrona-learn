@@ -18,7 +18,7 @@ from .actor_critic import ActorCritic
 from .algo_common import HyperParams, AlgoBase
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
-from .observations import ObservationsPreprocess
+from .observations import ObservationsPreprocess, ObservationsPreprocessNoop
 
 class PolicyState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
@@ -94,15 +94,6 @@ class PolicyTrainState(flax.struct.PyTreeNode):
         return rnd, self.update(update_prng_key=next_key)
 
 
-class ObsPreprocessNoop:
-    def init(self, obs):
-        return ObservationsPreprocess(
-            preprocessors = jax.tree_map(lambda o: self, obs),
-            preprocess_fn = lambda _, ob: ob,
-            is_stateful = False,
-        )
-
-
 class TrainStateManager(flax.struct.PyTreeNode):
     policy_states: PolicyState
     train_states: PolicyTrainState
@@ -139,12 +130,11 @@ class TrainStateManager(flax.struct.PyTreeNode):
         ), loaded['next_update']
 
     @staticmethod
-    def load_policies(policy, obs_preprocess, example_obs, path):
+    def load_policies(policy, obs_preprocess, path):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         loaded = checkpointer.restore(path)
 
-        obs_preprocess = obs_preprocess or ObsPreprocessNoop()
-        obs_preprocess = obs_preprocess.init(example_obs)
+        obs_preprocess = obs_preprocess or ObservationsPreprocessNoop.create()
 
         return PolicyState(
             apply_fn = policy.apply,
@@ -169,8 +159,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
-        obs_preprocess = obs_preprocess or ObsPreprocessNoop()
-        obs_preprocess = obs_preprocess.init(example_obs)
+        obs_preprocess = obs_preprocess or ObsservationsPreprocessNoop.create()
 
         def make_policies(rnd, obs, rnn_states):
             return _make_policies(

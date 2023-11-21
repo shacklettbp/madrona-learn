@@ -15,7 +15,7 @@ from madrona_learn import (
 init(0.5)
 
 from madrona_learn.train_state import (
-    PolicyState, PolicyTrainState, TrainStateManager, ObsPreprocessNoop,
+    PolicyState, PolicyTrainState, TrainStateManager
 )
 
 from madrona_learn.rollouts import (
@@ -30,6 +30,7 @@ from madrona_learn.rollouts import (
 
 from madrona_learn.metrics import TrainingMetrics
 from madrona_learn.moving_avg import EMANormalizer
+from madrona_learn.observations import ObservationsPreprocessNoop
 
 def check_reorder_chunks(arr, P, C):
     B = arr.size // C + P - 1
@@ -197,7 +198,8 @@ class FakeActionDist:
 
 class FakeNet(nn.Module):
     @nn.compact
-    def __call__(self, inputs, train):
+    def __call__(self, obs, train):
+        inputs = obs['o']
         bias = self.param('bias',
             jax.nn.initializers.constant(0), (), jnp.int32)
 
@@ -257,7 +259,9 @@ def fake_rollout_setup(
 
     rnd, rnd_obs = random.split(rnd)
 
-    init_obs = random.randint(rnd_obs, (batch_size, 1), 0, 10000)
+    init_obs = {
+        'o': random.randint(rnd_obs, (batch_size, 1), 0, 10000),
+    }
 
     init_sim_data = frozen_dict.freeze({
         'obs': init_obs,
@@ -276,7 +280,9 @@ def fake_rollout_setup(
         new_counter %= episode_len
 
         return sim_data.copy({
-            'obs': sim_data['actions'][..., 0:1] + 1,
+            'obs': {
+                'o': sim_data['actions'][..., 0:1] + 1,
+            },
             'rewards': sim_data['actions'][..., 0:1] + 2,
             'counter': new_counter,
             'dones': new_dones,
@@ -333,8 +339,7 @@ def fake_rollout_setup(
         params['backbone']['encoder']['net']['bias'] = jnp.array(
             policy_idx, dtype=jnp.int32)
 
-        obs_preprocess = ObsPreprocessNoop().init(
-            rollout_state.sim_data['obs'])
+        obs_preprocess = ObservationsPreprocessNoop.create()
         obs_preprocess_state = obs_preprocess.init_state(
             rollout_state.sim_data['obs'], True)
 
@@ -359,7 +364,7 @@ def fake_rollout_setup(
 
 def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
                         init_rnn_states, num_steps, episode_len, batch_size):
-    checkify.check(jnp.all(rollout_store['obs'][0] == init_obs),
+    checkify.check(jnp.all(rollout_store['obs']['o'][0] == init_obs['o']),
                    "Init observation mismatch")
 
     actions_out = rollout_store['actions'][..., 0]
@@ -409,7 +414,7 @@ def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
     gt_state = gt_state.copy({
         # Initial "actions" are just the initial obs - 1 to handle gt_iter
         # always adding one to compute the obs
-        'actions': gt_state['actions'].at[0].set(init_obs - 1),
+        'actions': gt_state['actions'].at[0].set(init_obs['o'] - 1),
         'values': gt_state['values'].at[0].set(init_rnn_states),
     })
 
@@ -534,7 +539,10 @@ def check_rollout_loop(
             (preprocessed_obs, policy_out['actions'], policy_out['values']))
         
         return rollout_store.copy({
-            'obs': rollout_store['obs'].at[step_idx].set(obs),
+            'obs': {
+                'o': rollout_store['obs']['o'].at[step_idx].set(
+                    obs['o']),
+            },
             'actions': rollout_store['actions'].at[step_idx].set(actions),
             'values': rollout_store['values'].at[step_idx].set(values),
         })
@@ -546,7 +554,9 @@ def check_rollout_loop(
 
     def loop_wrapper(rollout_state, policy_states, init_obs, init_rnn_states):
         rollout_store = frozen_dict.freeze({
-            'obs': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+            'obs': {
+                'o': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
+            },
             'values': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
             'actions': jnp.zeros((num_steps, batch_size, 2), dtype=jnp.int32),
             'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
