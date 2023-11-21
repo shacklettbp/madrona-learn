@@ -67,7 +67,7 @@ class EMANormalizer:
         x = self._convert_nonfloat(x)
 
         b_mean = jnp.mean(x, axis=reduce_axes, dtype=jnp.float32)
-        b_var = jnp.mean(jnp.square(x - b_mean),
+        b_var = jnp.mean(jnp.square(x - b_mean.astype(x.dtype)),
             axis=reduce_axes, dtype=jnp.float32)
 
         delta = b_mean - a_mean
@@ -140,7 +140,7 @@ class EMANormalizer:
         if self.disable:
             return inputs
 
-        norm_stats = self.update_input_states(
+        norm_stats = self.update_input_stats(
             self.init_input_stats(est), 0, inputs)
 
         est = self.update_estimates(est, norm_stats)

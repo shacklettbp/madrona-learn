@@ -275,7 +275,7 @@ class RolloutCollectState(flax.struct.PyTreeNode):
 
         return self.replace(store=new_store)
 
-    def update_obs_stats(self, obs_stats):
+    def set_obs_stats(self, obs_stats):
         return self.replace(obs_stats = obs_stats)
 
 
@@ -285,6 +285,8 @@ class RolloutManager:
         train_cfg: TrainConfig,
         rollout_cfg: RolloutConfig,
         init_rollout_state: RolloutState,
+        obs_preprocess: ObservationsPreprocess,
+        obs_preprocess_state: FrozenDict[str, Any],
     ):
         cpu_dev = jax.devices('cpu')[0]
 
@@ -317,10 +319,11 @@ class RolloutManager:
 
         sim_data = init_rollout_state.sim_data
         
-        def get_typed_shape(x):
-            return TypedShape(x.shape, x.dtype)
+        def get_obs_typed_shape(o):
+            return TypedShape(o.shape, o.dtype)
 
-        typed_shapes['obs'] = jax.tree_map(get_typed_shape, sim_data['obs'])
+        typed_shapes['obs'] = jax.tree_map(
+            get_obs_typed_shape, sim_data['obs'])
 
         typed_shapes['actions'] = TypedShape(
             sim_data['actions'].shape, sim_data['actions'].dtype)
@@ -366,6 +369,21 @@ class RolloutManager:
                 ), x.dtype),
             init_rollout_state.rnn_states)
 
+        # Preprocessed observations are stored in the rollouts. Figure
+        # out observation shape / dtype after preprocessing
+        def preprocess_shape_helper(obs):
+            return obs_preprocess.preprocess(
+                jax.tree_map(lambda x: x[0:self._num_train_policies],
+                    obs_preprocess_state), obs, True)
+
+        preprocessed_obs_shape_dtypes = jax.eval_shape(preprocess_shape_helper,
+            jax.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape[2:], x.dtype),
+                typed_shapes['obs']))
+
+        typed_shapes['obs'] = jax.tree_map(
+            lambda o, n: TypedShape((*o.shape[0:2], *n.shape), n.dtype),
+            typed_shapes['obs'], preprocessed_obs_shape_dtypes)
+
         self._store_typed_shape_tree = frozen_dict.freeze(typed_shapes)
 
     def add_metrics(
@@ -393,7 +411,7 @@ class RolloutManager:
         metrics: TrainingMetrics,
     ):
         obs_preprocess = train_state_mgr.policy_states.obs_preprocess
-        obs_preprocess_updateable_state = jax.tree_map(
+        obs_preprocess_train_state = jax.tree_map(
             lambda s: s[0:self._num_train_policies],
             train_state_mgr.policy_states.obs_preprocess_state)
 
@@ -402,7 +420,7 @@ class RolloutManager:
 
             post_inference_cb = partial(self._post_inference_cb,
                 obs_preprocess,
-                obs_preprocess_updateable_state,
+                obs_preprocess_train_state,
                 train_state_mgr.train_states,
                 bptt_chunk)
             post_step_cb = partial(self._post_step_cb, bptt_chunk)
@@ -422,8 +440,7 @@ class RolloutManager:
 
         collect_state = RolloutCollectState.create(
             self._store_typed_shape_tree,
-            jax.vmap(obs_preprocess.init_obs_stats)(
-                obs_preprocess_updateable_state),
+            obs_preprocess.init_obs_stats(obs_preprocess_train_state, True),
         )
 
         rollout_state, collect_state = lax.fori_loop(
@@ -438,26 +455,11 @@ class RolloutManager:
             collect_state = collect_state.save(
                 slice(None), {'bootstrap_values': bootstrap_values})
 
-        with profile('Update Observation Preprocess State'):
-            new_obs_preprocess_state = jax.vmap(obs_preprocess.update_state)(
-                obs_preprocess_updateable_state, collect_state.obs_stats)
-
-            new_obs_preprocess_state = jax.tree_map(
-                lambda old, new: old.at[0:self._num_train_policies].set(new),
-                train_state_mgr.policy_states.obs_preprocess_state,
-                new_obs_preprocess_state)
-
-            train_state_mgr = train_state_mgr.replace(
-                policy_states = train_state_mgr.policy_states.update(
-                    obs_preprocess_state = new_obs_preprocess_state,
-                ),
-            )
-
         with profile("Finalize Rollouts"):
             rollout_data, metrics = self._finalize_rollouts(
                 collect_state.store, metrics)
 
-        return train_state_mgr, rollout_state, rollout_data, metrics
+        return rollout_state, rollout_data, collect_state.obs_stats, metrics
 
     def _sim_to_train(self, data, reorder_state):
         if self._cfg.has_matchmaking:
@@ -502,7 +504,7 @@ class RolloutManager:
         @jax.vmap
         def critic_fn(state, rnn_states, obs):
             preprocessed_obs = state.obs_preprocess.preprocess(
-                state.obs_preprocess_state, obs)
+                state.obs_preprocess_state, obs, False)
 
             policy_out, rnn_states = state.apply_fn(
                 {
@@ -554,17 +556,15 @@ class RolloutManager:
             collect_state = collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
-            @jax.vmap
-            def update_obs_stats(preproc_state, obs_stats, obs):
-                return obs_preprocess.update_obs_stats(
-                    preproc_state, obs_stats,
-                    bptt_chunk * self._num_bptt_steps + bptt_step, obs)
+            new_obs_stats = obs_preprocess.update_obs_stats(
+                obs_preprocess_state,
+                collect_state.obs_stats,
+                bptt_chunk * self._num_bptt_steps + bptt_step,
+                self._policy_to_train(obs, reorder_state),
+                True,
+            )
 
-            new_obs_stats = update_obs_stats(
-                obs_preprocess_state, collect_state.obs_stats,
-                self._policy_to_train(obs, reorder_state))
-
-            collect_state = collect_state.update_obs_stats(new_obs_stats)
+            collect_state = collect_state.set_obs_stats(new_obs_stats)
 
             return collect_state
 
@@ -658,8 +658,9 @@ def rollout_loop(
 ):
     def obs_preprocess_fn(state, obs):
         return state.obs_preprocess.preprocess(
-            state.obs_preprocess_state, obs)
+            state.obs_preprocess_state, obs, True)
 
+    @jax.vmap
     def policy_fn(state, sample_key, rnn_states, preprocessed_obs):
         return state.apply_fn(
             {
@@ -674,8 +675,6 @@ def rollout_loop(
             method = 'rollout',
         )
 
-    obs_preprocess_fn = jax.vmap(obs_preprocess_fn)
-    policy_fn = jax.vmap(policy_fn)
     rnn_reset_fn = policy_states.rnn_reset_fn
 
     def reorder_policy_states(states, assignments, reorder_state):

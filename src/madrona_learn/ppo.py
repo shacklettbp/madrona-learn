@@ -144,7 +144,7 @@ def _ppo_update(
             new_values = jnp.clip(new_values, low, high)
 
         new_value_norm_state, normalized_returns = (
-            value_normalizer.normalize_and_update_estimates(
+            value_norm.normalize_and_update_estimates(
                 train_state.value_normalizer_state, mb['returns']))
 
         if cfg.algo.huber_value_loss:
@@ -212,7 +212,7 @@ def _ppo_update(
         )
 
         train_state = train_state.update(
-            value_normalize_state = new_value_norm_state,
+            value_normalizer_state = new_value_norm_state,
             opt_state = new_opt_state,
             scaler = scaler,
         )

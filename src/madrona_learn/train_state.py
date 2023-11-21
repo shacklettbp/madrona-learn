@@ -98,12 +98,8 @@ class ObsPreprocessNoop:
     def init(self, obs):
         return ObservationsPreprocess(
             preprocessors = jax.tree_map(lambda o: self, obs),
-            init_state_fn = lambda _, ob: jnp.array(()),
-            update_state_fn = lambda _, state, stats: state,
-            init_obs_stats_fn = lambda _, stats: jnp.array(()),
-            update_obs_stats_fn = \
-                lambda _, state, stats, prev_updates, o: stats,
-            preprocess_fn = lambda _, state, ob: ob,
+            preprocess_fn = lambda _, ob: ob,
+            is_stateful = False,
         )
 
 
@@ -140,11 +136,12 @@ class TrainStateManager(flax.struct.PyTreeNode):
         ), loaded['next_update']
 
     @staticmethod
-    def load_policies(policy, obs_preprocess, path):
+    def load_policies(policy, obs_preprocess, example_obs, path):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         loaded = checkpointer.restore(path)
 
         obs_preprocess = obs_preprocess or ObsPreprocessNoop()
+        obs_preprocess = obs_preprocess.init(example_obs)
 
         return PolicyState(
             apply_fn = policy.apply,
@@ -169,8 +166,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
-        obs_preprocess_builder = obs_preprocess or ObsPreprocessNoop()
-        obs_preprocess = obs_preprocess_builder.init(example_obs)
+        obs_preprocess = obs_preprocess or ObsPreprocessNoop()
+        obs_preprocess = obs_preprocess.init(example_obs)
 
         def make_policies(rnd, obs, rnn_states):
             return _make_policies(
@@ -210,9 +207,9 @@ def _setup_policy_state(
     rnn_states,
     obs,
 ):
-    obs_preprocess_state = obs_preprocess.init_state(obs)
+    obs_preprocess_state = obs_preprocess.init_state(obs, False)
     preprocessed_obs = obs_preprocess.preprocess(
-        obs_preprocess_state, obs)
+        obs_preprocess_state, obs, False)
 
     # The second prng key is passed as the key for sampling
     (fake_outs, rnn_states), variables = policy.init_with_output(
@@ -252,9 +249,9 @@ def _setup_train_state(
         scaler = None
 
     return PolicyTrainState(
-        value_normalizer = value_norm_fn,
+        value_normalizer = value_norm,
         tx = optimizer,
-        value_normalizer_state = value_norm_stats,
+        value_normalizer_state = value_norm_state,
         hyper_params = hyper_params,
         opt_state = opt_state,
         scheduler = None,

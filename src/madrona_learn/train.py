@@ -114,21 +114,32 @@ def _update_loop(
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
-                (train_state_mgr, rollout_state,
-                 rollout_data, metrics) = rollout_mgr.collect(
+                (rollout_state, rollout_data,
+                 obs_stats, metrics) = rollout_mgr.collect(
                     train_state_mgr, rollout_state, metrics)
 
-            with profile('Learn'):
-                train_policy_states = jax.tree_map(
-                    lambda x: x[0:num_train_policies],
-                    train_state_mgr.policy_states)
+            train_policy_states = jax.tree_map(
+                lambda x: x[0:num_train_policies],
+                train_state_mgr.policy_states)
 
+            with profile('Update Observations Stats'):
+                train_policy_states = \
+                    train_policy_states.update(obs_preprocess_state = \
+                        train_policy_states.obs_preprocess.update_state(
+                            train_policy_states.obs_preprocess_state,
+                            obs_stats,
+                            True,
+                        )
+                    )
+
+            with profile('Learn'):
                 (train_policy_states, updated_train_states,
                  metrics) = algo_wrapper(
                     train_policy_states, train_state_mgr.train_states,
                     rollout_data, metrics)
 
-                # Copy new params into the full policy_state array
+            # Copy new params into the full policy_state array
+            with profile('Set New Policy States'):
                 policy_states = jax.tree_map(
                     lambda full, new: full.at[0:num_train_policies].set(new),
                     train_state_mgr.policy_states, train_policy_states)
@@ -275,6 +286,9 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
         train_cfg = cfg,
         rollout_cfg = rollout_cfg,
         init_rollout_state = rollout_state,
+        obs_preprocess = train_state_mgr.policy_states.obs_preprocess,
+        obs_preprocess_state = (
+            train_state_mgr.policy_states.obs_preprocess_state),
     )
 
     def update_loop_wrapper(rollout_state, train_state_mgr):

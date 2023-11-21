@@ -336,7 +336,7 @@ def fake_rollout_setup(
         obs_preprocess = ObsPreprocessNoop().init(
             rollout_state.sim_data['obs'])
         obs_preprocess_state = obs_preprocess.init_state(
-            rollout_state.sim_data['obs'])
+            rollout_state.sim_data['obs'], True)
 
         return PolicyState(
             apply_fn = policy.apply,
@@ -640,6 +640,8 @@ def check_rollout_mgr(
         train_cfg = train_cfg,
         rollout_cfg = rollout_cfg,
         init_rollout_state = rollout_state,
+        obs_preprocess = policy_states.obs_preprocess,
+        obs_preprocess_state = policy_states.obs_preprocess_state,
     )
 
     rnd, pbt_rnd = random.split(rnd, 2)
@@ -668,7 +670,7 @@ def check_rollout_mgr(
         metrics = rollout_mgr.add_metrics(train_cfg, FrozenDict())
         metrics = TrainingMetrics.create(train_cfg, metrics)
 
-        train_state_mgr, rollout_state, rollout_data, metrics = rollout_mgr.collect(
+        rollout_state, rollout_data, obs_stats, metrics = rollout_mgr.collect(
             train_state_mgr, rollout_state, metrics)
 
         train_slice = lambda x: x[rollout_mgr._sim_to_train_idxs]
@@ -730,11 +732,11 @@ def check_rollout_mgr(
             rollout_data.data, sliced_rollout_state,
             sliced_init_obs, sliced_init_rnns)
 
-        return rollout_state, train_state_mgr, rollout_data
+        return rollout_state, rollout_data
 
     collect_wrapper = jax.jit(
         checkify.checkify(collect_wrapper), donate_argnums=0)
-    err, (rollout_state, train_state_mgr, rollout_data) = collect_wrapper(
+    err, (rollout_state, rollout_data) = collect_wrapper(
         rollout_state, train_state_mgr, init_obs, init_rnn_states)
     err.throw()
 
