@@ -11,7 +11,7 @@ from typing import Callable, List
 
 @dataclass(frozen = True)
 class CustomMetricConfig:
-    register_metrics: Callable
+    add_metrics: Callable
     rollout_cb: Callable = lambda metrics, *args: metrics
     update_cb: Callable = lambda metrics, *args: metrics
 
@@ -33,6 +33,16 @@ class Metric(flax.struct.PyTreeNode):
             min = jnp.float32(jnp.finfo(jnp.float32).max),
             max = jnp.float32(jnp.finfo(jnp.float32).min),
             count = jnp.int32(0),
+        )
+
+    def reset(self):
+        return Metric(
+            per_policy = self.per_policy,
+            mean = self.mean.at[None].set(0),
+            m2 = self.m2.at[None].set(0),
+            min = self.min.at[None].set(jnp.finfo(jnp.float32).max),
+            max = self.max.at[None].set(jnp.finfo(jnp.float32).min),
+            count = self.count.at[None].set(0),
         )
 
 
@@ -116,6 +126,13 @@ class TrainingMetrics(flax.struct.PyTreeNode):
             merged_metrics[k] = update_metric(old_metric, data[k])
 
         return self.replace(metrics = self.metrics.copy(merged_metrics))
+
+    def reset(self):
+        reset_metrics = FrozenDict({
+            k: m.reset() for k, m in self.metrics.items()
+        })
+
+        return self.replace(metrics = reset_metrics)
 
     def pretty_print(self, tab=2):
         tab = ' ' * tab

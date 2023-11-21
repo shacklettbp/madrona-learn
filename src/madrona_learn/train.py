@@ -98,11 +98,7 @@ def _update_loop(
         )
 
     def inner_update_iter(update_idx, inputs):
-        rollout_state, train_state_mgr = inputs
-
-        metrics = algo.add_metrics(cfg, FrozenDict())
-        metrics = rollout_mgr.add_metrics(cfg, metrics)
-        metrics = TrainingMetrics.create(cfg, metrics)
+        rollout_state, train_state_mgr, metrics = inputs
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
@@ -145,12 +141,15 @@ def _update_loop(
                 pbt_rng = train_state_mgr.pbt_rng,
             )
             
-        iter_cb(update_idx, metrics, train_state_mgr)
+        reset_metrics = iter_cb(update_idx, metrics, train_state_mgr)
 
-        return rollout_state, train_state_mgr
+        metrics = lax.cond(
+            reset_metrics, lambda: metrics.reset(), lambda: metrics)
+
+        return rollout_state, train_state_mgr, metrics
 
     def outer_update_iter(outer_update_idx, inputs):
-        rollout_state, train_state_mgr = inputs
+        rollout_state, train_state_mgr, metrics = inputs
 
         inner_begin_idx = (
             start_update_idx + outer_update_idx * pbt_update_interval
@@ -159,20 +158,28 @@ def _update_loop(
         inner_end_idx = inner_begin_idx + pbt_update_interval
         inner_end_idx = jnp.minimum(inner_end_idx, cfg.num_updates)
 
-        rollout_state, train_state_mgr = lax.fori_loop(
+        rollout_state, train_state_mgr, metrics = lax.fori_loop(
             inner_begin_idx, inner_end_idx,
-            inner_update_iter, (rollout_state, train_state_mgr))
+            inner_update_iter, (rollout_state, train_state_mgr, metrics))
         
         train_state_mgr = _pbt_update(cfg, train_state_mgr)
 
-        return rollout_state, train_state_mgr
+        return rollout_state, train_state_mgr, metrics
+    
+    metrics = algo.add_metrics(cfg, FrozenDict())
+    metrics = rollout_mgr.add_metrics(cfg, metrics)
+    metrics = metrics_cfg.add_metrics(metrics)
+    metrics = TrainingMetrics.create(cfg, metrics)
 
     num_outer_iters = num_updates_remaining // pbt_update_interval
     if num_outer_iters * pbt_update_interval < num_updates_remaining:
         num_outer_iters += 1
 
-    return lax.fori_loop(0, num_outer_iters, outer_update_iter,
-        (rollout_state, train_state_mgr))
+    rollout_state, train_state_mgr, metrics = lax.fori_loop(
+        0, num_outer_iters, outer_update_iter,
+        (rollout_state, train_state_mgr, metrics))
+
+    return rollout_state, train_state_mgr
 
 
 def _setup_rollout_cfg(dev_type, cfg):
