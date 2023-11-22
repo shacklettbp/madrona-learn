@@ -136,14 +136,17 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
         obs_preprocess = obs_preprocess or ObservationsPreprocessNoop.create()
 
+        def to_jax(a):
+            return jax.tree_map(lambda x: jnp.asarray(x), a)
+
         return PolicyState(
             apply_fn = policy.apply,
             rnn_reset_fn = policy.clear_recurrent_state,
-            params = loaded['policy_states']['params'],
-            batch_stats = loaded['policy_states']['batch_stats'],
+            params = to_jax(loaded['policy_states']['params']),
+            batch_stats = to_jax(loaded['policy_states']['batch_stats']),
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = frozen_dict.freeze(
-                loaded['policy_states']['obs_preprocess_state']),
+                to_jax(loaded['policy_states']['obs_preprocess_state'])),
         )
 
     @staticmethod

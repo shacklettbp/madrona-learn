@@ -66,7 +66,7 @@ def _eval_ckpt_impl(
     policy_states = TrainStateManager.load_policies(
         policy, obs_preprocess, ckpt_path)
     policy_states = jax.tree_map(
-        lambda x: x[load_policies], policy_states)
+        lambda x: x[jnp.asarray(load_policies)], policy_states)
 
     rollout_cfg = RolloutConfig.setup(
         num_current_policies = num_policies,
