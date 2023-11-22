@@ -77,7 +77,7 @@ def _eval_ckpt_impl(
         self_play_portion = 1.0,
         cross_play_portion = 0.0,
         past_play_portion = 0.0,
-        float_dtype = policy_dtype,
+        policy_dtype = policy_dtype,
     )
 
     @jax.jit

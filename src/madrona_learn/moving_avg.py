@@ -9,7 +9,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class EMANormalizer:
     decay: float
-    out_dtype: jnp.dtype
+    norm_dtype: jnp.dtype
+    inv_dtype: jnp.dtype
     eps: float = 1e-5
     disable: bool = False
 
@@ -39,16 +40,20 @@ class EMANormalizer:
             return x
 
         x = self._convert_nonfloat(x)
-        return ((x - est['mu'].astype(x.dtype)) *
-            est['inv_sigma'].astype(x.dtype)).astype(self.out_dtype)
+        return (
+            (x - est['mu'].astype(x.dtype)) *
+                est['inv_sigma'].astype(x.dtype)
+            ).astype(self.norm_dtype)
 
     def invert(self, est, x):
         if self.disable:
             return x
 
         x = self._convert_nonfloat(x)
-        return (x * est['sigma'].astype(x.dtype) +
-            est['mu'].astype(x.dtype)).astype(self.out_dtype)
+        return (
+            x.astype(self.inv_dtype) * est['sigma'].astype(self.inv_dtype) +
+                est['mu'].astype(self.inv_dtype)
+        )
 
     def init_input_stats(self, est):
         if self.disable:

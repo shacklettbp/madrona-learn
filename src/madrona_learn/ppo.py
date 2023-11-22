@@ -135,13 +135,12 @@ def _ppo_update(
         action_obj = jnp.minimum(surr1, surr2)
 
         if cfg.algo.clip_value_loss:
-            old_values_normalized = value_norm.normalize(
-                train_state.value_normalizer_state, mb['values'])
+            old_values_normalized = mb['values']
 
             low = old_values_normalized - train_state.hyper_params.clip_coef
             high = old_values_normalized + train_state.hyper_params.clip_coef
 
-            new_values = jnp.clip(new_values, low, high)
+            new_values_normalized = jnp.clip(new_values_normalized, low, high)
 
         new_value_norm_state, normalized_returns = (
             value_norm.normalize_and_update_estimates(

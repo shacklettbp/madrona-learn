@@ -34,7 +34,8 @@ class RolloutConfig:
     past_play_batch_size: int
     num_cross_play_matches: int
     num_past_play_matches: int
-    float_dtype: jnp.dtype
+    policy_dtype: jnp.dtype
+    reward_dtype: jnp.dtype
     has_matchmaking: bool
 
     @staticmethod
@@ -47,7 +48,8 @@ class RolloutConfig:
         self_play_portion: float,
         cross_play_portion: float,
         past_play_portion: float,
-        float_dtype: jnp.dtype,
+        policy_dtype: jnp.dtype,
+        reward_dtype: jnp.dtype = jnp.float32,
         policy_chunk_size_override: int = 0,
     ):
         total_num_policies = num_current_policies + num_past_policies
@@ -128,7 +130,8 @@ class RolloutConfig:
             past_play_batch_size = past_play_batch_size,
             num_cross_play_matches = num_cross_play_matches,
             num_past_play_matches = num_past_play_matches,
-            float_dtype = float_dtype,
+            policy_dtype = policy_dtype,
+            reward_dtype = reward_dtype,
             has_matchmaking = has_matchmaking,
         )
 
@@ -329,16 +332,16 @@ class RolloutManager:
             sim_data['actions'].shape, sim_data['actions'].dtype)
 
         typed_shapes['log_probs'] = TypedShape(
-            typed_shapes['actions'].shape, self._cfg.float_dtype)
+            typed_shapes['actions'].shape, self._cfg.policy_dtype)
 
         typed_shapes['rewards'] = TypedShape(
-          sim_data['rewards'].shape, self._cfg.float_dtype)
+          sim_data['rewards'].shape, self._cfg.reward_dtype)
 
         typed_shapes['dones'] = TypedShape(
             sim_data['dones'].shape, jnp.bool_)
 
         typed_shapes['values'] = TypedShape(
-            typed_shapes['rewards'].shape, self._cfg.float_dtype)
+            typed_shapes['rewards'].shape, self._cfg.policy_dtype)
 
         def expand_per_step_shapes(x):
             return TypedShape((
@@ -350,10 +353,6 @@ class RolloutManager:
                 ), dtype=x.dtype)
 
         typed_shapes = jax.tree_map(expand_per_step_shapes, typed_shapes)
-
-        typed_shapes['bootstrap_values'] = TypedShape(
-            typed_shapes['values'].shape[2:],
-            self._cfg.float_dtype)
 
         typed_shapes['rnn_start_states'] = jax.tree_map(
             lambda x: TypedShape((
@@ -447,12 +446,10 @@ class RolloutManager:
                 train_state_mgr.policy_states, train_state_mgr.train_states,
                 rollout_state)
 
-            collect_state = collect_state.save(
-                slice(None), {'bootstrap_values': bootstrap_values})
-
         with profile("Finalize Rollouts"):
             rollout_data, metrics = self._finalize_rollouts(
-                collect_state.store, metrics)
+                train_state_mgr.train_states, collect_state.store,
+                bootstrap_values, metrics)
 
         return rollout_state, rollout_data, collect_state.obs_stats, metrics
 
@@ -477,14 +474,6 @@ class RolloutManager:
             return sim_ordering[self._sim_to_train_idxs]
 
         return jax.tree_map(to_train, data)
-
-    def _invert_value_normalization(self, train_states, values):
-        @jax.vmap
-        def invert_vn(train_state, v):
-            return train_state.value_normalizer.invert(
-                train_state.value_normalizer_state, v)
-
-        return invert_vn(train_states, values)
 
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
         rnn_states = rollout_state.rnn_states
@@ -514,9 +503,7 @@ class RolloutManager:
 
             return policy_out['values']
 
-        values = critic_fn(policy_states, rnn_states, obs)
-
-        return self._invert_value_normalization(train_states, values)
+        return critic_fn(policy_states, rnn_states, obs)
 
     def _post_inference_cb(
         self,
@@ -533,7 +520,6 @@ class RolloutManager:
     ):
         with profile('Pre Step Rollout Store'):
             values = self._policy_to_train(policy_out['values'], reorder_state)
-            values = self._invert_value_normalization(train_states, values)
 
             preprocessed_obs, actions, log_probs = self._policy_to_train(
                 (preprocessed_obs,
@@ -580,21 +566,41 @@ class RolloutManager:
             return collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
-    def _finalize_rollouts(self, rollouts, metrics):
-        rollouts, bootstrap_values = rollouts.pop('bootstrap_values')
+    def _finalize_rollouts(self, train_states, rollouts,
+                           bootstrap_values, metrics):
+        def invert_value_norm(train_state, v):
+            return train_state.value_normalizer.invert(
+                train_state.value_normalizer_state, v)
+
+        unnormalized_values = jax.vmap(invert_value_norm,
+            in_axes=(0, 2), out_axes=2)(train_states, rollouts['values'])
+
+        unnormalized_bootstrap_values = jax.vmap(invert_value_norm)(
+            train_states, bootstrap_values)
+
+        assert unnormalized_values.dtype == self._cfg.reward_dtype
+        assert unnormalized_bootstrap_values.dtype == self._cfg.reward_dtype
 
         if self._use_advantages:
-            advantages = self._compute_advantages_fn(rollouts['rewards'],
-                rollouts['values'], rollouts['dones'], bootstrap_values)
+            advantages = self._compute_advantages_fn(
+                rollouts['rewards'],
+                unnormalized_values,
+                rollouts['dones'],
+                unnormalized_bootstrap_values,
+            )
+
+            returns = advantages + unnormalized_values
 
             rollouts = rollouts.copy({
-                'advantages': advantages,
+                'advantages': advantages.astype(self._cfg.policy_dtype),
             })
 
-            returns = advantages + rollouts['values']
         else:
-            returns = self._compute_returns_fn(rollouts['rewards'],
-                rollouts['dones'], bootstrap_values)
+            returns = self._compute_returns_fn(
+                rollouts['rewards'],
+                rollouts['dones'],
+                unnormalized_bootstrap_values,
+            )
 
         rollouts = rollouts.copy({
             'returns': returns,
@@ -622,9 +628,9 @@ class RolloutManager:
 
         metrics = metrics.record({
             'Rewards': rollouts['rewards'],
-            'Values': rollouts['values'],
+            'Values': reorder_seq_data(unnormalized_values),
             'Returns': rollouts['returns'],
-            'Bootstrap Values': bootstrap_values,
+            'Bootstrap Values': unnormalized_bootstrap_values,
         })
 
         if self._use_advantages:
@@ -723,7 +729,7 @@ def rollout_loop(
             sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
 
             dones = sim_data['dones'].astype(jnp.bool_)
-            rewards = sim_data['rewards'].astype(rollout_cfg.float_dtype)
+            rewards = sim_data['rewards'].astype(rollout_cfg.reward_dtype)
 
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)

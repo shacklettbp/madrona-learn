@@ -185,7 +185,8 @@ def _setup_value_normalizer(hyper_params, fake_values):
 
     value_normalizer = EMANormalizer(
         decay = value_norm_decay,
-        out_dtype = fake_values.dtype,
+        norm_dtype = fake_values.dtype,
+        inv_dtype = jnp.float32,
         disable = not hyper_params.normalize_values,
     )
 

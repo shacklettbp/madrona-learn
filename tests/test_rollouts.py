@@ -95,7 +95,7 @@ def check_reorder(
         self_play_portion = 0.0,
         cross_play_portion = 1.0,
         past_play_portion = 0.0,
-        float_dtype = jnp.float16,
+        policy_dtype = jnp.float16,
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
@@ -145,7 +145,7 @@ def setup_init_matchmake(
         self_play_portion = self_play,
         cross_play_portion = cross_play,
         past_play_portion = past_play,
-        float_dtype = jnp.float16,
+        policy_dtype = jnp.float16,
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
@@ -253,7 +253,8 @@ def fake_rollout_setup(
         self_play_portion = self_play,
         cross_play_portion = cross_play,
         past_play_portion = past_play,
-        float_dtype = jnp.int32,
+        policy_dtype = jnp.int32,
+        reward_dtype = jnp.int32,
         policy_chunk_size_override = policy_chunk_size_override,
     )
 
@@ -656,7 +657,7 @@ def check_rollout_mgr(
 
     rnd, pbt_rnd = random.split(rnd, 2)
 
-    value_normalizer = EMANormalizer(1, jnp.int32, disable=True)
+    value_normalizer = EMANormalizer(1, jnp.int32, jnp.int32, disable=True)
 
     train_states = PolicyTrainState(
         value_normalizer = value_normalizer,

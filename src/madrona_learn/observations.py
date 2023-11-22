@@ -115,7 +115,8 @@ class ObservationsEMANormalizer(ObservationsPreprocess):
             overrides = overrides,
             normalizer = EMANormalizer(
                 decay = decay,
-                out_dtype = dtype,
+                norm_dtype = dtype,
+                inv_dtype = dtype,
                 eps = eps,
             ),
         )

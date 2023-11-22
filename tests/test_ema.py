@@ -32,7 +32,8 @@ all_values = gen_values(
 def f(all_values):
     normalizer = EMANormalizer(
         decay = decay,
-        out_dtype = jnp.float32,
+        norm_dtype = jnp.float32,
+        inv_dtype = jnp.float32,
     )
 
     naive_decay = jnp.array(decay, dtype=jnp.float64)
