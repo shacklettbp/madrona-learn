@@ -53,12 +53,11 @@ def compute_returns(
     N = P * B
 
     seq_dones, seq_rewards = jax.tree_map(
-        lambda x: x.shape(T, N, 1), (dones, rewards))
+        lambda x: x.reshape(T, N, 1), (dones, rewards))
 
     bootstrap_values = bootstrap_values.reshape(-1, 1)
 
     returns = jnp.empty_like(seq_rewards)
-    zero = jnp.zeros((), dtype=seq_rewards.dtype)
 
     def return_step(i_fwd, inputs):
         i = T - 1 - i_fwd
@@ -67,7 +66,7 @@ def compute_returns(
         cur_dones = seq_dones[i]
         cur_rewards = seq_rewards[i]
 
-        next_return = jnp.where(cur_dones, zero, next_return)
+        next_return = jnp.where(cur_dones, 0, next_return)
 
         cur_return = cur_rewards + cfg.gamma * next_return
 
@@ -78,7 +77,7 @@ def compute_returns(
     next_return, returns = lax.fori_loop(
         0, T, return_step, (bootstrap_values, returns))
 
-    return returns.reshape(num_chunks, steps_per_chunk, P, B)
+    return returns.reshape(num_chunks, steps_per_chunk, P, B, 1)
 
 
 def compute_advantages(
@@ -101,8 +100,6 @@ def compute_advantages(
 
     advantages = jnp.empty_like(seq_rewards)
 
-    zero = jnp.zeros((), dtype=seq_rewards.dtype)
-
     def advantage_step(i_fwd, inputs):
         i = T - 1 - i_fwd
         next_advantage, next_values, advantages = inputs
@@ -111,8 +108,8 @@ def compute_advantages(
         cur_rewards = seq_rewards[i]
         cur_values = seq_values[i]
 
-        next_values = jnp.where(cur_dones, zero, next_values)
-        next_advantage = jnp.where(cur_dones, zero, next_advantage)
+        next_values = jnp.where(cur_dones, 0, next_values)
+        next_advantage = jnp.where(cur_dones, 0, next_advantage)
 
         # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
         td_err = cur_rewards + cfg.gamma * next_values - cur_values
