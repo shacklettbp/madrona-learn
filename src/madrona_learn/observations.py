@@ -16,11 +16,6 @@ class ObservationsPreprocess:
     overrides: Dict[str, Callable]
 
     def preprocess(self, states, obs, vmap):
-        if vmap:
-            preprocess = jax.vmap(self._preprocess)
-        else:
-            preprocess = self._preprocess
-
         args = [states, obs]
 
         if not self.is_stateful:
@@ -28,14 +23,20 @@ class ObservationsPreprocess:
         else:
             args = [states, obs]
 
+        if vmap:
+            preprocess = jax.vmap(self._preprocess,
+                                  in_axes=(None, *((0,) * len(args))))
+        else:
+            preprocess = self._preprocess
+
         r = {}
         for k, ob in obs.items():
             if k in self.overrides:
                 r[k] = self.overrides[k](ob)
             elif not self.is_stateful:
-                r[k] = preprocess(ob)
+                r[k] = preprocess(k, ob)
             else:
-                r[k] = preprocess(states[k], ob)
+                r[k] = preprocess(k, states[k], ob)
 
         return FrozenDict(r)
 
@@ -44,7 +45,7 @@ class ObservationsPreprocess:
             return None
 
         if vmap:
-            init_state = jax.vmap(self._init_state)
+            init_state = jax.vmap(self._init_state, in_axes=(None, 0))
         else:
             init_state = self._init_state
 
@@ -55,7 +56,7 @@ class ObservationsPreprocess:
             return None
 
         if vmap:
-            update_state = jax.vmap(self._update_state)
+            update_state = jax.vmap(self._update_state, in_axes=(None, 0, 0))
         else:
             update_state = self._update_state
 
@@ -66,7 +67,7 @@ class ObservationsPreprocess:
             return None
 
         if vmap:
-            init_stats = jax.vmap(self._init_obs_stats)
+            init_stats = jax.vmap(self._init_obs_stats, in_axes=(None, 0))
         else:
             init_stats = self._init_obs_stats
 
@@ -77,12 +78,12 @@ class ObservationsPreprocess:
         if not self.is_stateful:
             return None
 
-        def update_stats(state, stats, obs):
+        def update_stats(ob_name, state, stats, obs):
             return self._update_obs_stats(
-                state, stats, num_prev_updates, obs)
+                ob_name, state, stats, num_prev_updates, obs)
         
         if vmap:
-            update_stats = jax.vmap(update_stats)
+            update_stats = jax.vmap(update_stats, in_axes=(None, 0, 0, 0))
 
         return self._iter_non_overrides(
             update_stats, states, cur_obs_stats, obs)
@@ -95,19 +96,21 @@ class ObservationsPreprocess:
         for k in keys:
             if k in self.overrides:
                 continue
-            r[k] = f(*[a[k] for a in args])
+            r[k] = f(k, *[a[k] for a in args])
 
         return FrozenDict(r)
 
 @dataclass(frozen=True)
 class ObservationsEMANormalizer(ObservationsPreprocess):
     normalizer: EMANormalizer
+    prep_fns: Dict[str, Callable]
 
     @staticmethod
     def create(
         decay: float,
         dtype: jnp.dtype,
         eps: float = 1e-5,
+        prep_fns: Dict[str, Callable] = {},
         overrides: Dict[str, Callable] = {},
     ):
         return ObservationsEMANormalizer(
@@ -119,21 +122,29 @@ class ObservationsEMANormalizer(ObservationsPreprocess):
                 inv_dtype = dtype,
                 eps = eps,
             ),
+            prep_fns = prep_fns,
         )
 
-    def _preprocess(self, est, ob):
+    def _prep_ob(self, ob_name, ob):
+        prep_fn = self.prep_fns.get(ob_name, lambda x: x)
+        return prep_fn(ob)
+
+    def _preprocess(self, ob_name, est, ob):
+        ob = self._prep_ob(ob_name, ob)
         return self.normalizer.normalize(est, ob)
 
-    def _init_state(self, ob):
+    def _init_state(self, ob_name, ob):
+        ob = self._prep_ob(ob_name, ob)
         return self.normalizer.init_estimates(ob)
 
-    def _update_state(self, est, ob_stats):
+    def _update_state(self, ob_name, est, ob_stats):
         return self.normalizer.update_estimates(est, ob_stats)
 
-    def _init_obs_stats(self, est):
+    def _init_obs_stats(self, ob_name, est):
         return self.normalizer.init_input_stats(est)
 
-    def _update_obs_stats(self, est, ob_stats, num_prev_updates, ob):
+    def _update_obs_stats(self, ob_name, est, ob_stats, num_prev_updates, ob):
+        ob = self._prep_ob(ob_name, ob)
         return self.normalizer.update_input_stats(
             ob_stats, num_prev_updates, ob)
 
