@@ -183,12 +183,15 @@ def _ppo_update(
         # bfloat16 before computing gradients. Gradients are currently being
         # computed and / or stored in fp32. Would bias params need to be
         # handled differently?
+        #lp_params = jax.tree_map(
+        #    lambda x: x.astype(cfg.compute_dtype), params)
+        lp_params = params
         if scaler != None:
             grad_fn = scaler.value_and_grad(loss_fn, has_aux=True)
-            scaler, is_finite, aux, grads = grad_fn(params)
+            scaler, is_finite, aux, grads = grad_fn(lp_params)
         else:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-            aux, grads = grad_fn(params)
+            aux, grads = grad_fn(lp_params)
 
         with jax.numpy_dtype_promotion('standard'):
             param_updates, new_opt_state = train_state.tx.update(

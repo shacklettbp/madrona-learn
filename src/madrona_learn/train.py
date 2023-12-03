@@ -241,10 +241,8 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
 
     rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
-    # For some reason init_sim_data needs to be captured, can't be passed
-    # in or throws a memcpy error (presumably due to dlpack imports?)
     @jax.jit
-    def init_rollout_state():
+    def init_rollout_state(init_sim_data):
         rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
@@ -255,7 +253,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
             init_sim_data = init_sim_data,
         )
 
-    rollout_state = init_rollout_state()
+    rollout_state = init_rollout_state(init_sim_data)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
