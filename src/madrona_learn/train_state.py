@@ -162,7 +162,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
-        obs_preprocess = obs_preprocess or ObsservationsPreprocessNoop.create()
+        obs_preprocess = obs_preprocess or ObservationsPreprocessNoop.create()
 
         def make_policies(rnd, obs, rnn_states):
             return _make_policies(
