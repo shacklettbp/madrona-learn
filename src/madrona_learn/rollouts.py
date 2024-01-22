@@ -102,7 +102,6 @@ class RolloutConfig:
             policy_chunk_size = sim_batch_size // num_current_policies
 
         if policy_chunk_size_override != 0:
-            assert policy_chunk_size_override > min_policy_chunk_size
             policy_chunk_size = policy_chunk_size_override
 
         assert sim_batch_size % policy_chunk_size == 0
