@@ -160,20 +160,29 @@ class EntitySelfAttentionNet(nn.Module):
 
     @nn.compact
     def __call__(self, x_tree, train):
-        def make_embed():
-            return nn.Dense(
-                self.num_embed_channels,
-                use_bias = True,
-                kernel_init = self.dense_init,
-                bias_init = jax.nn.initializers.constant(0),
-                dtype=self.dtype,
-            )
+        def make_embed(name):
+            def embed(x):
+                o = nn.Dense(
+                    self.num_embed_channels,
+                    use_bias = True,
+                    kernel_init = self.dense_init,
+                    bias_init = jax.nn.initializers.constant(0),
+                    dtype=self.dtype,
+                    name=name,
+                )(x)
+
+                o = LayerNorm(dtype=self.dtype)(o)
+                o = nn.leaky_relu(o)
+
+                return o
+
+            return embed
 
         x_tree, x_self = x_tree.pop('self')
 
         x_self = jnp.expand_dims(x_self, axis=-2)
 
-        embed_self = make_embed()(x_self)
+        embed_self = make_embed('self_embed')(x_self)
 
         x_flat, treedef = jax.tree_util.tree_flatten_with_path(x_tree)
 
@@ -182,8 +191,8 @@ class EntitySelfAttentionNet(nn.Module):
             if self.embed_concat_self:
                 x_entities = jnp.concatenate([x_entities, x_self], axis=-1)
 
-            embedding = make_embed()(x_entities)
-
+            embed_name = keypath[-1].key + '_embed'
+            embedding = make_embed(embed_name)(x_entities)
             embedded_entities.append(embedding)
 
         embedded_entities = jnp.concatenate(embedded_entities, axis=-2)
@@ -195,27 +204,35 @@ class EntitySelfAttentionNet(nn.Module):
                 dtype=self.dtype,
             )(embedded_entities)
 
-        attended_entities = nn.Dense(
+        residual_attended_out = attended_entities + embedded_entities
+        attended_avg_pool = residual_attended_out.mean(axis=-2)
+        attended_out = LayerNorm(dtype=self.dtype)(attended_avg_pool)
+
+        # Feedforward
+
+        ff_out = nn.Dense(
                 self.num_embed_channels,
-                dtype=self.dtype,
-            )(attended_entities)
-
-        attended_entities = attended_entities + embedded_entities
-        attended_entities = LayerNorm(dtype=self.dtype)(attended_entities)
-        attended_entities = attended_entities.mean(axis=-2)
-
-        out = jnp.concatenate(
-            [jnp.squeeze(embed_self, axis=-2), attended_entities], axis=-1)
-        out = LayerNorm(dtype=self.dtype)(out)
-
-        out = nn.Dense(
-                self.num_embed_channels * 2,
                 use_bias = True,
+                dtype=self.dtype,
                 kernel_init = self.dense_init,
                 bias_init = jax.nn.initializers.constant(0),
+                name='ff_0',
+            )(attended_out)
+
+        ff_out = LayerNorm(dtype=self.dtype)(ff_out)
+        ff_out = nn.leaky_relu(ff_out)
+        ff_out = nn.Dense(
+                self.num_embed_channels,
+                use_bias = True,
                 dtype=self.dtype,
-            )(out)
+                kernel_init = self.dense_init,
+                bias_init = jax.nn.initializers.constant(0),
+                name='ff_1',
+            )(ff_out)
 
-        out = LayerNorm(dtype=self.dtype)(out)
+        # Transformer block wouldn't have this activation
+        ff_out = nn.leaky_relu(ff_out)
+        ff_out = embedded_entities.mean(axis=-2) + ff_out
+        ff_out = LayerNorm(dtype=self.dtype)(ff_out)
 
-        return out
+        return ff_out
