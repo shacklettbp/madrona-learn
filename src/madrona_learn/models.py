@@ -205,7 +205,12 @@ class EntitySelfAttentionNet(nn.Module):
                 dtype=self.dtype,
             )(embedded_entities)
 
-        attended_out = attended_out + embedded_entities
+        if self.num_embed_channels != self.num_out_channels:
+            attended_out = attended_out + jnp.tile(
+                embedded_entities, self.num_out_channels // self.num_embed_channels)
+        else:
+            attended_out = attended_out + embedded_entities
+
         attended_out = attended_out.mean(axis=-2)
         attended_out = LayerNorm(dtype=self.dtype)(attended_out)
 
