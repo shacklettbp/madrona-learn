@@ -232,7 +232,7 @@ class EntitySelfAttentionNet(nn.Module):
 
         # Transformer block wouldn't have this activation
         ff_out = nn.leaky_relu(ff_out)
-        ff_out = embedded_entities.mean(axis=-2) + ff_out
+        ff_out = attended_out + ff_out
         ff_out = LayerNorm(dtype=self.dtype)(ff_out)
 
         return ff_out
