@@ -151,6 +151,7 @@ class DenseLayerCritic(nn.Module):
 # Based on the Emergent Tool Use policy paper
 class EntitySelfAttentionNet(nn.Module):
     num_embed_channels: int
+    num_out_channels: int
     num_heads: int
     dtype: jnp.dtype
     dense_init: Callable = jax.nn.initializers.orthogonal()
@@ -197,21 +198,21 @@ class EntitySelfAttentionNet(nn.Module):
 
         embedded_entities = jnp.concatenate(embedded_entities, axis=-2)
 
-        attended_entities = SelfAttention(
+        attended_out = SelfAttention(
                 num_heads=self.num_heads,
                 qkv_features=self.num_embed_channels,
-                out_features=self.num_embed_channels,
+                out_features=self.num_out_channels,
                 dtype=self.dtype,
             )(embedded_entities)
 
-        residual_attended_out = attended_entities + embedded_entities
-        attended_avg_pool = residual_attended_out.mean(axis=-2)
-        attended_out = LayerNorm(dtype=self.dtype)(attended_avg_pool)
+        attended_out = attended_out + embedded_entities
+        attended_out = attended_out.mean(axis=-2)
+        attended_out = LayerNorm(dtype=self.dtype)(attended_out)
 
         # Feedforward
 
         ff_out = nn.Dense(
-                self.num_embed_channels,
+                self.num_out_channels,
                 use_bias = True,
                 dtype=self.dtype,
                 kernel_init = self.dense_init,
@@ -222,7 +223,7 @@ class EntitySelfAttentionNet(nn.Module):
         ff_out = LayerNorm(dtype=self.dtype)(ff_out)
         ff_out = nn.leaky_relu(ff_out)
         ff_out = nn.Dense(
-                self.num_embed_channels,
+                self.num_out_channels,
                 use_bias = True,
                 dtype=self.dtype,
                 kernel_init = self.dense_init,
