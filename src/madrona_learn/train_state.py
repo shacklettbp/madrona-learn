@@ -139,6 +139,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
         def to_jax(a):
             return jax.tree_map(lambda x: jnp.asarray(x), a)
 
+        num_train_policies = loaded['train_states']['update_prng_key'].shape[0]
+
         return PolicyState(
             apply_fn = policy.apply,
             rnn_reset_fn = policy.clear_recurrent_state,
@@ -147,7 +149,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = frozen_dict.freeze(
                 to_jax(loaded['policy_states']['obs_preprocess_state'])),
-        )
+        ), num_train_policies
 
     @staticmethod
     def create(

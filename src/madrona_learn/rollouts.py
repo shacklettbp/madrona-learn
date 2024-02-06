@@ -32,8 +32,10 @@ class RolloutConfig:
     self_play_batch_size: int
     cross_play_batch_size: int
     past_play_batch_size: int
+    static_play_batch_size: int
     num_cross_play_matches: int
     num_past_play_matches: int
+    num_static_play_matches: int
     policy_dtype: jnp.dtype
     reward_dtype: jnp.dtype
     has_matchmaking: bool
@@ -48,6 +50,7 @@ class RolloutConfig:
         self_play_portion: float,
         cross_play_portion: float,
         past_play_portion: float,
+        static_play_portion: float,
         policy_dtype: jnp.dtype,
         reward_dtype: jnp.dtype = jnp.float32,
         policy_chunk_size_override: int = 0,
@@ -55,25 +58,31 @@ class RolloutConfig:
         total_num_policies = num_current_policies + num_past_policies
 
         assert (self_play_portion + cross_play_portion +
-            past_play_portion == 1.0)
+            past_play_portion + static_play_portion == 1.0)
 
         self_play_batch_size = int(sim_batch_size * self_play_portion)
         cross_play_batch_size = int(sim_batch_size * cross_play_portion)
         past_play_batch_size = int(sim_batch_size * past_play_portion)
+        static_play_batch_size = int(sim_batch_size * static_play_portion)
 
-        assert (self_play_batch_size + cross_play_batch_size +
-                past_play_batch_size == sim_batch_size)
+        assert (self_play_batch_size +
+                cross_play_batch_size +
+                past_play_batch_size +
+                static_play_batch_size == sim_batch_size)
 
         agents_per_world = num_teams * team_size
 
         assert cross_play_batch_size % agents_per_world == 0
         assert past_play_batch_size % agents_per_world == 0
+        assert static_play_batch_size % agents_per_world == 0
 
         num_cross_play_matches = cross_play_batch_size // agents_per_world
         num_past_play_matches = past_play_batch_size // agents_per_world
+        num_static_play_matches = static_play_batch_size // agents_per_world
 
         assert num_cross_play_matches % num_current_policies == 0
         assert num_past_play_matches % num_current_policies == 0
+        assert num_static_play_matches % num_current_policies == 0
         
         has_matchmaking = self_play_portion != 1.0
 
@@ -127,8 +136,10 @@ class RolloutConfig:
             self_play_batch_size = self_play_batch_size,
             cross_play_batch_size = cross_play_batch_size,
             past_play_batch_size = past_play_batch_size,
+            static_play_batch_size = static_play_batch_size,
             num_cross_play_matches = num_cross_play_matches,
             num_past_play_matches = num_past_play_matches,
+            num_static_play_matches = num_static_play_matches,
             policy_dtype = policy_dtype,
             reward_dtype = reward_dtype,
             has_matchmaking = has_matchmaking,
@@ -184,15 +195,22 @@ class RolloutState(flax.struct.PyTreeNode):
         prng_key,
         rnn_states,
         init_sim_data,
+        static_play_assignments,
     ):
+        if rollout_cfg.num_static_play_matches > 0.0:
+            assert static_play_assignments != None
+            assert (rollout_cfg.static_play_batch_size ==
+                    static_play_assignments.shape[0])
+
         if 'policy_assignments' in init_sim_data:
             policy_assignments = \
                 init_sim_data['policy_assignments'].squeeze(axis=-1)
         elif (rollout_cfg.cross_play_batch_size > 0 or
-              rollout_cfg.past_play_batch_size > 0): 
+              rollout_cfg.past_play_batch_size > 0 or
+              rollout_cfg.static_play_batch_size > 0): 
             prng_key, assign_rnd = random.split(prng_key)
             policy_assignments = _init_matchmake_assignments(
-                assign_rnd, rollout_cfg)
+                assign_rnd, rollout_cfg, static_play_assignments)
         else:
             policy_assignments = None
 
@@ -862,7 +880,11 @@ def _past_play_matchmake(
     return assignments.at[:, 1:, :].set(new_assignments).reshape(-1)
 
 
-def _init_matchmake_assignments(assign_rnd, rollout_cfg):
+def _init_matchmake_assignments(
+    assign_rnd: random.PRNGKey,
+    rollout_cfg: RolloutConfig,
+    static_play_assignments: Optional[jax.Array],
+):
     def self_play_matchmake(batch_size):
         return jnp.repeat(
             jnp.arange(rollout_cfg.num_current_policies),
@@ -871,6 +893,7 @@ def _init_matchmake_assignments(assign_rnd, rollout_cfg):
     self_play_batch_size = rollout_cfg.self_play_batch_size
     cross_play_batch_size = rollout_cfg.cross_play_batch_size
     past_play_batch_size = rollout_cfg.past_play_batch_size
+    static_play_batch_size = rollout_cfg.static_play_batch_size
 
     sub_assignments = []
 
@@ -904,6 +927,9 @@ def _init_matchmake_assignments(assign_rnd, rollout_cfg):
         )
 
         sub_assignments.append(past_assignments)
+
+    if static_play_batch_size > 0:
+        sub_assignments.append(static_play_assignments)
 
     policy_assignments = jnp.concatenate(sub_assignments, axis=0)
 

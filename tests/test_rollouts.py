@@ -95,6 +95,7 @@ def check_reorder(
         self_play_portion = 0.0,
         cross_play_portion = 1.0,
         past_play_portion = 0.0,
+        static_play_portion = 0.0,
         policy_dtype = jnp.float16,
         policy_chunk_size_override = policy_chunk_size_override,
     )
@@ -145,6 +146,7 @@ def setup_init_matchmake(
         self_play_portion = self_play,
         cross_play_portion = cross_play,
         past_play_portion = past_play,
+        static_play_portion = 0.0,
         policy_dtype = jnp.float16,
         policy_chunk_size_override = policy_chunk_size_override,
     )
@@ -253,6 +255,7 @@ def fake_rollout_setup(
         self_play_portion = self_play,
         cross_play_portion = cross_play,
         past_play_portion = past_play,
+        static_play_portion = 0.0,
         policy_dtype = jnp.int32,
         reward_dtype = jnp.int32,
         policy_chunk_size_override = policy_chunk_size_override,
@@ -324,6 +327,7 @@ def fake_rollout_setup(
             prng_key = rnd_rollout,
             rnn_states = rnn_states,
             init_sim_data = init_sim_data,
+            static_play_assignments = None,
         )
 
     rollout_state = init_rollout_state()

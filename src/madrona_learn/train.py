@@ -198,6 +198,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             self_play_portion = cfg.pbt.self_play_portion,
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
+            static_play_portion = 0.0,
             policy_dtype = cfg.compute_dtype,
             policy_chunk_size_override = \
                 cfg.pbt.rollout_policy_chunk_size_override,
@@ -212,6 +213,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
+            static_play_portion = 0.0,
             policy_dtype = cfg.compute_dtype,
         )
 
@@ -251,6 +253,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
             prng_key = rollout_rng,
             rnn_states = rnn_states,
             init_sim_data = init_sim_data,
+            static_play_assignments = None,
         )
 
     rollout_state = init_rollout_state(init_sim_data)

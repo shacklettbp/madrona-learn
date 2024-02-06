@@ -11,15 +11,18 @@ import madrona_learn.models
 import madrona_learn.rnn
 from madrona_learn.ppo import PPOConfig
 from madrona_learn.utils import init
-from madrona_learn.eval import eval_ckpt
+from madrona_learn.eval import (
+    eval_ckpt, SinglePolicyEvalConfig, MultiPolicyEvalConfig
+)
 from madrona_learn.metrics import CustomMetricConfig 
 from madrona_learn.observations import (
     ObservationsEMANormalizer, ObservationsCaster,
 )
 
 __all__ = [
-    "init", "train", "eval_ckpt", "TrainStateManager", "models", "rnn",
+    "init", "train", "TrainStateManager", "models", "rnn",
     "TrainConfig", "PBTConfig", "CustomMetricConfig",
+    "eval_ckpt", "SinglePolicyConfig", "MultiPolicyEvalConfig",
     "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",
     "ActorCritic", "DiscreteActor", "Critic",
