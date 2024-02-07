@@ -1,0 +1,4 @@
+-i https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+jax==0.4.25.dev.20240207
+-i https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
+jaxlib==0.4.25.dev20240207+cuda12.cudnn89

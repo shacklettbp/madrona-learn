@@ -8,9 +8,9 @@ from typing import List, Callable, Any
 
 from .action import DiscreteActionDistributions
 
-from .pallas import monkeypatch as _pl_patch
-from .pallas import layer_norm as pl_layer_norm
-from .pallas import attention as pl_attention
+#from .pallas import monkeypatch as _pl_patch
+#from .pallas import layer_norm as pl_layer_norm
+#from .pallas import attention as pl_attention
 
 class PallasLayerNorm(nn.Module):
     dtype: jnp.dtype
