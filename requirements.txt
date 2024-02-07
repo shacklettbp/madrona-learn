@@ -2,3 +2,9 @@
 jax==0.4.25.dev.20240207
 -i https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html
 jaxlib==0.4.25.dev20240207+cuda12.cudnn89
+flax==0.8.0
+optax==0.1.9
+orbax==0.1.9
+tensorboard==2.15.1
+tensorboard-plugin-profile==2.15.0
+tensorboard-plugin-wit==1.8.1
