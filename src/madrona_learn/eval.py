@@ -18,48 +18,47 @@ from .rollouts import RolloutConfig, RolloutState, rollout_loop
 from .train_state import TrainStateManager
 
 @dataclass(frozen=True)
-class SinglePolicyEvalConfig:
-    policy_idx: int
-
-@dataclass(frozen=True)
 class MultiPolicyEvalConfig:
     num_teams: int
     team_size: int
 
+@dataclass(frozen=True)
+class EvalConfig:
+    ckpt_path: str
+    num_worlds: int
+    num_agents_per_world: int
+    num_eval_steps: int
+    policy_dtype: jnp.dtype
+    single_policy_eval: Optional[int] = None
+    multi_policy_eval: Optional[MultiPolicyEvalConfig] = None
+    use_deterministic_policy: bool = True
+
 def eval_ckpt(
     dev: jax.Device,
-    ckpt_path: str,
-    num_eval_steps: int,
+    eval_cfg: EvalConfig,
+    sim_init: Callable,
     sim_step: Callable,
-    init_sim_data: FrozenDict,
     policy: ActorCritic,
     obs_preprocess: Optional[nn.Module],
     step_cb: Callable,
-    policy_dtype: jnp.dtype,
-    single_policy_cfg: Optional[SinglePolicyEvalConfig] = None,
-    multi_policy_cfg: Optional[MultiPolicyEvalConfig] = None,
-    use_deterministic_policy: bool = True,
 ):
-    assert single_policy_cfg != None or multi_policy_cfg != None
-    assert single_policy_cfg == None or multi_policy_cfg == None
+    assert (
+        (eval_cfg.single_policy_eval != None or
+            eval_cfg.multi_policy_eval != None) and
+        (eval_cfg.single_policy_eval == None or
+         eval_cfg.multi_policy_eval == None))
 
     with jax.default_device(dev):
-        _eval_ckpt_impl(ckpt_path, num_eval_steps, sim_step,
-            init_sim_data, policy, obs_preprocess, step_cb, policy_dtype,
-            single_policy_cfg, multi_policy_cfg, use_deterministic_policy)
+        _eval_ckpt_impl(eval_cfg, sim_init, sim_step,
+            policy, obs_preprocess, step_cb)
 
 def _eval_ckpt_impl(
-    ckpt_path: str,
-    num_eval_steps: int,
+    eval_cfg: EvalConfig,
+    sim_init: Callable,
     sim_step: Callable,
-    init_sim_data: FrozenDict,
     policy: ActorCritic,
     obs_preprocess: Optional[nn.Module],
     step_cb: Callable,
-    policy_dtype: jnp.dtype,
-    single_policy_cfg: Optional[SinglePolicyEvalConfig],
-    multi_policy_cfg: Optional[MultiPolicyEvalConfig],
-    use_deterministic_policy: bool,
 ):
     checkify_errors = checkify.user_checks
     if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
@@ -71,16 +70,15 @@ def _eval_ckpt_impl(
             checkify.index_checks
         )
 
-    init_sim_data = frozen_dict.freeze(init_sim_data)
-
-    sim_batch_size = init_sim_data['actions'].shape[0]
-
     policy_states, num_train_policies = TrainStateManager.load_policies(
-        policy, obs_preprocess, ckpt_path)
+        policy, obs_preprocess, eval_cfg.ckpt_path)
 
-    if single_policy_cfg != None:
+    sim_batch_size = eval_cfg.num_worlds * eval_cfg.num_agents_per_world
+
+    if eval_cfg.single_policy_eval != None:
         policy_states = jax.tree_map(
-            lambda x: x[jnp.asarray((single_policy_cfg.policy_idx,))], policy_states)
+            lambda x: x[jnp.asarray((eval_cfg.single_policy_eval,))],
+            policy_states)
 
         rollout_cfg = RolloutConfig.setup(
             num_current_policies = 1,
@@ -92,29 +90,27 @@ def _eval_ckpt_impl(
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 0.0,
-            policy_dtype = policy_dtype,
+            policy_dtype = eval_cfg.policy_dtype,
         )
 
         static_play_assignments = None
-
-    elif multi_policy_cfg != None:
+    elif eval_cfg.multi_policy_eval != None:
         assert (
-            sim_batch_size %
-                (multi_policy_cfg.num_teams * multi_policy_cfg.team_size) ==
-            0
+            multi_policy_cfg.num_teams * multi_policy_cfg.team_size ==
+                eval_cfg.num_agents_per_world
         )
 
         rollout_cfg = RolloutConfig.setup(
             num_current_policies = num_train_policies,
             num_past_policies = 0,
-            num_teams = multi_policy_cfg.num_teams,
-            team_size = multi_policy_cfg.team_size,
+            num_teams = eval_cfg.multi_policy_eval.num_teams,
+            team_size = eval_cfg.multi_policy_eval.team_size,
             sim_batch_size = sim_batch_size,
             self_play_portion = 0.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 1.0,
-            policy_dtype = policy_dtype,
+            policy_dtype = eval_cfg.policy_dtype,
         )
 
         num_unique_static_assignments = num_train_policies * num_train_policies
@@ -139,11 +135,11 @@ def _eval_ckpt_impl(
             assignments = jnp.array(
                 static_assignments_list, dtype=jnp.int32)
 
-            assignments = assignments.reshape(-1, multi_policy_cfg.num_teams)
+            assignments = assignments.reshape(-1, rollout_cfg.num_teams)
             assignments = jnp.repeat(
                 assignments, num_assignment_duplicates, axis=0)
             assignments = jnp.repeat(
-                assignments.reshape(-1), multi_policy_cfg.team_size)
+                assignments.reshape(-1), rollout_cfg.team_size)
 
             return assignments
 
@@ -153,19 +149,19 @@ def _eval_ckpt_impl(
                 rollout_cfg.static_play_batch_size)
 
     @jax.jit
-    def init_rollout_state(init_sim_data, static_play_assignments):
+    def init_rollout_state(static_play_assignments):
         rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
+            init_fn = sim_init,
             step_fn = sim_step,
             prng_key = random.PRNGKey(0),
             rnn_states = rnn_states,
-            init_sim_data = init_sim_data,
             static_play_assignments = static_play_assignments
         )
 
-    rollout_state = init_rollout_state(init_sim_data, static_play_assignments)
+    rollout_state = init_rollout_state(static_play_assignments)
 
     def post_policy_cb(step_idx, obs, preprocessed_obs, policy_out,
                        reorder_state, cb_state):
@@ -185,11 +181,11 @@ def _eval_ckpt_impl(
 
     rollout_loop_fn = partial(rollout_loop,
         rollout_cfg = rollout_cfg,
-        num_steps = num_eval_steps,
+        num_steps = eval_cfg.num_eval_steps,
         post_inference_cb = post_policy_cb,
         post_step_cb = post_step_cb,
         cb_state = None,
-        sample_actions = not use_deterministic_policy,
+        sample_actions = not eval_cfg.use_deterministic_policy,
         return_debug = True,
     )
 

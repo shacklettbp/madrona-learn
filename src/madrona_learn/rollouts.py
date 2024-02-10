@@ -182,19 +182,19 @@ class PolicyBatchReorderState(flax.struct.PyTreeNode):
 
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
+    cur_obs: FrozenDict[str, Any]
     prng_key: random.PRNGKey
     rnn_states: Any
-    sim_data: FrozenDict
     reorder_state: PolicyBatchReorderState
     policy_assignments: Optional[jax.Array]
 
     @staticmethod
     def create(
         rollout_cfg,
+        init_fn,
         step_fn,
         prng_key,
         rnn_states,
-        init_sim_data,
         static_play_assignments,
     ):
         if rollout_cfg.num_static_play_matches > 0.0:
@@ -202,10 +202,7 @@ class RolloutState(flax.struct.PyTreeNode):
             assert (rollout_cfg.static_play_batch_size ==
                     static_play_assignments.shape[0])
 
-        if 'policy_assignments' in init_sim_data:
-            policy_assignments = \
-                init_sim_data['policy_assignments'].squeeze(axis=-1)
-        elif (rollout_cfg.cross_play_batch_size > 0 or
+        if (rollout_cfg.cross_play_batch_size > 0 or
               rollout_cfg.past_play_batch_size > 0 or
               rollout_cfg.static_play_batch_size > 0): 
             prng_key, assign_rnd = random.split(prng_key)
@@ -216,31 +213,32 @@ class RolloutState(flax.struct.PyTreeNode):
 
         reorder_state = _compute_reorder_state(policy_assignments, rollout_cfg)
 
-        sim_data = jax.tree_map(jnp.copy, init_sim_data)
+        init_obs = init_fn()
+        init_obs = frozen_dict.freeze(init_obs)
 
         return RolloutState(
             step_fn = step_fn,
+            cur_obs = init_obs,
             prng_key = prng_key,
             rnn_states = rnn_states,
-            sim_data = sim_data,
             reorder_state = reorder_state,
-            policy_assignments = (policy_assignments
-                if 'policy_assignments' not in init_sim_data else None),
+            policy_assignments = policy_assignments,
         )
 
     def update(
         self,
+        cur_obs=None,
         prng_key=None,
         rnn_states=None,
-        sim_data=None,
         reorder_state=None,
         policy_assignments=None,
     ):
         return RolloutState(
             step_fn = self.step_fn,
+            cur_obs = (
+                cur_obs if cur_obs != None else self.cur_obs),
             prng_key = prng_key if prng_key != None else self.prng_key,
             rnn_states = rnn_states if rnn_states != None else self.rnn_states,
-            sim_data = sim_data if sim_data != None else self.sim_data,
             reorder_state = (
                 reorder_state if reorder_state != None else self.reorder_state),
             policy_assignments = (
@@ -305,8 +303,7 @@ class RolloutManager:
         train_cfg: TrainConfig,
         rollout_cfg: RolloutConfig,
         init_rollout_state: RolloutState,
-        obs_preprocess: ObservationsPreprocess,
-        obs_preprocess_state: FrozenDict[str, Any],
+        example_policy_states: PolicyState,
     ):
         cpu_dev = jax.devices('cpu')[0]
 
@@ -337,28 +334,54 @@ class RolloutManager:
 
         typed_shapes = {}
 
-        sim_data = init_rollout_state.sim_data
-        
-        def get_obs_typed_shape(o):
-            return TypedShape(o.shape, o.dtype)
+        def get_typed_shape(a):
+            return TypedShape(a.shape, a.dtype)
 
-        typed_shapes['obs'] = jax.tree_map(
-            get_obs_typed_shape, sim_data['obs'])
+        example_policy_state = jax.tree_map(
+            lambda x: x[0], example_policy_states)
 
-        typed_shapes['actions'] = TypedShape(
-            sim_data['actions'].shape, sim_data['actions'].dtype)
+        # Preprocessed observations are stored in the rollouts. Figure
+        # out observation shape / dtype after preprocessing
+        def get_preprocessed_obs_abstract(policy_state, obs):
+            return policy_state.obs_preprocess.preprocess(
+                policy_state.obs_preprocess_state, obs, False)
+
+        preprocessed_obs_abstract = jax.eval_shape(
+            get_preprocessed_obs_abstract, example_policy_state,
+            init_rollout_state.cur_obs)
+
+        def get_actions_abstract(policy_state, rnn_states, preprocessed_obs):
+            policy_out, rnn_states = policy_state.apply_fn(
+                {
+                    'params': policy_state.params,
+                    'batch_stats': policy_state.batch_stats,
+                },
+                rnn_states,
+                preprocessed_obs,
+                train = False,
+                method='actor_only',
+            )
+
+            return policy_out['actions']
+
+        actions_abstract = jax.eval_shape(
+            get_actions_abstract, example_policy_state,
+            init_rollout_state.rnn_states, preprocessed_obs_abstract)
+
+        typed_shapes['obs'] = jax.tree_map(get_typed_shape, preprocessed_obs_abstract)
+        typed_shapes['actions'] = get_typed_shape(actions_abstract)
 
         typed_shapes['log_probs'] = TypedShape(
             typed_shapes['actions'].shape, self._cfg.policy_dtype)
 
         typed_shapes['rewards'] = TypedShape(
-          sim_data['rewards'].shape, self._cfg.reward_dtype)
+          (self._cfg.sim_batch_size, 1), self._cfg.reward_dtype)
 
         typed_shapes['dones'] = TypedShape(
-            sim_data['dones'].shape, jnp.bool_)
+            (self._cfg.sim_batch_size, 1), jnp.bool_)
 
         typed_shapes['values'] = TypedShape(
-            typed_shapes['rewards'].shape, self._cfg.policy_dtype)
+            (self._cfg.sim_batch_size, 1), self._cfg.policy_dtype)
 
         def expand_per_step_shapes(x):
             return TypedShape((
@@ -379,21 +402,6 @@ class RolloutManager:
                     *x.shape[1:],
                 ), x.dtype),
             init_rollout_state.rnn_states)
-
-        # Preprocessed observations are stored in the rollouts. Figure
-        # out observation shape / dtype after preprocessing
-        def preprocess_shape_helper(obs):
-            return obs_preprocess.preprocess(
-                jax.tree_map(lambda x: x[0:self._num_train_policies],
-                    obs_preprocess_state), obs, True)
-
-        preprocessed_obs_shape_dtypes = jax.eval_shape(preprocess_shape_helper,
-            jax.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape[2:], x.dtype),
-                typed_shapes['obs']))
-
-        typed_shapes['obs'] = jax.tree_map(
-            lambda o, n: TypedShape((*o.shape[0:2], *n.shape), n.dtype),
-            typed_shapes['obs'], preprocessed_obs_shape_dtypes)
 
         self._store_typed_shape_tree = frozen_dict.freeze(typed_shapes)
 
@@ -494,7 +502,7 @@ class RolloutManager:
 
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
         rnn_states = rollout_state.rnn_states
-        obs = rollout_state.sim_data['obs']
+        obs = rollout_state.cur_obs
         reorder_state = rollout_state.reorder_state
 
         rnn_states, obs = self._sim_to_train((rnn_states, obs), reorder_state)
@@ -708,7 +716,7 @@ def rollout_loop(
 
         prng_key = rollout_state.prng_key
         rnn_states = rollout_state.rnn_states
-        sim_data = rollout_state.sim_data
+        sim_obs = rollout_state.cur_obs
         reorder_state = rollout_state.reorder_state
         policy_assignments = rollout_state.policy_assignments
 
@@ -721,7 +729,7 @@ def rollout_loop(
                 policy_states, policy_assignments, reorder_state)
 
             rnn_states, policy_obs = reorder_state.to_policy(
-                (rnn_states, sim_data['obs']))
+                (rnn_states, sim_obs))
 
             preprocessed_obs = obs_preprocess_fn(
                 reordered_policy_states, policy_obs)
@@ -739,26 +747,35 @@ def rollout_loop(
             rnn_states = reorder_state.to_sim(rnn_states)
 
         with profile('Rollout Step'):
-            sim_data = sim_data.copy({
+            step_input = frozen_dict.freeze({
                 'actions': reorder_state.to_sim(policy_out['actions']),
+                'resets': jnp.zeros(
+                    (rollout_cfg.sim_batch_size, 1), dtype=jnp.int32),
             })
 
-            sim_data = frozen_dict.freeze(rollout_state.step_fn(sim_data))
+            if rollout_cfg.has_matchmaking:
+                pbt_inputs = {
+                    'policy_assignments': policy_assignments,
+                    'policy_sim_params': jnp.zeros( # FIXME
+                        (rollout_cfg.num_current_policies, 1),
+                        dtype=jnp.float32),
+                }
 
-            dones = sim_data['dones'].astype(jnp.bool_)
-            rewards = sim_data['rewards'].astype(rollout_cfg.reward_dtype)
+                step_input = step_input.copy({'pbt': pbt_inputs})
+
+            step_output = rollout_state.step_fn(step_input)
+            step_output = frozen_dict.freeze(step_output)
+
+            dones = step_output['dones'].astype(jnp.bool_)
+            rewards = step_output['rewards'].astype(rollout_cfg.reward_dtype)
+            sim_obs = step_output['obs']
 
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
 
             if rollout_cfg.has_matchmaking:
-                if 'policy_assignments' in sim_data:
-                    policy_assignments = \
-                        sim_data['policy_assignments'].squeeze(axis=-1)
-                else:
-                    assert policy_assignments != None
-                    policy_assignments, prng_key = _update_policy_assignments(
-                        policy_assignments, dones, prng_key, rollout_cfg)
+                policy_assignments, prng_key = _update_policy_assignments(
+                    policy_assignments, dones, prng_key, rollout_cfg)
 
                 reorder_state = _compute_reorder_state(
                     policy_assignments,
@@ -771,10 +788,9 @@ def rollout_loop(
         rollout_state = rollout_state.update(
             prng_key = prng_key,
             rnn_states = rnn_states,
-            sim_data = sim_data,
+            cur_obs = sim_obs,
             reorder_state = reorder_state,
-            policy_assignments = (policy_assignments
-                if 'policy_assignments' not in sim_data else None),
+            policy_assignments = policy_assignments,
         )
 
         return rollout_state, cb_state

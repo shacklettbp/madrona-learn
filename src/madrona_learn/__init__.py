@@ -12,7 +12,7 @@ import madrona_learn.rnn
 from madrona_learn.ppo import PPOConfig
 from madrona_learn.utils import init
 from madrona_learn.eval import (
-    eval_ckpt, SinglePolicyEvalConfig, MultiPolicyEvalConfig
+    eval_ckpt, EvalConfig, MultiPolicyEvalConfig
 )
 from madrona_learn.metrics import CustomMetricConfig 
 from madrona_learn.observations import (
@@ -22,7 +22,7 @@ from madrona_learn.observations import (
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn",
     "TrainConfig", "PBTConfig", "CustomMetricConfig",
-    "eval_ckpt", "SinglePolicyConfig", "MultiPolicyEvalConfig",
+    "eval_ckpt", "EvalConfig", "MultiPolicyEvalConfig",
     "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",
     "ActorCritic", "DiscreteActor", "Critic",

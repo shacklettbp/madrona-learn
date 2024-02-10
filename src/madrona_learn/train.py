@@ -24,8 +24,8 @@ from .profile import profile
 def train(
     dev: jax.Device,
     cfg: TrainConfig,
+    sim_init: Callable,
     sim_step: Callable,
-    init_sim_data: FrozenDict,
     policy: ActorCritic,
     obs_preprocess: Optional[nn.Module],
     iter_cb: Callable,
@@ -36,9 +36,9 @@ def train(
     print(cfg)
 
     with jax.default_device(dev):
-        return _train_impl(dev.platform, cfg, sim_step, init_sim_data,
-            policy, obs_preprocess, iter_cb, metrics_cfg, restore_ckpt,
-            profile_port)
+        return _train_impl(dev.platform, cfg, sim_init, sim_step,
+            policy, obs_preprocess, iter_cb, metrics_cfg,
+            restore_ckpt, profile_port)
 
 def _pbt_update(
     cfg: TrainConfig,
@@ -218,9 +218,18 @@ def _setup_rollout_cfg(dev_type, cfg):
         )
 
 
-def _train_impl(dev_type, cfg, sim_step, init_sim_data,
-                policy, obs_preprocess, iter_cb, metrics_cfg,
-                restore_ckpt, profile_port):
+def _train_impl(
+    dev_type,
+    cfg,
+    sim_init,
+    sim_step,
+    policy,
+    obs_preprocess,
+    iter_cb,
+    metrics_cfg,
+    restore_ckpt,
+    profile_port,
+):
     if profile_port != None:
         jax.profiler.start_server(profile_port)
         env_vars['TF_GPU_CUPTI_FORCE_CONCURRENT_KERNEL'] = '1'
@@ -237,26 +246,24 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
 
     algo = cfg.algo.setup()
 
-    init_sim_data = frozen_dict.freeze(init_sim_data)
-
     rollout_rng, init_rng = random.split(random.PRNGKey(cfg.seed))
 
     rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
     @jax.jit
-    def init_rollout_state(init_sim_data):
+    def init_rollout_state():
         rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
+            init_fn = sim_init,
             step_fn = sim_step,
             prng_key = rollout_rng,
             rnn_states = rnn_states,
-            init_sim_data = init_sim_data,
             static_play_assignments = None,
         )
 
-    rollout_state = init_rollout_state(init_sim_data)
+    rollout_state = init_rollout_state()
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
@@ -264,7 +271,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
         cfg = cfg,
         algo = algo,
         base_rng = init_rng,
-        example_obs = rollout_state.sim_data['obs'],
+        example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
         checkify_errors = checkify_errors,
     )
@@ -278,9 +285,7 @@ def _train_impl(dev_type, cfg, sim_step, init_sim_data,
         train_cfg = cfg,
         rollout_cfg = rollout_cfg,
         init_rollout_state = rollout_state,
-        obs_preprocess = train_state_mgr.policy_states.obs_preprocess,
-        obs_preprocess_state = (
-            train_state_mgr.policy_states.obs_preprocess_state),
+        example_policy_states = train_state_mgr.policy_states,
     )
 
     def update_loop_wrapper(rollout_state, train_state_mgr):
