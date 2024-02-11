@@ -756,7 +756,7 @@ def rollout_loop(
             if rollout_cfg.has_matchmaking:
                 pbt_inputs = {
                     'policy_assignments': policy_assignments,
-                    'policy_sim_params': jnp.zeros( # FIXME
+                    'reward_hyper_params': jnp.zeros( # FIXME
                         (rollout_cfg.num_current_policies, 1),
                         dtype=jnp.float32),
                 }
