@@ -208,6 +208,7 @@ class FakeNet(nn.Module):
         return jnp.concatenate([
             inputs + bias,
             jnp.broadcast_to(bias[None, None], inputs.shape),
+            obs['c'],
         ], axis=-1)
 
 
@@ -226,7 +227,7 @@ class FakeRNN(nn.Module):
         y = in_features[..., 0:1] + cur_hiddens
         new_hiddens = cur_hiddens + 2 * in_features[..., 0:1]
 
-        y = jnp.concatenate([y, in_features[..., 1:2], new_hiddens], axis=-1)
+        y = jnp.concatenate([y, in_features[..., 1:3], new_hiddens], axis=-1)
 
         return y, new_hiddens
 
@@ -263,34 +264,30 @@ def fake_rollout_setup(
 
     rnd, rnd_obs = random.split(rnd)
 
-    init_obs = {
-        'o': random.randint(rnd_obs, (batch_size, 1), 0, 10000),
-    }
+    def fake_sim_init():
+        return {
+            'o': random.randint(rnd_obs, (batch_size, 1), 0, 10000),
+            'c': jnp.zeros((batch_size, 1), dtype=jnp.int32),
+        }
 
-    init_sim_data = frozen_dict.freeze({
-        'obs': init_obs,
-        'rewards': jnp.zeros((batch_size, 1), dtype=jnp.int32),
-        'dones': jnp.zeros((batch_size, 1), dtype=jnp.bool_),
-        'actions': jnp.zeros((batch_size, 2), dtype=jnp.int32),
-        'counter': jnp.zeros((batch_size, 1), dtype=jnp.int32),
-    })
+    def fake_sim_step(sim_inputs):
+        actions = sim_inputs['actions']
+    
+        counter = actions[..., 2:3]
 
-    def fake_sim(sim_data):
-        sim_data = jax.tree_map(jnp.copy, sim_data)
+        counter = counter + 1
+        new_dones = counter == episode_len
 
-        new_counter = sim_data['counter'] + 1
-        new_dones = new_counter == episode_len
+        counter = counter % episode_len
 
-        new_counter %= episode_len
-
-        return sim_data.copy({
+        return {
             'obs': {
-                'o': sim_data['actions'][..., 0:1] + 1,
+                'o': actions[..., 0:1] + 1,
+                'c': counter,
             },
-            'rewards': sim_data['actions'][..., 0:1] + 2,
-            'counter': new_counter,
+            'rewards': actions[..., 0:1] + 2,
             'dones': new_dones,
-        })
+        }
 
     fake_backbone = BackboneShared(
         prefix = lambda x, train: x,
@@ -301,10 +298,10 @@ def fake_rollout_setup(
     )
 
     def fake_actor(features, train):
-        return FakeActionDist(features[..., 0:2])
+        return FakeActionDist(features[..., 0:3])
 
     def fake_critic(features, train):
-        return features[..., 2:3] + 1
+        return features[..., 3:4] + 1
 
     policy = ActorCritic(
         backbone = fake_backbone,
@@ -323,20 +320,21 @@ def fake_rollout_setup(
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
-            step_fn = fake_sim,
+            init_fn = fake_sim_init,
+            step_fn = fake_sim_step,
             prng_key = rnd_rollout,
             rnn_states = rnn_states,
-            init_sim_data = init_sim_data,
             static_play_assignments = None,
         )
 
     rollout_state = init_rollout_state()
+    init_obs = jax.tree_map(jnp.copy, rollout_state.cur_obs)
     init_rnn_states = jnp.copy(rollout_state.rnn_states)
     
     def make_policy(policy_idx, init_rnd):
         variables = policy.init(
             init_rnd, random.PRNGKey(0), rollout_state.rnn_states,
-            rollout_state.sim_data['obs'], 
+            rollout_state.cur_obs, 
             sample_actions = False,
             method='rollout')
 
@@ -346,7 +344,7 @@ def fake_rollout_setup(
 
         obs_preprocess = ObservationsPreprocessNoop.create()
         obs_preprocess_state = obs_preprocess.init_state(
-            rollout_state.sim_data['obs'], True)
+            rollout_state.cur_obs, True)
 
         return PolicyState(
             apply_fn = policy.apply,
@@ -439,8 +437,10 @@ def verify_rollout_data(rollout_state, rollout_store, policy_states, init_obs,
     final_values = rollout_store['values'][-1, ...]
     final_rnn_states = rollout_state.rnn_states
 
-    rnn_check = jnp.where(rollout_state.sim_data['dones'],
-        jnp.zeros((), jnp.int32), final_values - 1)
+    if num_steps % episode_len == 0:
+        rnn_check = jnp.zeros((), jnp.int32)
+    else:
+        rnn_check = final_values - 1
 
     checkify.check(jnp.all(rnn_check == final_rnn_states), "RNN mismatch")
 
@@ -563,7 +563,7 @@ def check_rollout_loop(
                 'o': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
             },
             'values': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
-            'actions': jnp.zeros((num_steps, batch_size, 2), dtype=jnp.int32),
+            'actions': jnp.zeros((num_steps, batch_size, 3), dtype=jnp.int32),
             'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
         })
 
@@ -655,8 +655,7 @@ def check_rollout_mgr(
         train_cfg = train_cfg,
         rollout_cfg = rollout_cfg,
         init_rollout_state = rollout_state,
-        obs_preprocess = policy_states.obs_preprocess,
-        obs_preprocess_state = policy_states.obs_preprocess_state,
+        example_policy_states = policy_states,
     )
 
     rnd, pbt_rnd = random.split(rnd, 2)
