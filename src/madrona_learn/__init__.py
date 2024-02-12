@@ -18,12 +18,13 @@ from madrona_learn.metrics import CustomMetricConfig
 from madrona_learn.observations import (
     ObservationsEMANormalizer, ObservationsCaster,
 )
+from madrona_learn.policy import Policy
 
 __all__ = [
-    "init", "train", "TrainStateManager", "models", "rnn",
+    "init", "train", "TrainStateManager", "models", "rnn", 
     "TrainConfig", "PBTConfig", "CustomMetricConfig",
     "eval_ckpt", "EvalConfig", "MultiPolicyEvalConfig",
-    "DiscreteActionDistributions",
+    "Policy", "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",
     "ActorCritic", "DiscreteActor", "Critic",
     "BackboneEncoder", "RecurrentBackboneEncoder",

@@ -10,7 +10,6 @@ from os import environ as env_vars
 from dataclasses import dataclass
 from functools import partial
 from typing import List, Optional, Dict, Callable
-from time import time
 
 from .cfg import TrainConfig
 from .rollouts import RolloutConfig, RolloutManager, RolloutState
@@ -19,6 +18,7 @@ from .algo_common import AlgoBase
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import PolicyTrainState, TrainStateManager
+from .policy import Policy
 from .profile import profile
 
 def train(
@@ -26,8 +26,7 @@ def train(
     cfg: TrainConfig,
     sim_init: Callable,
     sim_step: Callable,
-    policy: ActorCritic,
-    obs_preprocess: Optional[nn.Module],
+    policy: Policy,
     iter_cb: Callable,
     metrics_cfg: CustomMetricConfig,
     restore_ckpt: str = None,
@@ -37,7 +36,7 @@ def train(
 
     with jax.default_device(dev):
         return _train_impl(dev.platform, cfg, sim_init, sim_step,
-            policy, obs_preprocess, iter_cb, metrics_cfg,
+            policy, iter_cb, metrics_cfg,
             restore_ckpt, profile_port)
 
 def _pbt_update(
@@ -102,7 +101,7 @@ def _update_loop(
 
         with profile("Update Iter"):
             with profile('Collect Rollouts'):
-                (rollout_state, rollout_data,
+                (train_state_mgr, rollout_state, rollout_data,
                  obs_stats, metrics) = rollout_mgr.collect(
                     train_state_mgr, rollout_state, metrics)
 
@@ -135,10 +134,9 @@ def _update_loop(
                     lambda full, new: full.at[0:num_train_policies].set(new),
                     train_state_mgr.policy_states, train_policy_states)
 
-            train_state_mgr = TrainStateManager(
+            train_state_mgr = train_state_mgr.replace(
                 policy_states = policy_states,
                 train_states = updated_train_states,
-                pbt_rng = train_state_mgr.pbt_rng,
             )
             
         reset_metrics = iter_cb(update_idx, metrics, train_state_mgr)
@@ -224,7 +222,6 @@ def _train_impl(
     sim_init,
     sim_step,
     policy,
-    obs_preprocess,
     iter_cb,
     metrics_cfg,
     restore_ckpt,
@@ -252,7 +249,8 @@ def _train_impl(
 
     @jax.jit
     def init_rollout_state():
-        rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
+        rnn_states = policy.actor_critic.init_recurrent_state(
+                rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
@@ -267,12 +265,12 @@ def _train_impl(
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
-        obs_preprocess = obs_preprocess,
         cfg = cfg,
         algo = algo,
         base_rng = init_rng,
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
+        track_policy_fitness = rollout_cfg.has_matchmaking,
         checkify_errors = checkify_errors,
     )
 

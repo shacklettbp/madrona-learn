@@ -19,21 +19,33 @@ from .algo_common import HyperParams, AlgoBase
 from .cfg import TrainConfig
 from .moving_avg import EMANormalizer
 from .observations import ObservationsPreprocess, ObservationsPreprocessNoop
+from .policy import Policy
 
 class PolicyState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
     rnn_reset_fn: Callable = flax.struct.field(pytree_node=False)
+
     params: FrozenDict[str, Any]
     batch_stats: FrozenDict[str, Any]
+
     obs_preprocess: ObservationsPreprocess = flax.struct.field(
         pytree_node=False)
     obs_preprocess_state: FrozenDict[str, Any]
+
+    mutate_reward_hyper_params: Callable = flax.struct.field(
+        pytree_node=False)
+    reward_hyper_params: Optional[jax.Array]
+
+    parse_match_result_fn: Callable = flax.struct.field(pytree_node=False)
+    fitness_score: Optional[jax.Array]
 
     def update(
         self,
         params = None,
         batch_stats = None,
         obs_preprocess_state = None,
+        reward_hyper_params = None,
+        fitness_score = None,
     ):
         return PolicyState(
             apply_fn = self.apply_fn,
@@ -46,6 +58,16 @@ class PolicyState(flax.struct.PyTreeNode):
             obs_preprocess_state = (
                 obs_preprocess_state if obs_preprocess_state != None else
                     self.obs_preprocess_state
+            ),
+            mutate_reward_hyper_params = self.mutate_reward_hyper_params,
+            reward_hyper_params = (
+                reward_hyper_params if reward_hyper_params != None else
+                    self.reward_hyper_params
+            ),
+            parse_match_result_fn = self.parse_match_result_fn,
+            fitness_score = (
+                fitness_score if fitness_score != None else
+                    self.fitness_score
             ),
         )
 
@@ -130,45 +152,67 @@ class TrainStateManager(flax.struct.PyTreeNode):
         ), loaded['next_update']
 
     @staticmethod
-    def load_policies(policy, obs_preprocess, path):
+    def load_policies(policy, path):
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         loaded = checkpointer.restore(path)
 
-        obs_preprocess = obs_preprocess or ObservationsPreprocessNoop.create()
+        actor_critic = policy.actor_critic
+        obs_preprocess = (
+            policy.obs_preprocess or ObservationsPreprocessNoop.create())
 
         def to_jax(a):
             return jax.tree_map(lambda x: jnp.asarray(x), a)
 
         num_train_policies = loaded['train_states']['update_prng_key'].shape[0]
 
+        if policy.init_reward_hyper_params != None:
+            assert policy.mutate_reward_hyper_params != None
+            mutate_reward_hp_fn = policy.mutate_reward_hyper_params
+
+            reward_hyper_params = to_jax(
+                loaded['policy_states']['reward_hyper_params'])
+
+        else:
+            mutate_reward_hp_fn = lambda *args: None
+            reward_hyper_params = None
+
+        if policy.parse_match_result != None:
+            parse_match_result_fn = policy.parse_match_result
+        else:
+            parse_match_result_fn = lambda x: x
+
+        fitness_score = loaded['policy_states'].get('fitness_score', None)
+
         return PolicyState(
-            apply_fn = policy.apply,
-            rnn_reset_fn = policy.clear_recurrent_state,
+            apply_fn = actor_critic.apply,
+            rnn_reset_fn = actor_critic.clear_recurrent_state,
             params = to_jax(loaded['policy_states']['params']),
             batch_stats = to_jax(loaded['policy_states']['batch_stats']),
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = frozen_dict.freeze(
                 to_jax(loaded['policy_states']['obs_preprocess_state'])),
+            mutate_reward_hyper_params = mutate_reward_hp_fn,
+            reward_hyper_params = reward_hyper_params,
+            parse_match_result_fn = parse_match_result_fn,
+            fitness_score = fitness_score,
         ), num_train_policies
 
     @staticmethod
     def create(
-        policy: nn.Module,
-        obs_preprocess: Optional[nn.Module],
+        policy: Policy,
         cfg: TrainConfig,
         algo: AlgoBase,
         base_rng,
         example_obs,
         example_rnn_states,
+        track_policy_fitness,
         checkify_errors,
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
-        obs_preprocess = obs_preprocess or ObservationsPreprocessNoop.create()
-
         def make_policies(rnd, obs, rnn_states):
-            return _make_policies(
-                policy, obs_preprocess, cfg, algo, rnd, obs, rnn_states)
+            return _make_policies(policy, cfg, algo, rnd, obs,
+                                  rnn_states, track_policy_fitness)
 
         make_policies = jax.jit(checkify.checkify(
             make_policies, errors=checkify_errors))
@@ -200,30 +244,58 @@ def _setup_value_normalizer(hyper_params, fake_values):
 
 def _setup_policy_state(
     policy,
-    obs_preprocess,
+    track_policy_fitness,
     prng_key,
     rnn_states,
     obs,
 ):
+    actor_critic = policy.actor_critic
+    obs_preprocess = (
+        policy.obs_preprocess or ObservationsPreprocessNoop.create())
+
     obs_preprocess_state = obs_preprocess.init_state(obs, False)
     preprocessed_obs = obs_preprocess.preprocess(
         obs_preprocess_state, obs, False)
 
+    if policy.init_reward_hyper_params == None:
+        assert policy.mutate_reward_hyper_params == None
+
+        mutate_reward_hp_fn = lambda *args: None
+        reward_hyper_params = None
+    else:
+        assert policy.mutate_reward_hyper_params != None
+        prng_key, reward_hyper_params_rnd = random.split(prng_key, 2)
+
+        mutate_reward_hp_fn = policy.mutate_reward_hyper_params
+        reward_hyper_params = policy.init_reward_hyper_params(
+            reward_hyper_params_rnd)
+
     # The second prng key is passed as the key for sampling
-    (fake_outs, rnn_states), variables = policy.init_with_output(
+    (fake_outs, rnn_states), variables = actor_critic.init_with_output(
         prng_key, random.PRNGKey(0), rnn_states, preprocessed_obs,
         method='rollout')
 
     params = variables['params']
     batch_stats = variables.get('batch_stats', {})
 
+    if track_policy_fitness:
+        parse_match_result_fn = policy.parse_match_result
+        fitness_score = jnp.array([1500], dtype=jnp.float32)
+    else:
+        parse_match_result_fn = lambda x: x
+        fitness_score = None
+
     return PolicyState(
-        apply_fn = policy.apply,
-        rnn_reset_fn = policy.clear_recurrent_state,
+        apply_fn = actor_critic.apply,
+        rnn_reset_fn = actor_critic.clear_recurrent_state,
         params = params,
         batch_stats = batch_stats,
         obs_preprocess = obs_preprocess,
         obs_preprocess_state = obs_preprocess_state,
+        mutate_reward_hyper_params = mutate_reward_hp_fn,
+        reward_hyper_params = reward_hyper_params,
+        parse_match_result_fn = parse_match_result_fn,
+        fitness_score = fitness_score,
     ), fake_outs, rnn_states
 
 def _setup_train_state(
@@ -259,15 +331,15 @@ def _setup_train_state(
 
 def _make_policies(
     policy,
-    obs_preprocess,
     cfg,
     algo,
     base_init_rnd,
     example_obs,
     example_rnn_states,
+    track_policy_fitness,
 ):
     setup_policy_state = partial(
-        _setup_policy_state, policy, obs_preprocess)
+        _setup_policy_state, policy, track_policy_fitness)
     setup_policy_states = jax.vmap(setup_policy_state)
 
     if cfg.pbt != None:
@@ -301,8 +373,9 @@ def _make_policies(
         num_repeats = -(num_past_copies // -num_make)
 
         policy_states = jax.tree_map(
-            lambda x: jnp.tile(x, (num_repeats, *([1] * (len(x.shape) - 1))))[
-                0:num_make + num_past_copies],
+            lambda x: jnp.tile(
+                x, (num_repeats + 1, *([1] * (len(x.shape) - 1))))[
+                    0:num_make + num_past_copies],
             policy_states)
 
     return policy_states, train_states

@@ -14,6 +14,7 @@ from typing import List, Optional, Dict, Callable, Any
 import itertools
 
 from .actor_critic import ActorCritic
+from .policy import Policy
 from .rollouts import RolloutConfig, RolloutState, rollout_loop
 from .train_state import TrainStateManager
 
@@ -21,6 +22,7 @@ from .train_state import TrainStateManager
 class MultiPolicyEvalConfig:
     num_teams: int
     team_size: int
+
 
 @dataclass(frozen=True)
 class EvalConfig:
@@ -33,13 +35,13 @@ class EvalConfig:
     multi_policy_eval: Optional[MultiPolicyEvalConfig] = None
     use_deterministic_policy: bool = True
 
+
 def eval_ckpt(
     dev: jax.Device,
     eval_cfg: EvalConfig,
     sim_init: Callable,
     sim_step: Callable,
-    policy: ActorCritic,
-    obs_preprocess: Optional[nn.Module],
+    policy: Policy,
     step_cb: Callable,
 ):
     assert (
@@ -49,15 +51,13 @@ def eval_ckpt(
          eval_cfg.multi_policy_eval == None))
 
     with jax.default_device(dev):
-        _eval_ckpt_impl(eval_cfg, sim_init, sim_step,
-            policy, obs_preprocess, step_cb)
+        _eval_ckpt_impl(eval_cfg, sim_init, sim_step, policy, step_cb)
 
 def _eval_ckpt_impl(
     eval_cfg: EvalConfig,
     sim_init: Callable,
     sim_step: Callable,
-    policy: ActorCritic,
-    obs_preprocess: Optional[nn.Module],
+    policy: Policy,
     step_cb: Callable,
 ):
     checkify_errors = checkify.user_checks
@@ -71,7 +71,7 @@ def _eval_ckpt_impl(
         )
 
     policy_states, num_train_policies = TrainStateManager.load_policies(
-        policy, obs_preprocess, eval_cfg.ckpt_path)
+        policy, eval_cfg.ckpt_path)
 
     sim_batch_size = eval_cfg.num_worlds * eval_cfg.num_agents_per_world
 
@@ -150,7 +150,8 @@ def _eval_ckpt_impl(
 
     @jax.jit
     def init_rollout_state(static_play_assignments):
-        rnn_states = policy.init_recurrent_state(rollout_cfg.sim_batch_size)
+        rnn_states = policy.actor_critic.init_recurrent_state(
+            rollout_cfg.sim_batch_size)
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
