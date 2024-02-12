@@ -876,12 +876,20 @@ def _init_matchmake_assignments(
             jnp.arange(rollout_cfg.num_current_policies),
             batch_size // rollout_cfg.num_current_policies)
 
-    def cross_play_opponents(rnd):
+    def cross_play_opponents(rnd, base_assignments):
         num_matches = rollout_cfg.num_cross_play_matches
         num_teams = rollout_cfg.num_teams
-    
-        return random.randint(rnd, (num_matches, num_teams - 1),
+
+        base_assignments = base_assignments.reshape(
+            (num_matches, num_teams, rollout_cfg.team_size))
+
+        opponents = random.randint(rnd, (num_matches, num_teams - 1),
             0, rollout_cfg.num_current_policies - 1)[..., None]
+
+        opponents = jnp.where(opponents >= base_assignments[:, 0:1, 0:1],
+            opponents + 1, opponents)
+
+        return opponents
     
     def past_play_opponents(rnd):
         num_matches = rollout_cfg.num_past_play_matches
@@ -915,7 +923,8 @@ def _init_matchmake_assignments(
             rollout_cfg.num_cross_play_matches, rollout_cfg.num_teams,
             rollout_cfg.team_size)
 
-        cross_opponent_assignments = cross_play_opponents(cross_rnd)
+        cross_opponent_assignments = cross_play_opponents(
+            cross_rnd, cross_assignments)
 
         cross_assignments = cross_assignments.at[:, 1:, :].set(
             cross_opponent_assignments)
@@ -1006,15 +1015,18 @@ def _update_fitness(
     match_results,
     rollout_cfg,
 ):
+    assert rollout_cfg.num_teams > 1
+
+    # FIXME
+    if rollout_cfg.num_teams != 2:
+        return policy_states
+
     assignments = assignments.reshape(
         rollout_cfg.num_total_matches, rollout_cfg.num_teams,
         rollout_cfg.team_size, 1)
     dones = dones.reshape(
         rollout_cfg.num_total_matches, rollout_cfg.num_teams,
         rollout_cfg.team_size, 1)
-
-    # FIXME
-    assert rollout_cfg.num_teams == 2
 
     a_assignments = assignments[:, 0, 0, 0]
     b_assignments = assignments[:, 1, 0, 0]
@@ -1063,7 +1075,7 @@ def _update_fitness(
             return lax.cond(valid, diff, lambda: jnp.zeros((), dtype=jnp.float32))
 
         diffs = compute_differences(match_results, a_assignments, b_assignments, dones)
-        return jnp.clip(cur_fitness_score + 32 * diffs.mean(), a_min=100)
+        return jnp.clip(cur_fitness_score + 32 * diffs.sum(), a_min=100)
 
     new_fitness_scores = jax.vmap(update_elo)(
         jnp.arange(policy_states.fitness_score.shape[0]),

@@ -280,6 +280,10 @@ def fake_rollout_setup(
 
         counter = counter % episode_len
 
+        match_results = jnp.zeros(
+            (batch_size // (num_teams * team_size),),
+            dtype=jnp.int32)
+
         return {
             'obs': {
                 'o': actions[..., 0:1] + 1,
@@ -287,6 +291,9 @@ def fake_rollout_setup(
             },
             'rewards': actions[..., 0:1] + 2,
             'dones': new_dones,
+            'pbt': {
+                'match_results': match_results,
+            },
         }
 
     fake_backbone = BackboneShared(
@@ -353,6 +360,10 @@ def fake_rollout_setup(
             batch_stats = {},
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = obs_preprocess_state,
+            mutate_reward_hyper_params = lambda *args: None,
+            reward_hyper_params = None,
+            parse_match_result_fn = lambda x: x,
+            fitness_score = jnp.array([1500], dtype=jnp.float32),
         )
 
     rnd, rnd_init = random.split(rnd)
@@ -567,7 +578,7 @@ def check_rollout_loop(
             'rewards': jnp.zeros((num_steps, batch_size, 1), dtype=jnp.int32),
         })
 
-        rollout_state, rollout_store = rollout_loop(
+        rollout_state, policy_states, rollout_store = rollout_loop(
             rollout_state = rollout_state,
             policy_states = policy_states,
             rollout_cfg = rollout_cfg,
@@ -684,8 +695,9 @@ def check_rollout_mgr(
         metrics = rollout_mgr.add_metrics(train_cfg, FrozenDict())
         metrics = TrainingMetrics.create(train_cfg, metrics)
 
-        rollout_state, rollout_data, obs_stats, metrics = rollout_mgr.collect(
-            train_state_mgr, rollout_state, metrics)
+        (train_state_mgr, rollout_state, rollout_data, 
+            obs_stats, metrics) = rollout_mgr.collect(
+                train_state_mgr, rollout_state, metrics)
 
         train_slice = lambda x: x[rollout_mgr._sim_to_train_idxs]
 
