@@ -74,6 +74,14 @@ def _pbt_cull_update(
             reward_hyper_params = reward_hyper_params,
         )
 
+    # FIXME: elo grows unbounded, I think because we copy high elo policies
+    # Rebase elo so average is 1500
+    elos = policy_states.fitness_score[..., 0]
+    elo_correction = jnp.mean(elos) - 1500
+    policy_states.update(
+        fitness_score = policy_states.fitness_score - elo_correction,
+    )
+
     return train_state_mgr.replace(
         policy_states = policy_states,
         pbt_rng = pbt_rng,
