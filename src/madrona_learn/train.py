@@ -39,33 +39,97 @@ def train(
             policy, iter_cb, metrics_cfg,
             restore_ckpt, profile_port)
 
-def _pbt_update(
+def _pbt_cull_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
 ):
-    if cfg.pbt == None or cfg.pbt.num_past_policies == 0:
-        return train_state_mgr
-
     policy_states = train_state_mgr.policy_states
     pbt_rng = train_state_mgr.pbt_rng
-    pbt_rng, save_idx_rng, store_idx_rng = random.split(pbt_rng, 3)
 
-    save_idx = random.randint(
-        save_idx_rng, (), 0, cfg.pbt.num_train_policies)
+    current_policies = jax.tree_map(
+        lambda x: x[:cfg.pbt.num_train_policies], policy_states)
 
-    store_idx = random.randint(
-        store_idx_rng, (), cfg.pbt.num_train_policies,
-        cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
+    assert 2 * cfg.pbt.num_cull_policies < cfg.pbt.num_train_policies
+
+    sort_idxs = jnp.argsort(current_policies.fitness_score[..., 0])
+    
+    bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
+    top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
 
     def save_param(x):
-        return x.at[store_idx].set(x[save_idx])
+        return x.at[bottom_idxs].set(x[top_idxs])
 
     policy_states = jax.tree_map(save_param, policy_states)
+
+    if policy_states.reward_hyper_params != None:
+        pbt_rng, mutate_rng = random.split(pbt_rng, 2)
+        reward_hyper_params = policy_states.reward_hyper_params
+
+        reward_hyper_params = reward_hyper_params.at[bottom_idxs].set(
+            jax.vmap(policy_states.mutate_reward_hyper_params)(
+                random.split(mutate_rng, cfg.pbt.num_cull_policies),
+                reward_hyper_params[bottom_idxs]))
+
+        policy_states = policy_states.update(
+            reward_hyper_params = reward_hyper_params,
+        )
 
     return train_state_mgr.replace(
         policy_states = policy_states,
         pbt_rng = pbt_rng,
     )
+
+def _pbt_past_update(
+    cfg: TrainConfig,
+    train_state_mgr: TrainStateManager,
+):
+    if cfg.pbt.num_past_policies == 0:
+        return train_state_mgr
+
+    policy_states = train_state_mgr.policy_states
+
+    current_policies = jax.tree_map(
+        lambda x: x[:cfg.pbt.num_train_policies], policy_states)
+
+    past_policies = jax.tree_map(
+        lambda x: x[cfg.pbt.num_train_policies:], policy_states)
+
+    assert (current_policies.fitness_score.shape[0] ==
+            cfg.pbt.num_train_policies)
+    assert past_policies.fitness_score.shape[0] == cfg.pbt.num_past_policies
+
+    src_idx = jnp.argmax(current_policies.fitness_score)
+    dst_idx = jnp.argmin(past_policies.fitness_score)
+    dst_idx = dst_idx + cfg.pbt.num_train_policies
+
+    def save_param(x):
+        return x.at[dst_idx].set(x[src_idx])
+
+    policy_states = jax.tree_map(save_param, policy_states)
+
+    return train_state_mgr.replace(
+        policy_states = policy_states,
+    )
+
+    #pbt_rng = train_state_mgr.pbt_rng
+    #pbt_rng, save_idx_rng, store_idx_rng = random.split(pbt_rng, 3)
+
+    #save_idx = random.randint(
+    #    save_idx_rng, (), 0, cfg.pbt.num_train_policies)
+
+    #store_idx = random.randint(
+    #    store_idx_rng, (), cfg.pbt.num_train_policies,
+    #    cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
+
+    #def save_param(x):
+    #    return x.at[store_idx].set(x[save_idx])
+
+    #policy_states = jax.tree_map(save_param, policy_states)
+
+    #return train_state_mgr.replace(
+    #    policy_states = policy_states,
+    #    pbt_rng = pbt_rng,
+    #)
 
 def _update_loop(
     algo: AlgoBase,
@@ -79,7 +143,10 @@ def _update_loop(
 ):
     num_updates_remaining = cfg.num_updates - start_update_idx
     if cfg.pbt != None:
-        pbt_update_interval = cfg.pbt.past_policy_update_interval
+        pbt_update_interval = min(
+            cfg.pbt.past_policy_update_interval,
+            cfg.pbt.policy_cull_interval)
+
         num_train_policies = cfg.pbt.num_train_policies
     else:
         pbt_update_interval = num_updates_remaining
@@ -152,6 +219,26 @@ def _update_loop(
         inner_begin_idx = (
             start_update_idx + outer_update_idx * pbt_update_interval
         )
+        
+        if cfg.pbt != None:
+            def pbt_update_noop(train_state_mgr):
+                return train_state_mgr
+
+            def pbt_cull_update(train_state_mgr):
+                return _pbt_cull_update(cfg, train_state_mgr)
+
+            should_cull_policy = jnp.logical_and(inner_begin_idx != 0,
+                inner_begin_idx % cfg.pbt.policy_cull_interval == 0)
+            train_state_mgr = lax.cond(should_cull_policy,
+                pbt_cull_update, pbt_update_noop, train_state_mgr)
+
+            def pbt_past_update(train_state_mgr):
+                return _pbt_past_update(cfg, train_state_mgr)
+
+            should_update_past = jnp.logical_and(inner_begin_idx != 0,
+                inner_begin_idx % cfg.pbt.past_policy_update_interval == 0)
+            train_state_mgr = lax.cond(should_update_past,
+                pbt_past_update, pbt_update_noop, train_state_mgr)
 
         inner_end_idx = inner_begin_idx + pbt_update_interval
         inner_end_idx = jnp.minimum(inner_end_idx, cfg.num_updates)
@@ -160,8 +247,6 @@ def _update_loop(
             inner_begin_idx, inner_end_idx,
             inner_update_iter, (rollout_state, train_state_mgr, metrics))
         
-        train_state_mgr = _pbt_update(cfg, train_state_mgr)
-
         return rollout_state, train_state_mgr, metrics
     
     metrics = algo.add_metrics(cfg, FrozenDict())
