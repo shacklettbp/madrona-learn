@@ -1074,8 +1074,28 @@ def _update_fitness(
 
             return lax.cond(valid, diff, lambda: jnp.zeros((), dtype=jnp.float32))
 
-        diffs = compute_differences(match_results, a_assignments, b_assignments, dones)
-        return jnp.clip(cur_fitness_score + 32 * diffs.sum(), a_min=100)
+        diffs = compute_differences(match_results, a_assignments,
+                                    b_assignments, dones)
+
+        expected_current_policy_matches = (
+            (rollout_cfg.num_cross_play_matches * 2 +
+                rollout_cfg.num_past_play_matches) /
+            rollout_cfg.num_current_policies)
+
+        if rollout_cfg.num_past_policies > 0:
+            expected_past_policy_matches = (
+                rollout_cfg.num_past_play_matches / rollout_cfg.num_past_policies)
+
+            current_reweight = (expected_past_policy_matches /
+                                expected_current_policy_matches)
+        else:
+            current_reweight = 1
+
+        K = jnp.array([32], dtype=jnp.float32)
+        K = jnp.where(policy_idx < rollout_cfg.num_current_policies,
+                      current_reweight * K, K)
+
+        return jnp.clip(cur_fitness_score + K * diffs.sum(), a_min=100)
 
     new_fitness_scores = jax.vmap(update_elo)(
         jnp.arange(policy_states.fitness_score.shape[0]),
