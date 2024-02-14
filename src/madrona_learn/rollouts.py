@@ -1082,14 +1082,15 @@ def _update_fitness(
                 rollout_cfg.num_past_play_matches) /
             rollout_cfg.num_current_policies)
 
-        if rollout_cfg.num_past_policies > 0:
-            expected_past_policy_matches = (
-                rollout_cfg.num_past_play_matches / rollout_cfg.num_past_policies)
+        #if rollout_cfg.num_past_policies > 0:
+        #    expected_past_policy_matches = (
+        #        rollout_cfg.num_past_play_matches / rollout_cfg.num_past_policies)
 
-            current_reweight = (expected_past_policy_matches /
-                                expected_current_policy_matches)
-        else:
-            current_reweight = 1
+        #    current_reweight = (expected_past_policy_matches /
+        #                        expected_current_policy_matches)
+        #else:
+        #    current_reweight = 1
+        current_reweight = 1
 
         K = jnp.array([32], dtype=jnp.float32)
         K = jnp.where(policy_idx < rollout_cfg.num_current_policies,
