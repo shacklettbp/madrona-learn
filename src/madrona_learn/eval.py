@@ -96,8 +96,9 @@ def _eval_ckpt_impl(
         static_play_assignments = None
     elif eval_cfg.multi_policy_eval != None:
         assert (
-            multi_policy_cfg.num_teams * multi_policy_cfg.team_size ==
-                eval_cfg.num_agents_per_world
+            eval_cfg.multi_policy_eval.num_teams *
+                eval_cfg.multi_policy_eval.team_size ==
+                    eval_cfg.num_agents_per_world
         )
 
         rollout_cfg = RolloutConfig.setup(
