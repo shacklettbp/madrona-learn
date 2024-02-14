@@ -78,7 +78,7 @@ def _pbt_cull_update(
     # Rebase elo so average is 1500
     elos = policy_states.fitness_score[..., 0]
     elo_correction = jnp.mean(elos) - 1500
-    policy_states.update(
+    policy_states = policy_states.update(
         fitness_score = policy_states.fitness_score - elo_correction,
     )
 
