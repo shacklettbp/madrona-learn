@@ -123,12 +123,13 @@ def _eval_ckpt_impl(
         static_assignments_list = []
 
         for combo in itertools.product(
-                range(num_train_policies), repeat=multi_policy_cfg.num_teams):
+                range(num_train_policies),
+                repeat=eval_cfg.multi_policy_eval.num_teams):
             for i in combo:
                 static_assignments_list.append(i)
 
         num_assignment_duplicates = (
-            (sim_batch_size // multi_policy_cfg.team_size) //
+            (sim_batch_size // eval_cfg.multi_policy_eval.team_size) //
             len(static_assignments_list))
 
         @jax.jit
