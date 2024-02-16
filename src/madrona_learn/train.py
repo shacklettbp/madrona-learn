@@ -44,14 +44,13 @@ def _pbt_cull_update(
     train_state_mgr: TrainStateManager,
 ):
     policy_states = train_state_mgr.policy_states
+    train_states = train_state_mgr.train_states
     pbt_rng = train_state_mgr.pbt_rng
-
-    current_policies = jax.tree_map(
-        lambda x: x[:cfg.pbt.num_train_policies], policy_states)
 
     assert 2 * cfg.pbt.num_cull_policies < cfg.pbt.num_train_policies
 
-    sort_idxs = jnp.argsort(current_policies.fitness_score[..., 0])
+    sort_idxs = jnp.argsort(policy_states.fitness_score[
+        0:cfg.pbt.num_train_policies, 0])
     
     bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
     top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
@@ -60,6 +59,19 @@ def _pbt_cull_update(
         return x.at[bottom_idxs].set(x[top_idxs])
 
     policy_states = jax.tree_map(save_param, policy_states)
+    train_states = jax.tree_map(save_param, train_states)
+
+    # Need to split the update keys for the copied policies
+    update_prng_keys = train_states.update_prng_key
+    new_prng_keys = jax.vmap(random.split, in_axes=(0, None), out_axes=1)(
+        update_prng_keys[top_idxs], 2)
+
+    update_prng_keys = update_prng_keys.at[top_idxs].set(
+        new_prng_keys[0])
+    update_prng_keys = update_prng_keys.at[bottom_idxs].set(
+        new_prng_keys[1])
+
+    train_states = train_states.update(update_prng_key=update_prng_keys)
 
     if policy_states.reward_hyper_params != None:
         pbt_rng, mutate_rng = random.split(pbt_rng, 2)
@@ -84,6 +96,7 @@ def _pbt_cull_update(
 
     return train_state_mgr.replace(
         policy_states = policy_states,
+        train_states = train_states,
         pbt_rng = pbt_rng,
     )
 
