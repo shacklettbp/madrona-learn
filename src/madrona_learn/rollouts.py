@@ -1092,7 +1092,7 @@ def _update_fitness(
         #    current_reweight = 1
         current_reweight = 1
 
-        K = jnp.array([32], dtype=jnp.float32)
+        K = jnp.array([8], dtype=jnp.float32)
         K = jnp.where(policy_idx < rollout_cfg.num_current_policies,
                       current_reweight * K, K)
 
