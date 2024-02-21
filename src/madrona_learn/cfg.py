@@ -18,7 +18,7 @@ class PBTConfig:
     team_size: int
     num_train_policies: int
     num_past_policies: int
-    policy_cull_interval: int
+    train_policy_cull_interval: int
     num_cull_policies: int
     past_policy_update_interval: int
     # Must add to 1 and cleanly subdivide total rollout batch size

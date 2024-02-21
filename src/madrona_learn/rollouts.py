@@ -13,6 +13,11 @@ from .cfg import TrainConfig
 from .actor_critic import ActorCritic
 from .algo_common import compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
+from .pbt import (
+    PBTMatchmakeConfig,
+    pbt_init_matchmaking,
+    pbt_update_matchmaking,
+)
 from .profile import profile
 from .train_state import TrainStateManager, PolicyState, PolicyTrainState
 from .utils import TypedShape
@@ -20,26 +25,13 @@ from .observations import ObservationsPreprocess
 
 @dataclass(frozen = True)
 class RolloutConfig:
-    num_current_policies: int
-    num_past_policies: int
-    total_num_policies: int
-    num_teams: int
-    team_size: int
     sim_batch_size: int
     policy_chunk_size: int
     num_policy_chunks: int
     total_policy_batch_size: int
-    self_play_batch_size: int
-    cross_play_batch_size: int
-    past_play_batch_size: int
-    static_play_batch_size: int
-    num_cross_play_matches: int
-    num_past_play_matches: int
-    num_static_play_matches: int
-    num_total_matches: int
     policy_dtype: jnp.dtype
     reward_dtype: jnp.dtype
-    has_matchmaking: bool
+    pbt: PBTMatchmakeConfig
 
     @staticmethod
     def setup(
@@ -56,52 +48,31 @@ class RolloutConfig:
         reward_dtype: jnp.dtype = jnp.float32,
         policy_chunk_size_override: int = 0,
     ):
-        total_num_policies = num_current_policies + num_past_policies
+        pbt = PBTMatchmakeConfig.setup(
+            num_current_policies = num_current_policies,
+            num_past_policies = num_past_policies,
+            num_teams = num_teams,
+            team_size = team_size,
+            sim_batch_size = sim_batch_size,
+            self_play_portion = self_play_portion,
+            cross_play_portion = cross_play_portion,
+            past_play_portion = past_play_portion,
+            static_play_portion = static_play_portion,
+        )
 
-        assert (self_play_portion + cross_play_portion +
-            past_play_portion + static_play_portion == 1.0)
-
-        self_play_batch_size = int(sim_batch_size * self_play_portion)
-        cross_play_batch_size = int(sim_batch_size * cross_play_portion)
-        past_play_batch_size = int(sim_batch_size * past_play_portion)
-        static_play_batch_size = int(sim_batch_size * static_play_portion)
-
-        assert (self_play_batch_size +
-                cross_play_batch_size +
-                past_play_batch_size +
-                static_play_batch_size == sim_batch_size)
-
-        agents_per_world = num_teams * team_size
-
-        assert cross_play_batch_size % agents_per_world == 0
-        assert past_play_batch_size % agents_per_world == 0
-        assert static_play_batch_size % agents_per_world == 0
-
-        num_cross_play_matches = cross_play_batch_size // agents_per_world
-        num_past_play_matches = past_play_batch_size // agents_per_world
-        num_static_play_matches = static_play_batch_size // agents_per_world
-
-        num_total_matches = sim_batch_size // agents_per_world
-
-        assert num_cross_play_matches % num_current_policies == 0
-        assert num_past_play_matches % num_current_policies == 0
-        assert num_static_play_matches % num_current_policies == 0
-        
-        has_matchmaking = self_play_portion != 1.0
-
-        if has_matchmaking:
-            assert num_teams > 1
-            assert num_current_policies > 1 or num_past_policies > 0
+        if pbt.complex_matchmaking:
+            assert pbt.num_teams > 1
+            assert pbt.num_current_policies > 1 or pbt.num_past_policies > 0
 
             min_policy_chunk_size = min(
-                self_play_batch_size // num_current_policies,
-                cross_play_batch_size // num_current_policies)
+                pbt.self_play_batch_size // pbt.num_current_policies,
+                pbt.cross_play_batch_size // pbt.num_current_policies)
 
-            if past_play_batch_size > 0:
+            if pbt.past_play_batch_size > 0:
                 # FIXME: this doesn't make much sense, think more
                 # about auto-picking policy batch size
                 min_policy_chunk_size = min(min_policy_chunk_size,
-                    past_play_batch_size // num_past_policies)
+                    pbt.past_play_batch_size // num_past_policies)
 
             # Round to nearest power of 2
             policy_chunk_size = 1 << ((min_policy_chunk_size - 1).bit_length())
@@ -121,32 +92,19 @@ class RolloutConfig:
         # plus num_policies - 1 extras to handle worst case usage from unused
         # space in each subbatch
         num_policy_chunks = sim_batch_size // policy_chunk_size
-        if has_matchmaking:
-            num_policy_chunks += total_num_policies - 1
+        if pbt.complex_matchmaking:
+            num_policy_chunks += pbt.total_num_policies - 1
 
         total_policy_batch_size = num_policy_chunks * policy_chunk_size
 
         return RolloutConfig(
-            num_current_policies = num_current_policies,
-            num_past_policies = num_past_policies,
-            total_num_policies = total_num_policies,
-            num_teams = num_teams,
-            team_size = team_size,
             sim_batch_size = sim_batch_size,
             policy_chunk_size = policy_chunk_size,
             num_policy_chunks = num_policy_chunks,
             total_policy_batch_size = total_policy_batch_size,
-            self_play_batch_size = self_play_batch_size,
-            cross_play_batch_size = cross_play_batch_size,
-            past_play_batch_size = past_play_batch_size,
-            static_play_batch_size = static_play_batch_size,
-            num_cross_play_matches = num_cross_play_matches,
-            num_past_play_matches = num_past_play_matches,
-            num_static_play_matches = num_static_play_matches,
-            num_total_matches = num_total_matches,
             policy_dtype = policy_dtype,
             reward_dtype = reward_dtype,
-            has_matchmaking = has_matchmaking,
+            pbt = pbt,
         )
 
 
@@ -201,17 +159,18 @@ class RolloutState(flax.struct.PyTreeNode):
         rnn_states,
         static_play_assignments,
     ):
-        if rollout_cfg.num_static_play_matches > 0.0:
+        if rollout_cfg.pbt.num_static_play_matches > 0.0:
             assert static_play_assignments != None
-            assert (rollout_cfg.static_play_batch_size ==
+            assert (rollout_cfg.pbt.static_play_batch_size ==
                     static_play_assignments.shape[0])
 
-        if (rollout_cfg.cross_play_batch_size > 0 or
-              rollout_cfg.past_play_batch_size > 0 or
-              rollout_cfg.static_play_batch_size > 0): 
+        if (rollout_cfg.pbt.cross_play_batch_size > 0 or
+              rollout_cfg.pbt.past_play_batch_size > 0 or
+              rollout_cfg.pbt.static_play_batch_size > 0): 
             prng_key, assign_rnd = random.split(prng_key)
-            policy_assignments = _init_matchmake_assignments(
-                assign_rnd, rollout_cfg, static_play_assignments)
+            policy_assignments = pbt_init_matchmaking(
+                assign_rnd, rollout_cfg.pbt, static_play_assignments)
+            assert policy_assignments.shape[0] == rollout_cfg.sim_batch_size
         else:
             policy_assignments = None
 
@@ -318,7 +277,7 @@ class RolloutManager:
         self._num_bptt_steps = (
             train_cfg.steps_per_update // train_cfg.num_bptt_chunks)
 
-        self._num_train_policies = rollout_cfg.num_current_policies
+        self._num_train_policies = rollout_cfg.pbt.num_current_policies
         self._num_train_agents_per_policy = \
             _compute_num_train_agents_per_policy(rollout_cfg)
 
@@ -490,7 +449,7 @@ class RolloutManager:
                 collect_state.obs_stats, metrics)
 
     def _sim_to_train(self, data, reorder_state):
-        if self._cfg.has_matchmaking:
+        if self._cfg.pbt.complex_matchmaking:
             def to_train(x):
                 return x[self._sim_to_train_idxs]
         else:
@@ -500,7 +459,7 @@ class RolloutManager:
         return jax.tree_map(to_train, data)
 
     def _policy_to_train(self, data, reorder_state):
-        if not self._cfg.has_matchmaking:
+        if not self._cfg.pbt.complex_matchmaking:
             # Already in train ordering!
             return data
         
@@ -715,7 +674,7 @@ def rollout_loop(
     rnn_reset_fn = policy_states.rnn_reset_fn
 
     def reorder_policy_states(states, assignments, reorder_state):
-        if not rollout_cfg.has_matchmaking:
+        if not rollout_cfg.pbt.complex_matchmaking:
             return states 
         else:
             # FIXME: more efficient way to get this?
@@ -764,17 +723,20 @@ def rollout_loop(
                     (rollout_cfg.sim_batch_size, 1), dtype=jnp.int32),
             })
 
-            if rollout_cfg.has_matchmaking:
-                pbt_inputs = FrozenDict({
+            pbt_inputs = FrozenDict({})
+
+            if rollout_cfg.pbt.complex_matchmaking:
+                pbt_inputs = pbt_inputs.copy({
                     'policy_assignments': policy_assignments,
                 })
 
-                if policy_states.reward_hyper_params != None:
-                    pbt_inputs = pbt_inputs.copy({
-                        'reward_hyper_params': (
-                            policy_states.reward_hyper_params),
-                    })
+            if policy_states.reward_hyper_params != None:
+                pbt_inputs = pbt_inputs.copy({
+                    'reward_hyper_params': (
+                        policy_states.reward_hyper_params),
+                })
 
+            if len(pbt_inputs) > 0:
                 step_input = step_input.copy({'pbt': pbt_inputs})
 
             step_output = rollout_state.step_fn(step_input)
@@ -787,12 +749,12 @@ def rollout_loop(
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
 
-            if rollout_cfg.has_matchmaking:
+            if rollout_cfg.pbt.complex_matchmaking:
                 match_results = step_output['pbt']['match_results']
 
-                policy_assignments, policy_states, prng_key = _update_policy_matchmaking(
+                policy_assignments, policy_states, prng_key = pbt_update_matchmaking(
                     policy_assignments, policy_states, dones, match_results,
-                    prng_key, rollout_cfg)
+                    prng_key, rollout_cfg.pbt)
 
                 reorder_state = _compute_reorder_state(
                     policy_assignments,
@@ -817,20 +779,20 @@ def rollout_loop(
 
 
 def _compute_num_train_agents_per_policy(rollout_cfg):
-    assert rollout_cfg.cross_play_batch_size % rollout_cfg.num_teams == 0
-    assert rollout_cfg.past_play_batch_size % rollout_cfg.num_teams == 0
+    assert rollout_cfg.pbt.cross_play_batch_size % rollout_cfg.pbt.num_teams == 0
+    assert rollout_cfg.pbt.past_play_batch_size % rollout_cfg.pbt.num_teams == 0
 
     # FIXME: currently we only collect training data for team 1 in each
     # world in cross-play and past-play to avoid having variable amounts
     # of training data in each step
     total_num_train_agents = (
-        rollout_cfg.self_play_batch_size +
-        rollout_cfg.cross_play_batch_size // rollout_cfg.num_teams +
-        rollout_cfg.past_play_batch_size // rollout_cfg.num_teams
+        rollout_cfg.pbt.self_play_batch_size +
+        rollout_cfg.pbt.cross_play_batch_size // rollout_cfg.pbt.num_teams +
+        rollout_cfg.pbt.past_play_batch_size // rollout_cfg.pbt.num_teams
     )
 
-    assert total_num_train_agents % rollout_cfg.num_current_policies == 0
-    return total_num_train_agents // rollout_cfg.num_current_policies
+    assert total_num_train_agents % rollout_cfg.pbt.num_current_policies == 0
+    return total_num_train_agents // rollout_cfg.pbt.num_current_policies
 
 
 def _compute_sim_to_train_indices(rollout_cfg):
@@ -838,313 +800,35 @@ def _compute_sim_to_train_indices(rollout_cfg):
 
     def setup_match_indices(start, stop):
         return global_indices[start:stop].reshape(
-            rollout_cfg.num_current_policies, -1,
-            rollout_cfg.num_teams, rollout_cfg.team_size)
+            rollout_cfg.pbt.num_current_policies, -1,
+            rollout_cfg.pbt.num_teams, rollout_cfg.pbt.team_size)
 
     self_play_indices = setup_match_indices(
-        0, rollout_cfg.self_play_batch_size)
+        0, rollout_cfg.pbt.self_play_batch_size)
 
     cross_play_indices = setup_match_indices(
-        rollout_cfg.self_play_batch_size,
-        rollout_cfg.self_play_batch_size + rollout_cfg.cross_play_batch_size)
+        rollout_cfg.pbt.self_play_batch_size,
+        rollout_cfg.pbt.self_play_batch_size +
+            rollout_cfg.pbt.cross_play_batch_size)
 
     past_play_indices = setup_match_indices(
-        rollout_cfg.self_play_batch_size + rollout_cfg.cross_play_batch_size,
-        rollout_cfg.self_play_batch_size + rollout_cfg.cross_play_batch_size +
-            rollout_cfg.past_play_batch_size)
+        rollout_cfg.pbt.self_play_batch_size +
+            rollout_cfg.pbt.cross_play_batch_size,
+        rollout_cfg.pbt.self_play_batch_size +
+            rollout_cfg.pbt.cross_play_batch_size +
+            rollout_cfg.pbt.past_play_batch_size)
 
     self_play_gather = self_play_indices.reshape(
-        rollout_cfg.num_current_policies, -1)
+        rollout_cfg.pbt.num_current_policies, -1)
 
     cross_play_gather = cross_play_indices[:, :, 0, :].reshape(
-        rollout_cfg.num_current_policies, -1)
+        rollout_cfg.pbt.num_current_policies, -1)
 
     past_play_gather = past_play_indices[:, :, 0, :].reshape(
-        rollout_cfg.num_current_policies, -1)
+        rollout_cfg.pbt.num_current_policies, -1)
 
     return jnp.concatenate(
         [self_play_gather, cross_play_gather, past_play_gather], axis=1)
-
-
-def _init_matchmake_assignments(
-    assign_rnd: random.PRNGKey,
-    rollout_cfg: RolloutConfig,
-    static_play_assignments: Optional[jax.Array],
-):
-    def self_play_assignments(batch_size):
-        return jnp.repeat(
-            jnp.arange(rollout_cfg.num_current_policies),
-            batch_size // rollout_cfg.num_current_policies)
-
-    def cross_play_opponents(rnd, base_assignments):
-        num_matches = rollout_cfg.num_cross_play_matches
-        num_teams = rollout_cfg.num_teams
-
-        base_assignments = base_assignments.reshape(
-            (num_matches, num_teams, rollout_cfg.team_size))
-
-        opponents = random.randint(rnd, (num_matches, num_teams - 1),
-            0, rollout_cfg.num_current_policies - 1)[..., None]
-
-        opponents = jnp.where(opponents >= base_assignments[:, 0:1, 0:1],
-            opponents + 1, opponents)
-
-        return opponents
-    
-    def past_play_opponents(rnd):
-        num_matches = rollout_cfg.num_past_play_matches
-        num_teams = rollout_cfg.num_teams
-        
-        return random.randint(rnd, (num_matches, num_teams - 1),
-            rollout_cfg.num_current_policies,
-            rollout_cfg.num_current_policies + rollout_cfg.num_past_policies)[
-                ..., None]
-
-
-    self_play_batch_size = rollout_cfg.self_play_batch_size
-    cross_play_batch_size = rollout_cfg.cross_play_batch_size
-    past_play_batch_size = rollout_cfg.past_play_batch_size
-    static_play_batch_size = rollout_cfg.static_play_batch_size
-
-    sub_assignments = []
-
-    if self_play_batch_size > 0:
-        self_assignments = self_play_assignments(self_play_batch_size)
-        assert self_assignments.shape[0] == self_play_batch_size
-        sub_assignments.append(self_assignments)
-
-    if cross_play_batch_size > 0:
-        assign_rnd, cross_rnd = random.split(assign_rnd)
-
-        cross_assignments = self_play_assignments(cross_play_batch_size)
-        assert cross_assignments.shape[0] == cross_play_batch_size
-
-        cross_assignments = cross_assignments.reshape(
-            rollout_cfg.num_cross_play_matches, rollout_cfg.num_teams,
-            rollout_cfg.team_size)
-
-        cross_opponent_assignments = cross_play_opponents(
-            cross_rnd, cross_assignments)
-
-        cross_assignments = cross_assignments.at[:, 1:, :].set(
-            cross_opponent_assignments)
-
-        sub_assignments.append(cross_assignments.reshape(-1))
-
-    if past_play_batch_size > 0:
-        past_assignments = self_play_assignments(past_play_batch_size)
-        assert past_assignments.shape[0] == past_play_batch_size
-        past_assignments = past_assignments.reshape(
-            rollout_cfg.num_past_play_matches, rollout_cfg.num_teams,
-            rollout_cfg.team_size)
-
-        past_opponent_assignments = past_play_opponents(assign_rnd)
-
-        past_assignments = past_assignments.at[:, 1:, :].set(
-            past_opponent_assignments)
-
-        sub_assignments.append(past_assignments.reshape(-1))
-
-    if static_play_batch_size > 0:
-        sub_assignments.append(static_play_assignments)
-
-    policy_assignments = jnp.concatenate(sub_assignments, axis=0)
-
-    assert policy_assignments.shape[0] == rollout_cfg.sim_batch_size
-    return policy_assignments
-
-
-def _cross_play_matchmake(
-    assignments,
-    policy_states,
-    dones,
-    assign_rnd,
-    rollout_cfg,
-):
-    num_matches = rollout_cfg.num_cross_play_matches
-    num_teams = rollout_cfg.num_teams
-    team_size = rollout_cfg.team_size
-
-    assignments = assignments.reshape(num_matches, num_teams, team_size)
-    dones = dones.reshape(num_matches, num_teams, team_size)
-
-    new_assignments = random.randint(assign_rnd, (num_matches, num_teams - 1),
-        0, rollout_cfg.num_current_policies - 1)
-
-    new_assignments = jnp.where(new_assignments >= assignments[:, 0:1, 0],
-        new_assignments + 1, new_assignments)
-
-    new_assignments = jnp.where(
-        dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
-
-    return (
-        assignments.at[:, 1:, :].set(new_assignments).reshape(-1),
-        policy_states)
-
-
-def _past_play_matchmake(
-    assignments,
-    policy_states,
-    dones,
-    assign_rnd,
-    rollout_cfg,
-):
-    num_matches = rollout_cfg.num_past_play_matches
-    num_teams = rollout_cfg.num_teams
-    team_size = rollout_cfg.team_size
-    
-    assignments = assignments.reshape(num_matches, num_teams, team_size)
-    dones = dones.reshape(num_matches, num_teams, team_size)
-
-    new_assignments = random.randint(assign_rnd, (num_matches, num_teams - 1),
-        rollout_cfg.num_current_policies,
-        rollout_cfg.num_current_policies + rollout_cfg.num_past_policies)
-
-    new_assignments = jnp.where(
-        dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
-
-    return (
-        assignments.at[:, 1:, :].set(new_assignments).reshape(-1),
-        policy_states)
-
-
-def _update_fitness(
-    assignments,
-    policy_states,
-    dones,
-    match_results,
-    rollout_cfg,
-):
-    assert rollout_cfg.num_teams > 1
-
-    # FIXME
-    if rollout_cfg.num_teams != 2:
-        return policy_states
-
-    assignments = assignments.reshape(
-        rollout_cfg.num_total_matches, rollout_cfg.num_teams,
-        rollout_cfg.team_size, 1)
-    dones = dones.reshape(
-        rollout_cfg.num_total_matches, rollout_cfg.num_teams,
-        rollout_cfg.team_size, 1)
-
-    a_assignments = assignments[:, 0, 0, 0]
-    b_assignments = assignments[:, 1, 0, 0]
-    dones = dones[:, 0, 0, :]
-
-    def update_elo(policy_idx, cur_fitness_score):
-        def compute_expected_score(my_elo, opponent_elo):
-            return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
-
-        @jax.vmap
-        def compute_differences(raw_match_result, a_assignment, b_assignment, done):
-            is_a = a_assignment == policy_idx
-            is_b = b_assignment == policy_idx
-
-            valid = jnp.logical_and(
-                jnp.logical_and(
-                    jnp.logical_or(is_a, is_b),
-                    done,
-                ),
-                a_assignment != b_assignment,
-            ).squeeze(axis=0)
-
-            def diff():
-                match_result = policy_states.parse_match_result_fn(
-                    raw_match_result)
-
-                is_a_winner = match_result == 0
-                is_b_winner = match_result == 1
-
-                a_score = jnp.where(
-                    is_a_winner, 1, jnp.where(is_b_winner, 0, 0.5))
-
-                a_elo = policy_states.fitness_score[a_assignment, 0]
-                b_elo = policy_states.fitness_score[b_assignment, 0]
-
-                my_score = jnp.where(is_b, 1 - a_score, a_score)
-
-                my_elo = jnp.where(is_a, a_elo, b_elo)
-                opponent_elo = jnp.where(is_a, b_elo, a_elo)
-
-                expected_score = compute_expected_score(my_elo, opponent_elo)
-                out = my_score - expected_score
-
-                return out
-
-            return lax.cond(valid, diff, lambda: jnp.zeros((), dtype=jnp.float32))
-
-        diffs = compute_differences(match_results, a_assignments,
-                                    b_assignments, dones)
-
-        expected_current_policy_matches = (
-            (rollout_cfg.num_cross_play_matches * 2 +
-                rollout_cfg.num_past_play_matches) /
-            rollout_cfg.num_current_policies)
-
-        #if rollout_cfg.num_past_policies > 0:
-        #    expected_past_policy_matches = (
-        #        rollout_cfg.num_past_play_matches / rollout_cfg.num_past_policies)
-
-        #    current_reweight = (expected_past_policy_matches /
-        #                        expected_current_policy_matches)
-        #else:
-        #    current_reweight = 1
-        current_reweight = 1
-
-        K = jnp.array([8], dtype=jnp.float32)
-        K = jnp.where(policy_idx < rollout_cfg.num_current_policies,
-                      current_reweight * K, K)
-
-        return jnp.clip(cur_fitness_score + K * diffs.sum(), a_min=100)
-
-    new_fitness_scores = jax.vmap(update_elo)(
-        jnp.arange(policy_states.fitness_score.shape[0]),
-        policy_states.fitness_score)
-
-    policy_states = policy_states.update(fitness_score=new_fitness_scores)
-
-    return policy_states
-
-
-def _update_policy_matchmaking(
-    assignments,
-    policy_states,
-    dones,
-    match_results,
-    assign_rnd,
-    rollout_cfg,
-):
-    policy_states = _update_fitness(
-        assignments, policy_states, dones, match_results, rollout_cfg)
-
-    cross_start = rollout_cfg.self_play_batch_size
-    cross_end = cross_start + rollout_cfg.cross_play_batch_size
-    
-    past_start = cross_end
-    past_end = past_start + rollout_cfg.past_play_batch_size
-
-    if rollout_cfg.cross_play_batch_size > 0:
-        assign_rnd, cross_rnd = random.split(assign_rnd)
-
-        new_cross_assignments, policy_states = _cross_play_matchmake(
-            assignments[cross_start:cross_end], policy_states,
-            dones[cross_start:cross_end], cross_rnd, rollout_cfg)
-
-        assignments = assignments.at[cross_start:cross_end].set(
-            new_cross_assignments)
-
-    if rollout_cfg.past_play_batch_size > 0:
-        assign_rnd, past_rnd = random.split(assign_rnd)
-
-        new_past_assignments, policy_states = _past_play_matchmake(
-            assignments[past_start:past_end], policy_states,
-            dones[past_start:past_end], past_rnd, rollout_cfg)
-
-        assignments = assignments.at[past_start:past_end].set(
-            new_past_assignments)
-
-    return assignments, policy_states, assign_rnd
 
 
 def _compute_reorder_chunks(assignments, P, C, B):
@@ -1237,9 +921,9 @@ def _compute_reorder_state(
     assignments,
     rollout_cfg,
 ):
-    if rollout_cfg.has_matchmaking:
+    if rollout_cfg.pbt.complex_matchmaking:
         to_policy_idxs, to_sim_idxs = _compute_reorder_chunks(
-            assignments, rollout_cfg.total_num_policies, 
+            assignments, rollout_cfg.pbt.total_num_policies, 
             rollout_cfg.policy_chunk_size, rollout_cfg.num_policy_chunks)
     else:
         to_policy_idxs = None
@@ -1249,6 +933,6 @@ def _compute_reorder_state(
         to_policy_idxs = to_policy_idxs,
         to_sim_idxs = to_sim_idxs,
         policy_dims = (
-            rollout_cfg.total_num_policies, rollout_cfg.policy_chunk_size),
+            rollout_cfg.pbt.total_num_policies, rollout_cfg.policy_chunk_size),
         sim_dims = (rollout_cfg.sim_batch_size,),
     )

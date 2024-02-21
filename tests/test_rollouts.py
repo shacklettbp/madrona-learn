@@ -23,10 +23,11 @@ from madrona_learn.rollouts import (
     RolloutState,
     RolloutManager,
     rollout_loop,
-    _init_matchmake_assignments,
     _compute_reorder_chunks,
     _compute_reorder_state,
 )
+
+from madrona_learn.pbt import pbt_init_matchmaking
 
 from madrona_learn.metrics import TrainingMetrics
 from madrona_learn.moving_avg import EMANormalizer
@@ -153,7 +154,7 @@ def setup_init_matchmake(
 
     @jax.jit
     def init_matchmake(rnd):
-        return _init_matchmake_assignments(rnd, rollout_cfg)
+        return pbt_init_matchmaking(rnd, rollout_cfg)
 
     return init_matchmake(random.PRNGKey(7)).reshape(-1, num_teams, team_size)
 
@@ -371,8 +372,8 @@ def fake_rollout_setup(
     make_policies = jax.jit(jax.vmap(make_policy))
 
     policy_states = make_policies(
-        jnp.arange(rollout_cfg.total_num_policies),
-        random.split(rnd_init, rollout_cfg.total_num_policies))
+        jnp.arange(rollout_cfg.pbt.total_num_policies),
+        random.split(rnd_init, rollout_cfg.pbt.total_num_policies))
 
     return rnd, policy_states, rollout_state, rollout_cfg, init_obs, init_rnn_states
 
@@ -638,6 +639,8 @@ def check_rollout_mgr(
             team_size = team_size,
             num_train_policies = num_current_policies,
             num_past_policies = num_past_policies,
+            train_policy_cull_interval = 0,
+            num_cull_policies = 0,
             past_policy_update_interval = 0,
             self_play_portion = self_play,
             cross_play_portion = cross_play,

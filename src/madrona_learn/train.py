@@ -6,6 +6,7 @@ from flax import linen as nn
 from flax.core import frozen_dict, FrozenDict
 import optax
 
+import math
 from os import environ as env_vars
 from dataclasses import dataclass
 from functools import partial
@@ -18,6 +19,7 @@ from .algo_common import AlgoBase
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import PolicyTrainState, TrainStateManager
+from .pbt import pbt_update
 from .policy import Policy
 from .profile import profile
 
@@ -33,124 +35,13 @@ def train(
     profile_port: int = None,
 ):
     print(cfg)
+    print()
 
     with jax.default_device(dev):
         return _train_impl(dev.platform, cfg, sim_init, sim_step,
             policy, iter_cb, metrics_cfg,
             restore_ckpt, profile_port)
 
-def _pbt_cull_update(
-    cfg: TrainConfig,
-    train_state_mgr: TrainStateManager,
-):
-    policy_states = train_state_mgr.policy_states
-    train_states = train_state_mgr.train_states
-    pbt_rng = train_state_mgr.pbt_rng
-
-    assert 2 * cfg.pbt.num_cull_policies < cfg.pbt.num_train_policies
-
-    sort_idxs = jnp.argsort(policy_states.fitness_score[
-        0:cfg.pbt.num_train_policies, 0])
-    
-    bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
-    top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
-
-    def save_param(x):
-        return x.at[bottom_idxs].set(x[top_idxs])
-
-    policy_states = jax.tree_map(save_param, policy_states)
-    train_states = jax.tree_map(save_param, train_states)
-
-    # Need to split the update keys for the copied policies
-    update_prng_keys = train_states.update_prng_key
-    new_prng_keys = jax.vmap(random.split, in_axes=(0, None), out_axes=1)(
-        update_prng_keys[top_idxs], 2)
-
-    update_prng_keys = update_prng_keys.at[top_idxs].set(
-        new_prng_keys[0])
-    update_prng_keys = update_prng_keys.at[bottom_idxs].set(
-        new_prng_keys[1])
-
-    train_states = train_states.update(update_prng_key=update_prng_keys)
-
-    if policy_states.reward_hyper_params != None:
-        pbt_rng, mutate_rng = random.split(pbt_rng, 2)
-        reward_hyper_params = policy_states.reward_hyper_params
-
-        reward_hyper_params = reward_hyper_params.at[bottom_idxs].set(
-            jax.vmap(policy_states.mutate_reward_hyper_params)(
-                random.split(mutate_rng, cfg.pbt.num_cull_policies),
-                reward_hyper_params[bottom_idxs]))
-
-        policy_states = policy_states.update(
-            reward_hyper_params = reward_hyper_params,
-        )
-
-    # FIXME: elo grows unbounded, I think because we copy high elo policies
-    # Rebase elo so average is 1500
-    elos = policy_states.fitness_score[..., 0]
-    elo_correction = jnp.mean(elos) - 1500
-    policy_states = policy_states.update(
-        fitness_score = policy_states.fitness_score - elo_correction,
-    )
-
-    return train_state_mgr.replace(
-        policy_states = policy_states,
-        train_states = train_states,
-        pbt_rng = pbt_rng,
-    )
-
-def _pbt_past_update(
-    cfg: TrainConfig,
-    train_state_mgr: TrainStateManager,
-):
-    if cfg.pbt.num_past_policies == 0:
-        return train_state_mgr
-
-    policy_states = train_state_mgr.policy_states
-
-    current_policies = jax.tree_map(
-        lambda x: x[:cfg.pbt.num_train_policies], policy_states)
-
-    past_policies = jax.tree_map(
-        lambda x: x[cfg.pbt.num_train_policies:], policy_states)
-
-    assert (current_policies.fitness_score.shape[0] ==
-            cfg.pbt.num_train_policies)
-    assert past_policies.fitness_score.shape[0] == cfg.pbt.num_past_policies
-
-    src_idx = jnp.argmax(current_policies.fitness_score)
-    dst_idx = jnp.argmin(past_policies.fitness_score)
-    dst_idx = dst_idx + cfg.pbt.num_train_policies
-
-    def save_param(x):
-        return x.at[dst_idx].set(x[src_idx])
-
-    policy_states = jax.tree_map(save_param, policy_states)
-
-    return train_state_mgr.replace(
-        policy_states = policy_states,
-    )
-
-    #pbt_rng = train_state_mgr.pbt_rng
-    #pbt_rng, save_idx_rng, store_idx_rng = random.split(pbt_rng, 3)
-
-    #save_idx = random.randint(
-    #    save_idx_rng, (), 0, cfg.pbt.num_train_policies)
-
-    #store_idx = random.randint(
-    #    store_idx_rng, (), cfg.pbt.num_train_policies,
-    #    cfg.pbt.num_train_policies + cfg.pbt.num_past_policies)
-
-    #def save_param(x):
-    #    return x.at[store_idx].set(x[save_idx])
-
-    #policy_states = jax.tree_map(save_param, policy_states)
-
-    #return train_state_mgr.replace(
-    #    policy_states = policy_states,
-    #    pbt_rng = pbt_rng,
-    #)
 
 def _update_loop(
     algo: AlgoBase,
@@ -164,13 +55,13 @@ def _update_loop(
 ):
     num_updates_remaining = cfg.num_updates - start_update_idx
     if cfg.pbt != None:
-        pbt_update_interval = min(
+        outer_loop_interval = math.gcd(
             cfg.pbt.past_policy_update_interval,
-            cfg.pbt.policy_cull_interval)
+            cfg.pbt.train_policy_cull_interval)
 
         num_train_policies = cfg.pbt.num_train_policies
     else:
-        pbt_update_interval = num_updates_remaining
+        outer_loop_interval = num_updates_remaining
         num_train_policies = 1
 
     @jax.vmap
@@ -238,30 +129,12 @@ def _update_loop(
         rollout_state, train_state_mgr, metrics = inputs
 
         inner_begin_idx = (
-            start_update_idx + outer_update_idx * pbt_update_interval
+            start_update_idx + outer_update_idx * outer_loop_interval
         )
         
-        if cfg.pbt != None:
-            def pbt_update_noop(train_state_mgr):
-                return train_state_mgr
+        train_state_mgr = pbt_update(cfg, train_state_mgr, inner_begin_idx)
 
-            def pbt_cull_update(train_state_mgr):
-                return _pbt_cull_update(cfg, train_state_mgr)
-
-            should_cull_policy = jnp.logical_and(inner_begin_idx != 0,
-                inner_begin_idx % cfg.pbt.policy_cull_interval == 0)
-            train_state_mgr = lax.cond(should_cull_policy,
-                pbt_cull_update, pbt_update_noop, train_state_mgr)
-
-            def pbt_past_update(train_state_mgr):
-                return _pbt_past_update(cfg, train_state_mgr)
-
-            should_update_past = jnp.logical_and(inner_begin_idx != 0,
-                inner_begin_idx % cfg.pbt.past_policy_update_interval == 0)
-            train_state_mgr = lax.cond(should_update_past,
-                pbt_past_update, pbt_update_noop, train_state_mgr)
-
-        inner_end_idx = inner_begin_idx + pbt_update_interval
+        inner_end_idx = inner_begin_idx + outer_loop_interval
         inner_end_idx = jnp.minimum(inner_end_idx, cfg.num_updates)
 
         rollout_state, train_state_mgr, metrics = lax.fori_loop(
@@ -275,8 +148,8 @@ def _update_loop(
     metrics = metrics_cfg.add_metrics(metrics)
     metrics = TrainingMetrics.create(cfg, metrics)
 
-    num_outer_iters = num_updates_remaining // pbt_update_interval
-    if num_outer_iters * pbt_update_interval < num_updates_remaining:
+    num_outer_iters = num_updates_remaining // outer_loop_interval
+    if num_outer_iters * outer_loop_interval < num_updates_remaining:
         num_outer_iters += 1
 
     rollout_state, train_state_mgr, metrics = lax.fori_loop(
@@ -376,7 +249,7 @@ def _train_impl(
         base_rng = init_rng,
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
-        track_policy_fitness = rollout_cfg.has_matchmaking,
+        track_policy_fitness = rollout_cfg.pbt.complex_matchmaking,
         checkify_errors = checkify_errors,
     )
 
