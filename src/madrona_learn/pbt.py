@@ -445,7 +445,7 @@ def _pbt_cull_update(
             return dst_policy_state, dst_train_state
 
         should_overwrite = _check_overwrite(cfg, policy_states, src_idx, dst_idx)
-        #jax.debug.print("Train {} {} {}", dst_idx, src_idx, should_overwrite)
+        jax.debug.print("Train {} {} {}", dst_idx, src_idx, should_overwrite, ordered=True)
 
         return lax.cond(should_overwrite, get_overwrite_policy, noop)
 
@@ -496,7 +496,7 @@ def _pbt_past_update(
         policy_states = jax.tree_map(save_param, policy_states)
         policy_states = _rebase_elos(policy_states)
 
-        jax.debug.print("Past {} {}", src_idx, dst_idx)
+        jax.debug.print("Past {} {}", src_idx, dst_idx, ordered=True)
 
         return policy_states
 
