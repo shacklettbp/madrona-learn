@@ -25,6 +25,10 @@ class PBTConfig:
     self_play_portion: float
     cross_play_portion: float
     past_play_portion: float
+    # During past policy updating & culling of train policies, the
+    # policy being copied must have an expected winrate greater than this
+    # threshold over the overwritten policy or the copy will be skipped
+    policy_overwrite_threshold: float = 0.7
     # Purely a speed / memory parameter
     rollout_policy_chunk_size_override: int = 0
 

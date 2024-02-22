@@ -235,6 +235,13 @@ def _past_play_matchmake(
         policy_states)
 
 
+def _elo_expected_result(
+    my_elo,
+    opponent_elo,
+):
+    return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
+
+
 def _update_fitness(
     assignments,
     policy_states,
@@ -260,9 +267,6 @@ def _update_fitness(
     dones = dones[:, 0, 0, :]
 
     def update_elo(policy_idx, cur_fitness_score):
-        def compute_expected_score(my_elo, opponent_elo):
-            return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
-
         @jax.vmap
         def compute_differences(raw_match_result, a_assignment, b_assignment, done):
             is_a = a_assignment == policy_idx
@@ -276,15 +280,9 @@ def _update_fitness(
                 a_assignment != b_assignment,
             ).squeeze(axis=0)
 
-            def diff():
-                match_result = policy_states.parse_match_result_fn(
+            def compute_diff():
+                a_score = policy_states.get_team_a_score_fn(
                     raw_match_result)
-
-                is_a_winner = match_result == 0
-                is_b_winner = match_result == 1
-
-                a_score = jnp.where(
-                    is_a_winner, 1, jnp.where(is_b_winner, 0, 0.5))
 
                 a_elo = policy_states.fitness_score[a_assignment, 0]
                 b_elo = policy_states.fitness_score[b_assignment, 0]
@@ -294,20 +292,23 @@ def _update_fitness(
                 my_elo = jnp.where(is_a, a_elo, b_elo)
                 opponent_elo = jnp.where(is_a, b_elo, a_elo)
 
-                expected_score = compute_expected_score(my_elo, opponent_elo)
-                out = my_score - expected_score
+                expected_score = _elo_expected_result(my_elo, opponent_elo)
+                diff = my_score - expected_score
 
-                return out
+                return diff
 
-            return lax.cond(valid, diff, lambda: jnp.zeros((), dtype=jnp.float32))
+            def skip_diff():
+                return jnp.zeros((), dtype=jnp.float32)
+
+            return lax.cond(valid, compute_diff, skip_diff)
 
         diffs = compute_differences(match_results, a_assignments,
                                     b_assignments, dones)
 
-        expected_current_policy_matches = (
-            (mm_cfg.num_cross_play_matches * 2 +
-                mm_cfg.num_past_play_matches) /
-            mm_cfg.num_current_policies)
+        #expected_current_policy_matches = (
+        #    (mm_cfg.num_cross_play_matches * 2 +
+        #        mm_cfg.num_past_play_matches) /
+        #    mm_cfg.num_current_policies)
 
         #if mm_cfg.num_past_policies > 0:
         #    expected_past_policy_matches = (
@@ -317,13 +318,13 @@ def _update_fitness(
         #                        expected_current_policy_matches)
         #else:
         #    current_reweight = 1
-        current_reweight = 1
+        #K = jnp.where(policy_idx < mm_cfg.num_current_policies,
+        #              current_reweight * K, K)
 
         K = jnp.array([8], dtype=jnp.float32)
-        K = jnp.where(policy_idx < mm_cfg.num_current_policies,
-                      current_reweight * K, K)
 
-        return jnp.clip(cur_fitness_score + K * diffs.sum(), a_min=100)
+        return cur_fitness_score + K * diffs.sum()
+        #return jnp.clip(cur_fitness_score + K * diffs.sum(), a_min=100)
 
     new_fitness_scores = jax.vmap(update_elo)(
         jnp.arange(policy_states.fitness_score.shape[0]),
@@ -378,9 +379,18 @@ def _rebase_elos(policy_states):
     # Rebase elo so average is 1500
     elos = policy_states.fitness_score[..., 0]
     elo_correction = jnp.mean(elos) - 1500
+
     return policy_states.update(
         fitness_score = policy_states.fitness_score - elo_correction,
     )
+
+
+def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
+    src_elo = policy_states.fitness_score[src_idx, 0]
+    dst_elo = policy_states.fitness_score[dst_idx, 0]
+
+    src_expected_winrate = _elo_expected_result(src_elo, dst_elo)
+    return src_expected_winrate >= cfg.pbt.policy_overwrite_threshold
 
 
 def _pbt_cull_update(
@@ -399,40 +409,64 @@ def _pbt_cull_update(
     bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
     top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
 
-    def save_param(x):
-        return x.at[bottom_idxs].set(x[top_idxs])
+    @partial(jax.vmap, in_axes=(None, None, 0, 0, 0))
+    def cull_train_policy(policy_states, train_states,
+                          mutate_rng, dst_idx, src_idx):
+        def get_overwrite_policy():
+            src_policy_state = jax.tree_map(
+                lambda x: x[src_idx], policy_states)
 
-    policy_states = jax.tree_map(save_param, policy_states)
-    train_states = jax.tree_map(save_param, train_states)
+            src_train_state = jax.tree_map(
+                lambda x: x[src_idx], train_states)
 
-    # Need to split the update keys for the copied policies
-    update_prng_keys = train_states.update_prng_key
-    new_prng_keys = jax.vmap(random.split, in_axes=(0, None), out_axes=1)(
-        update_prng_keys[top_idxs], 2)
+            # Preserve original update_prng_key
+            src_train_state = src_train_state.update(
+                update_prng_key = train_states.update_prng_key[dst_idx],
+            )
 
-    update_prng_keys = update_prng_keys.at[top_idxs].set(
-        new_prng_keys[0])
-    update_prng_keys = update_prng_keys.at[bottom_idxs].set(
-        new_prng_keys[1])
+            if src_policy_state.reward_hyper_params != None:
+                reward_hyper_params = src_policy_state.mutate_reward_hyper_params(
+                    mutate_rng, src_policy_state.reward_hyper_params)
 
-    train_states = train_states.update(update_prng_key=update_prng_keys)
+                src_policy_state = src_policy_state.update(
+                    reward_hyper_params = reward_hyper_params,
+                )
 
-    if policy_states.reward_hyper_params != None:
-        pbt_rng, mutate_rng = random.split(pbt_rng, 2)
-        reward_hyper_params = policy_states.reward_hyper_params
+            return src_policy_state, src_train_state
 
-        reward_hyper_params = reward_hyper_params.at[bottom_idxs].set(
-            jax.vmap(policy_states.mutate_reward_hyper_params)(
-                random.split(mutate_rng, cfg.pbt.num_cull_policies),
-                reward_hyper_params[bottom_idxs]))
+        def noop():
+            # Return copy of self (dst)
+            dst_policy_state = jax.tree_map(
+                lambda x: x[dst_idx], policy_states)
 
-        policy_states = policy_states.update(
-            reward_hyper_params = reward_hyper_params,
-        )
+            dst_train_state = jax.tree_map(
+                lambda x: x[dst_idx], train_states)
+            
+            return dst_policy_state, dst_train_state
+
+        should_overwrite = _check_overwrite(cfg, policy_states, src_idx, dst_idx)
+        #jax.debug.print("Train {} {} {}", dst_idx, src_idx, should_overwrite)
+
+        return lax.cond(should_overwrite, get_overwrite_policy, noop)
+
+    pbt_rng, mutate_base_rng = random.split(pbt_rng, 2)
+
+    overwrite_policy_states, overwrite_train_states = cull_train_policy(
+        policy_states, train_states,
+        random.split(mutate_base_rng, cfg.pbt.num_cull_policies),
+        bottom_idxs, top_idxs)
+
+    def overwrite_param(param, srcs):
+        return param.at[bottom_idxs].set(srcs)
+
+    policy_states = jax.tree_map(
+        overwrite_param, policy_states, overwrite_policy_states)
+
+    train_states = jax.tree_map(
+        overwrite_param, train_states, overwrite_train_states)
 
     policy_states = _rebase_elos(policy_states)
 
-    jax.debug.print("Train {} {}", top_idxs, bottom_idxs)
     return train_state_mgr.replace(
         policy_states = policy_states,
         train_states = train_states,
@@ -455,14 +489,25 @@ def _pbt_past_update(
     dst_idx = jnp.argmin(policy_states.fitness_score[cfg.pbt.num_train_policies:])
     dst_idx = dst_idx + cfg.pbt.num_train_policies
 
-    def save_param(x):
-        return x.at[dst_idx].set(x[src_idx])
+    def overwrite_past_policy(policy_states):
+        def save_param(x):
+            return x.at[dst_idx].set(x[src_idx])
 
-    policy_states = jax.tree_map(save_param, policy_states)
+        policy_states = jax.tree_map(save_param, policy_states)
+        policy_states = _rebase_elos(policy_states)
 
-    policy_states = _rebase_elos(policy_states)
+        jax.debug.print("Past {} {}", src_idx, dst_idx)
 
-    jax.debug.print("Past {} {}", src_idx, dst_idx)
+        return policy_states
+
+    def noop(policy_states):
+        return policy_states
+
+    should_overwrite = _check_overwrite(cfg, policy_states, src_idx, dst_idx)
+
+    policy_states = lax.cond(should_overwrite,
+        overwrite_past_policy, noop, policy_states)
+
     return train_state_mgr.replace(
         policy_states = policy_states,
         pbt_rng = pbt_rng,

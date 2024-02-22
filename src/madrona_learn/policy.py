@@ -16,4 +16,4 @@ class Policy:
     obs_preprocess: Optional[ObservationsPreprocess] = None
     init_reward_hyper_params: Optional[Callable] = None
     mutate_reward_hyper_params: Optional[Callable] = None
-    parse_match_result: Optional[Callable] = None
+    get_team_a_score: Optional[Callable] = None

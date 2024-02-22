@@ -137,18 +137,18 @@ def _eval_ckpt_impl(
             assignments = jnp.array(
                 static_assignments_list, dtype=jnp.int32)
 
-            assignments = assignments.reshape(-1, rollout_cfg.num_teams)
+            assignments = assignments.reshape(-1, rollout_cfg.pbt.num_teams)
             assignments = jnp.repeat(
                 assignments, num_assignment_duplicates, axis=0)
             assignments = jnp.repeat(
-                assignments.reshape(-1), rollout_cfg.team_size)
+                assignments.reshape(-1), rollout_cfg.pbt.team_size)
 
             return assignments
 
         static_play_assignments = gen_static_assignments()
 
         assert (static_play_assignments.shape[0] ==
-                rollout_cfg.static_play_batch_size)
+                rollout_cfg.pbt.static_play_batch_size)
 
     @jax.jit
     def init_rollout_state(static_play_assignments):

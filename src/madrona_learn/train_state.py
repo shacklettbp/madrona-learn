@@ -36,7 +36,7 @@ class PolicyState(flax.struct.PyTreeNode):
         pytree_node=False)
     reward_hyper_params: Optional[jax.Array]
 
-    parse_match_result_fn: Callable = flax.struct.field(pytree_node=False)
+    get_team_a_score_fn: Callable = flax.struct.field(pytree_node=False)
     fitness_score: Optional[jax.Array]
 
     def update(
@@ -64,7 +64,7 @@ class PolicyState(flax.struct.PyTreeNode):
                 reward_hyper_params if reward_hyper_params != None else
                     self.reward_hyper_params
             ),
-            parse_match_result_fn = self.parse_match_result_fn,
+            get_team_a_score_fn = self.get_team_a_score_fn,
             fitness_score = (
                 fitness_score if fitness_score != None else
                     self.fitness_score
@@ -176,10 +176,10 @@ class TrainStateManager(flax.struct.PyTreeNode):
             mutate_reward_hp_fn = lambda *args: None
             reward_hyper_params = None
 
-        if policy.parse_match_result != None:
-            parse_match_result_fn = policy.parse_match_result
+        if policy.get_team_a_score != None:
+            get_team_a_score_fn = policy.get_team_a_score
         else:
-            parse_match_result_fn = lambda x: x
+            get_team_a_score_fn = lambda x: x
 
         fitness_score = loaded['policy_states'].get('fitness_score', None)
 
@@ -193,7 +193,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
                 to_jax(loaded['policy_states']['obs_preprocess_state'])),
             mutate_reward_hyper_params = mutate_reward_hp_fn,
             reward_hyper_params = reward_hyper_params,
-            parse_match_result_fn = parse_match_result_fn,
+            get_team_a_score_fn = get_team_a_score_fn,
             fitness_score = fitness_score,
         ), num_train_policies
 
@@ -279,10 +279,10 @@ def _setup_policy_state(
     batch_stats = variables.get('batch_stats', {})
 
     if track_policy_fitness:
-        parse_match_result_fn = policy.parse_match_result
+        get_team_a_score_fn = policy.get_team_a_score
         fitness_score = jnp.array([1500], dtype=jnp.float32)
     else:
-        parse_match_result_fn = lambda x: x
+        get_team_a_score_fn = lambda x: x
         fitness_score = None
 
     return PolicyState(
@@ -294,7 +294,7 @@ def _setup_policy_state(
         obs_preprocess_state = obs_preprocess_state,
         mutate_reward_hyper_params = mutate_reward_hp_fn,
         reward_hyper_params = reward_hyper_params,
-        parse_match_result_fn = parse_match_result_fn,
+        get_team_a_score_fn = get_team_a_score_fn,
         fitness_score = fitness_score,
     ), fake_outs, rnn_states
 
