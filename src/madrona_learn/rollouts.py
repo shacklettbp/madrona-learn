@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional, Callable, Any
 from functools import partial
 import itertools
+import math
 
 from .cfg import TrainConfig
 from .actor_critic import ActorCritic
@@ -64,15 +65,27 @@ class RolloutConfig:
             assert pbt.num_teams > 1
             assert pbt.num_current_policies > 1 or pbt.num_past_policies > 0
 
-            min_policy_chunk_size = min(
-                pbt.self_play_batch_size // pbt.num_current_policies,
-                pbt.cross_play_batch_size // pbt.num_current_policies)
+            min_policy_chunk_size = math.gcd(sim_batch_size, pbt.total_num_policies)
+
+            if pbt.self_play_batch_size > 0:
+                min_policy_chunk_size = min(min_policy_chunk_size,
+                    pbt.self_play_batch_size // pbt.num_current_policies)
+
+            if pbt.cross_play_batch_size > 0:
+                min_policy_chunk_size = min(min_policy_chunk_size,
+                    pbt.cross_play_batch_size // pbt.num_current_policies)
 
             if pbt.past_play_batch_size > 0:
                 # FIXME: this doesn't make much sense, think more
                 # about auto-picking policy batch size
                 min_policy_chunk_size = min(min_policy_chunk_size,
-                    pbt.past_play_batch_size // num_past_policies)
+                    pbt.past_play_batch_size // pbt.num_past_policies)
+
+            if pbt.static_play_batch_size > 0:
+                min_policy_chunk_size = min(min_policy_chunk_size,
+                    pbt.static_play_batch_size // pbt.total_num_policies)
+
+            assert min_policy_chunk_size > 0
 
             # Round to nearest power of 2
             policy_chunk_size = 1 << ((min_policy_chunk_size - 1).bit_length())
@@ -87,11 +100,10 @@ class RolloutConfig:
         if policy_chunk_size_override != 0:
             policy_chunk_size = policy_chunk_size_override
 
-        assert sim_batch_size % policy_chunk_size == 0
         # Allocate enough policy sub-batches to evenly divide the full batch,
         # plus num_policies - 1 extras to handle worst case usage from unused
         # space in each subbatch
-        num_policy_chunks = sim_batch_size // policy_chunk_size
+        num_policy_chunks = -(sim_batch_size // -policy_chunk_size)
         if pbt.complex_matchmaking:
             num_policy_chunks += pbt.total_num_policies - 1
 

@@ -363,7 +363,7 @@ def fake_rollout_setup(
             obs_preprocess_state = obs_preprocess_state,
             mutate_reward_hyper_params = lambda *args: None,
             reward_hyper_params = None,
-            parse_match_result_fn = lambda x: x,
+            get_team_a_score_fn = lambda x: 0.0,
             fitness_score = jnp.array([1500], dtype=jnp.float32),
         )
 
@@ -779,6 +779,7 @@ def test_rollouts():
     configs = [
         [5,   3,  1, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
         [5,   4,  2, 11,  1, 0, 2, 1,     4, 1.0,  0.0, 0.0],
+        [5,   4,  2, 11,  4, 0, 2, 1,    16, 0.0, 1.0, 0.0],
         [5,  10,  2, 11,  4, 0, 2, 2,    32, 0.0,  1.0, 0.0],
         [5, 200,  1, 10, 16, 7, 2, 2, 16384, 0.0,  1.0, 0.0],
         [5, 200,  1, 15, 16, 7, 4, 2, 16384, 0.0,  1.0, 0.0],
