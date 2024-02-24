@@ -26,6 +26,7 @@ class EvalConfig:
     num_eval_steps: int
     policy_dtype: jnp.dtype
     use_deterministic_policy: bool = True
+    clear_fitness: bool = True
 
 
 def eval_load_ckpt(
@@ -64,8 +65,8 @@ def eval_policies(
     step_cb: Callable,
 ):
     with jax.default_device(dev):
-        _eval_policies_impl(eval_cfg, sim_init, sim_step, policy,
-                            policy_states, step_cb)
+        return _eval_policies_impl(eval_cfg, sim_init, sim_step, policy,
+                                   policy_states, step_cb)
 
 def _eval_policies_impl(
     eval_cfg: EvalConfig,
@@ -89,6 +90,11 @@ def _eval_policies_impl(
     sim_batch_size = eval_cfg.num_worlds * num_agents_per_world
 
     num_eval_policies = policy_states.fitness_score.shape[0]
+
+    if eval_cfg.clear_fitness:
+        policy_states = policy_states.update(
+            fitness_score = policy_states.fitness_score.at[:, 0].set(1500),
+        )
 
     if num_eval_policies == 1:
         rollout_cfg = RolloutConfig.setup(
@@ -211,5 +217,8 @@ def _eval_policies_impl(
 
     compiled_rollout_loop = lowered_rollout_loop.compile()
 
-    err, _ = compiled_rollout_loop(*rollout_loop_args)
+    err, (rollout_state, policy_states, _) = compiled_rollout_loop(
+        *rollout_loop_args)
     err.throw()
+
+    return policy_states.fitness_score

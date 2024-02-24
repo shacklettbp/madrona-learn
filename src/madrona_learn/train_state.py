@@ -181,7 +181,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
         else:
             get_team_a_score_fn = lambda x: x
 
-        fitness_score = loaded['policy_states'].get('fitness_score', None)
+        fitness_score = to_jax(loaded['policy_states']['fitness_score'])
 
         return PolicyState(
             apply_fn = actor_critic.apply,
