@@ -16,48 +16,63 @@ import itertools
 from .actor_critic import ActorCritic
 from .policy import Policy
 from .rollouts import RolloutConfig, RolloutState, rollout_loop
-from .train_state import TrainStateManager
-
-@dataclass(frozen=True)
-class MultiPolicyEvalConfig:
-    num_teams: int
-    team_size: int
-
+from .train_state import PolicyState, TrainStateManager
 
 @dataclass(frozen=True)
 class EvalConfig:
-    ckpt_path: str
     num_worlds: int
-    num_agents_per_world: int
+    num_teams: int
+    team_size: int
     num_eval_steps: int
     policy_dtype: jnp.dtype
-    single_policy_eval: Optional[int] = None
-    multi_policy_eval: Optional[MultiPolicyEvalConfig] = None
     use_deterministic_policy: bool = True
 
 
-def eval_ckpt(
+def eval_load_ckpt(
+    policy: Policy,
+    ckpt_path: str,
+    train_only: bool = True,
+    single_policy: Optional[int] = None,
+):
+    policy_states, num_train_policies = TrainStateManager.load_policies(
+        policy, ckpt_path,
+    )
+
+    if single_policy != None:
+        policy_states = jax.tree_map(
+            lambda x: x[jnp.asarray((single_policy,))], policy_states)
+
+        return policy_states, 1
+
+    if train_only:
+        policy_states = jax.tree_map(
+            lambda x: x[jnp.arange(num_train_policies)], policy_states)
+
+        return policy_states, num_train_policies
+
+
+    return policy_states, policy_states.fitness_score.shape[0]
+
+
+def eval_policies(
     dev: jax.Device,
     eval_cfg: EvalConfig,
     sim_init: Callable,
     sim_step: Callable,
     policy: Policy,
+    policy_states: PolicyState,
     step_cb: Callable,
 ):
-    assert (
-        (eval_cfg.single_policy_eval != None or
-            eval_cfg.multi_policy_eval != None) and
-        (eval_cfg.single_policy_eval == None or
-         eval_cfg.multi_policy_eval == None))
-
     with jax.default_device(dev):
-        _eval_ckpt_impl(eval_cfg, sim_init, sim_step, policy, step_cb)
+        _eval_policies_impl(eval_cfg, sim_init, sim_step, policy,
+                            policy_states, step_cb)
 
-def _eval_ckpt_impl(
+def _eval_policies_impl(
     eval_cfg: EvalConfig,
     sim_init: Callable,
     sim_step: Callable,
     policy: Policy,
+    policy_states: PolicyState,
     step_cb: Callable,
 ):
     checkify_errors = checkify.user_checks
@@ -70,16 +85,12 @@ def _eval_ckpt_impl(
             checkify.index_checks
         )
 
-    policy_states, num_train_policies = TrainStateManager.load_policies(
-        policy, eval_cfg.ckpt_path)
+    num_agents_per_world = eval_cfg.team_size * eval_cfg.num_teams
+    sim_batch_size = eval_cfg.num_worlds * num_agents_per_world
 
-    sim_batch_size = eval_cfg.num_worlds * eval_cfg.num_agents_per_world
+    num_eval_policies = policy_states.fitness_score.shape[0]
 
-    if eval_cfg.single_policy_eval != None:
-        policy_states = jax.tree_map(
-            lambda x: x[jnp.asarray((eval_cfg.single_policy_eval,))],
-            policy_states)
-
+    if num_eval_policies == 1:
         rollout_cfg = RolloutConfig.setup(
             num_current_policies = 1,
             num_past_policies = 0,
@@ -94,18 +105,12 @@ def _eval_ckpt_impl(
         )
 
         static_play_assignments = None
-    elif eval_cfg.multi_policy_eval != None:
-        assert (
-            eval_cfg.multi_policy_eval.num_teams *
-                eval_cfg.multi_policy_eval.team_size ==
-                    eval_cfg.num_agents_per_world
-        )
-
+    else:
         rollout_cfg = RolloutConfig.setup(
-            num_current_policies = num_train_policies,
+            num_current_policies = num_eval_policies,
             num_past_policies = 0,
-            num_teams = eval_cfg.multi_policy_eval.num_teams,
-            team_size = eval_cfg.multi_policy_eval.team_size,
+            num_teams = eval_cfg.num_teams,
+            team_size = eval_cfg.team_size,
             sim_batch_size = sim_batch_size,
             self_play_portion = 0.0,
             cross_play_portion = 0.0,
@@ -114,7 +119,7 @@ def _eval_ckpt_impl(
             policy_dtype = eval_cfg.policy_dtype,
         )
 
-        num_unique_static_assignments = num_train_policies * num_train_policies
+        num_unique_static_assignments = num_eval_policies * num_eval_policies
 
         num_static_repeats = sim_batch_size // num_unique_static_assignments
 
@@ -123,13 +128,13 @@ def _eval_ckpt_impl(
         static_assignments_list = []
 
         for combo in itertools.product(
-                range(num_train_policies),
-                repeat=eval_cfg.multi_policy_eval.num_teams):
+                range(num_eval_policies),
+                repeat=eval_cfg.num_teams):
             for i in combo:
                 static_assignments_list.append(i)
 
         num_assignment_duplicates = (
-            (sim_batch_size // eval_cfg.multi_policy_eval.team_size) //
+            (sim_batch_size // eval_cfg.team_size) //
             len(static_assignments_list))
 
         @jax.jit
