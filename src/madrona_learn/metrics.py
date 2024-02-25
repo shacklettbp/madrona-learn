@@ -58,7 +58,7 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
         print_names = {}
         for name in metrics.keys():
-            print_names[name] = name + ' ' * (max_keylen - len(name))
+            print_names[name] = name# + ' ' * (max_keylen - len(name))
 
         num_policies = cfg.pbt.num_train_policies if cfg.pbt else 1
 
@@ -154,6 +154,10 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
             stddev = np.sqrt(m.m2 / m.count)
 
-            formatted.append(tab * 2 + f"{name} => Avg: {fmt(m.mean)}, Min: {fmt(m.min)}, Max: {fmt(m.max)}, σ: {fmt(stddev)}")
+            formatted.append(tab * 2 + f"{name}:")
+            formatted.append(tab * 3 + f"Avg: {fmt(m.mean)}")
+            formatted.append(tab * 3 + f"Min: {fmt(m.min)}")
+            formatted.append(tab * 3 + f"Max: {fmt(m.max)}")
+            formatted.append(tab * 3 + f"σ:   {fmt(stddev)}")
         
         print("\n".join(formatted))
