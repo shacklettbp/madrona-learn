@@ -153,9 +153,9 @@ def _ppo_update(
             value_loss = optax.l2_loss(
                 new_values_normalized, normalized_returns)
 
-        action_obj = jnp.mean(action_obj)
-        value_loss = jnp.mean(value_loss)
-        entropy_avg = jnp.mean(entropies)
+        action_obj = jnp.mean(action_obj, dtype=jnp.float32)
+        value_loss = jnp.mean(value_loss, dtype=jnp.float32)
+        entropy_avg = jnp.mean(entropies, dtype=jnp.float32)
 
         # Maximize the action objective function
         action_loss = -action_obj 
@@ -164,6 +164,7 @@ def _ppo_update(
         entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
 
         loss = action_loss + value_loss + entropy_loss
+        loss = loss.astype(cfg.compute_dtype)
 
         return loss, (
             ac_mutable_new['batch_stats'],

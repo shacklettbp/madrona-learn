@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import jax
 from jax import lax, random, numpy as jnp
@@ -10,6 +10,24 @@ class AlgoConfig:
 
     def setup(self):
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class ParamRange:
+    min: float
+    max: float
+    log10_space: bool = False
+    ln_space: bool = False
+
+    def __repr__(self):
+        if self.log10_space:
+            type_str = "[log10]"
+        elif self.ln_space:
+            type_str = "[ln]"
+        else:
+            type_str = ""
+
+        return f"{self.min}, {self.max} {type_str}"
 
 
 @dataclass(frozen=True)
@@ -29,6 +47,8 @@ class PBTConfig:
     # policy being copied must have an expected winrate greater than this
     # threshold over the overwritten policy or the copy will be skipped
     policy_overwrite_threshold: float = 0.7
+    lr_explore_range: Optional[ParamRange] = None
+    entropy_explore_range: Optional[ParamRange] = None
     # Purely a speed / memory parameter
     rollout_policy_chunk_size_override: int = 0
 

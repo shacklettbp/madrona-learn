@@ -7,8 +7,10 @@ from flax.core import frozen_dict, FrozenDict
 
 from dataclasses import dataclass
 from functools import partial
+import math
 from typing import Callable, List, Optional
 
+from .algo_common import HyperParams
 from .cfg import TrainConfig, PBTConfig
 from .train_state import PolicyState, PolicyTrainState, TrainStateManager
 
@@ -392,6 +394,62 @@ def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
     src_expected_winrate = _elo_expected_result(src_elo, dst_elo)
     return src_expected_winrate >= cfg.pbt.policy_overwrite_threshold
 
+def pbt_explore_train_hyperparams(
+    cfg: TrainConfig,
+    explore_rng: random.PRNGKey,
+    hyper_params: HyperParams,
+    resample_chance: float,
+):
+    lr_rnd, entropy_rnd = random.split(explore_rng, 2)
+
+    def explore_param(rnd, param, base_param, param_range):
+        if param_range.log10_space:
+            lo = math.log10(param_range.min)
+            hi = math.log10(param_range.max)
+        elif param_range.ln_space:
+            lo = math.log(param_range.min)
+            hi = math.log(param_range.max)
+        else:
+            lo = param_range.min
+            hi = param_range.max
+
+        def resample_param(param_rnd, param):
+            sampled = random.uniform(param_rnd, (), dtype=jnp.float32,
+                minval=lo, maxval=hi)
+
+            if param_range.log10_space:
+                sampled = 10 ** sampled
+            elif param_rnd.ln_space:
+                sampled = jnp.exp(sampled)
+
+            return base_param * sampled
+
+        def perturb_param(param_rnd, param):
+            # FIXME clamp to range?
+            return param * random.uniform(param_rnd, (), dtype=jnp.float32,
+                minval=0.8, maxval=1.2)
+
+        resample_rnd, param_rnd = random.split(rnd, 2)
+        should_resample = random.uniform(resample_rnd, (), dtype=jnp.float32,
+            minval=0, maxval=1) < resample_chance
+
+        return lax.cond(should_resample, resample_param, perturb_param,
+                        param_rnd, param)
+
+    if cfg.pbt.lr_explore_range != None:
+        hyper_params = hyper_params.replace(
+            lr = explore_param(lr_rnd, hyper_params.lr,
+                               cfg.lr, cfg.pbt.lr_explore_range),
+        )
+
+    # FIXME, entropy is PPO specific, should have an algo permutation function
+    if cfg.pbt.entropy_explore_range != None:
+        hyper_params = hyper_params.replace(
+            entropy_coef = explore_param(entropy_rnd, hyper_params.entropy_coef,
+                cfg.algo.entropy_coef, cfg.pbt.entropy_explore_range),
+        )
+
+    return hyper_params
 
 def _pbt_cull_update(
     cfg: TrainConfig,
@@ -424,13 +482,20 @@ def _pbt_cull_update(
                 update_prng_key = train_states.update_prng_key[dst_idx],
             )
 
+            reward_mutate_rng, train_mutate_rng = random.split(mutate_rng, 2)
+
             if src_policy_state.reward_hyper_params != None:
                 reward_hyper_params = src_policy_state.mutate_reward_hyper_params(
-                    mutate_rng, src_policy_state.reward_hyper_params)
+                    reward_mutate_rng, src_policy_state.reward_hyper_params)
 
                 src_policy_state = src_policy_state.update(
                     reward_hyper_params = reward_hyper_params,
                 )
+
+            src_train_state = src_train_state.update(
+                hyper_params = pbt_explore_train_hyperparams(
+                    cfg, train_mutate_rng, src_train_state.hyper_params, 0.2),
+            )
 
             return src_policy_state, src_train_state
 

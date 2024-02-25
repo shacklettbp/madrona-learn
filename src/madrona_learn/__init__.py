@@ -1,6 +1,10 @@
 from madrona_learn.train import train
 from madrona_learn.train_state import TrainStateManager
-from madrona_learn.cfg import TrainConfig, PBTConfig
+from madrona_learn.cfg import (
+    TrainConfig,
+    PBTConfig,
+    ParamRange,
+)
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
     ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
@@ -22,7 +26,7 @@ from madrona_learn.policy import Policy
 
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn", 
-    "TrainConfig", "PBTConfig", "CustomMetricConfig",
+    "TrainConfig", "PBTConfig", "CustomMetricConfig", "ParamRange",
     "eval_load_ckpt", "eval_policies", "EvalConfig",
     "Policy", "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",
