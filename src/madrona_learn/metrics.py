@@ -161,3 +161,23 @@ class TrainingMetrics(flax.struct.PyTreeNode):
             formatted.append(tab * 3 + f"σ:   {fmt(stddev)}")
         
         print("\n".join(formatted))
+
+    def tensorboard_log(self, writer, update):
+        for name, metric in self.metrics.items():
+            if not metric.per_policy:
+                stddev = np.sqrt(metric.m2 / metric.count)
+
+                writer.scalar(f"{name} Mean", metric.mean, update)
+                writer.scalar(f"{name} σ", stddev, update)
+                writer.scalar(f"{name} Min", metric.min, update)
+                writer.scalar(f"{name} Max", metric.max, update)
+            else:
+                num_policies = metric.mean.shape[0]
+
+                for i in range(num_policies):
+                    stddev = np.sqrt(metric.m2[i] / metric.count[i])
+
+                    writer.scalar(f"p{i}/{name} Mean", metric.mean[i], update)
+                    writer.scalar(f"p{i}/{name} σ", stddev, update)
+                    writer.scalar(f"p{i}/{name} Min", metric.min[i], update)
+                    writer.scalar(f"p{i}/{name} Max", metric.max[i], update)
