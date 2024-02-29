@@ -11,7 +11,7 @@ import math
 from typing import Callable, List, Optional
 
 from .algo_common import HyperParams
-from .cfg import TrainConfig, PBTConfig
+from .cfg import TrainConfig, PBTConfig, ParamExplore
 from .train_state import PolicyState, PolicyTrainState, TrainStateManager
 
 @dataclass(frozen=True)
@@ -244,11 +244,11 @@ def _elo_expected_result(
     return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
 
 
-def _update_fitness(
+def _update_competitive_fitness(
     assignments,
     policy_states,
     dones,
-    match_results,
+    episode_results,
     mm_cfg,
 ):
     assert mm_cfg.num_teams > 1
@@ -270,7 +270,7 @@ def _update_fitness(
 
     def update_elo(policy_idx, cur_fitness_score):
         @jax.vmap
-        def compute_differences(raw_match_result, a_assignment, b_assignment, done):
+        def compute_differences(episode_result, a_assignment, b_assignment, done):
             is_a = a_assignment == policy_idx
             is_b = b_assignment == policy_idx
 
@@ -283,8 +283,8 @@ def _update_fitness(
             ).squeeze(axis=0)
 
             def compute_diff():
-                a_score = policy_states.get_team_a_score_fn(
-                    raw_match_result)
+                a_score, b_score = policy_states.get_episode_scores_fn(
+                    episode_result)
 
                 a_elo = policy_states.fitness_score[a_assignment, 0]
                 b_elo = policy_states.fitness_score[b_assignment, 0]
@@ -304,7 +304,7 @@ def _update_fitness(
 
             return lax.cond(valid, compute_diff, skip_diff)
 
-        diffs = compute_differences(match_results, a_assignments,
+        diffs = compute_differences(episode_results, a_assignments,
                                     b_assignments, dones)
 
         #expected_current_policy_matches = (
@@ -341,12 +341,12 @@ def pbt_update_matchmaking(
     assignments,
     policy_states,
     dones,
-    match_results,
+    episode_results,
     assign_rnd,
     mm_cfg,
 ):
-    policy_states = _update_fitness(
-        assignments, policy_states, dones, match_results, mm_cfg)
+    policy_states = _update_competitive_fitness(
+        assignments, policy_states, dones, episode_results, mm_cfg)
 
     cross_start = mm_cfg.self_play_batch_size
     cross_end = cross_start + mm_cfg.cross_play_batch_size
@@ -377,6 +377,59 @@ def pbt_update_matchmaking(
     return assignments, policy_states, assign_rnd
 
 
+def pbt_update_fitness(
+    assignments,
+    policy_states,
+    dones,
+    episode_results,
+    mm_cfg,
+):
+    assert mm_cfg.num_teams == 1
+
+    assignments = assignments.reshape(
+        mm_cfg.num_total_matches, mm_cfg.team_size)
+    dones = dones.reshape(
+        mm_cfg.num_total_matches, mm_cfg.team_size)
+
+    assignments = assignments[:, 0]
+    dones = dones[:, 0]
+
+    # Note this ema is biased but equally so it seems like it shouldn't matter
+    ema_decay = 0.9999
+
+    def update_fitness(policy_idx, cur_fitness_score):
+        @jax.vmap
+        def get_scores(episode_result, assignment, done):
+            def valid(episode_result):
+                return policy_states.get_episode_scores_fn(episode_result), True
+
+            def invalid(episode_result):
+                return 0.0, False
+
+            is_valid = jnp.logical_and(done, assignment == policy_idx)
+
+            return lax.cond(is_valid, valid, invalid, episode_result)
+
+        scores, valids = get_scores(
+            episode_results, assignments, dones)
+
+        num_valids = valids.sum()
+
+        new_avg_score = scores.sum() / num_valids
+
+        cur_weight = jnp.expm1(num_valids * jnp.log(ema_decay)) + 1
+        new_weight = 1 - cur_weight
+
+        return cur_weight * cur_fitness_score + new_weight * new_avg_score
+
+    new_fitness_scores = jax.vmap(update_elo)(
+        jnp.arange(policy_states.fitness_score.shape[0]),
+        policy_states.fitness_score)
+
+    policy_states = policy_states.update(fitness_score=new_fitness_scores)
+
+    return policy_states
+
 def _rebase_elos(policy_states):
     # Rebase elo so average is 1500
     elos = policy_states.fitness_score[..., 0]
@@ -394,40 +447,48 @@ def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
     src_expected_winrate = _elo_expected_result(src_elo, dst_elo)
     return src_expected_winrate >= cfg.pbt.policy_overwrite_threshold
 
-def pbt_explore_train_hyperparams(
+def pbt_explore_hyperparams(
     cfg: TrainConfig,
     explore_rng: random.PRNGKey,
-    hyper_params: HyperParams,
+    policy_state: PolicyState,
+    train_state: PolicyTrainState,
     resample_chance: float,
 ):
-    lr_rnd, entropy_rnd = random.split(explore_rng, 2)
-
-    def explore_param(rnd, param, base_param, param_range):
-        if param_range.log10_space:
-            lo = math.log10(param_range.min)
-            hi = math.log10(param_range.max)
-        elif param_range.ln_space:
-            lo = math.log(param_range.min)
-            hi = math.log(param_range.max)
-        else:
-            lo = param_range.min
-            hi = param_range.max
+    def explore_param(rnd, param, param_explore):
+        lo = param_explore.base * param_explore.min_scale
+        hi = param_explore.base * param_explore.max_scale
 
         def resample_param(param_rnd, param):
-            sampled = random.uniform(param_rnd, (), dtype=jnp.float32,
-                minval=lo, maxval=hi)
+            if param_explore.log10_scale:
+                lo_sample = math.log10(lo)
+                hi_sample = math.log10(hi)
+            elif param_explore.ln_scale:
+                lo_sample = math.log(lo)
+                hi_sample = math.log(hi)
+            else:
+                lo_sample = lo
+                hi_sample = hi
 
-            if param_range.log10_space:
+            sampled = random.uniform(param_rnd, (), dtype=jnp.float32,
+                minval=lo_sample, maxval=hi_sample)
+
+            if param_explore.log10_scale:
                 sampled = 10 ** sampled
-            elif param_rnd.ln_space:
+            elif param_explore.ln_scale:
                 sampled = jnp.exp(sampled)
 
-            return base_param * sampled
+            return sampled
 
         def perturb_param(param_rnd, param):
-            # FIXME clamp to range?
-            return param * random.uniform(param_rnd, (), dtype=jnp.float32,
-                minval=0.8, maxval=1.2)
+            perturbed = param * random.uniform(
+                param_rnd, (), dtype=jnp.float32,
+                minval=param_explore.perturb_rnd_min,
+                maxval=param_explore.perturb_rnd_max)
+
+            if param_explore.clip_perturb:
+                perturbed = jnp.clip(a=perturbed, a_min=lo, a_max=hi)
+
+            return perturbed
 
         resample_rnd, param_rnd = random.split(rnd, 2)
         should_resample = random.uniform(resample_rnd, (), dtype=jnp.float32,
@@ -436,20 +497,46 @@ def pbt_explore_train_hyperparams(
         return lax.cond(should_resample, resample_param, perturb_param,
                         param_rnd, param)
 
-    if cfg.pbt.lr_explore_range != None:
-        hyper_params = hyper_params.replace(
-            lr = explore_param(lr_rnd, hyper_params.lr,
-                               cfg.lr, cfg.pbt.lr_explore_range),
+    lr_rnd, entropy_rnd, reward_hyper_params_rnd = random.split(explore_rng, 3)
+
+    if policy_state.reward_hyper_params != None:
+        reward_hyper_params = policy_state.reward_hyper_params
+        assert reward_hyper_params.ndim == 1
+
+        reward_hyper_params_rnd = random.split(
+            reward_hyper_params_rnd, reward_hyper_params.shape[0])
+
+        for i, (name, param_explore) in enumerate(
+                cfg.pbt.reward_hyper_params_explore.items()):
+            new_param = explore_param(reward_hyper_params_rnd[i],
+                                      reward_hyper_params[i], param_explore)
+
+            reward_hyper_params = reward_hyper_params.at[i].set(new_param)
+
+        policy_state = policy_state.update(
+            reward_hyper_params = reward_hyper_params,
+        )
+
+    train_hyper_params = train_state.hyper_params
+
+    if isinstance(cfg.lr, ParamExplore):
+        train_hyper_params = train_hyper_params.replace(
+            lr = explore_param(lr_rnd, train_hyper_params.lr, cfg.lr),
         )
 
     # FIXME, entropy is PPO specific, should have an algo permutation function
-    if cfg.pbt.entropy_explore_range != None:
-        hyper_params = hyper_params.replace(
-            entropy_coef = explore_param(entropy_rnd, hyper_params.entropy_coef,
-                cfg.algo.entropy_coef, cfg.pbt.entropy_explore_range),
+    if isinstance(cfg.algo.entropy_coef, ParamExplore):
+        train_hyper_params = train_hyper_params.replace(
+            entropy_coef = explore_param(
+                entropy_rnd, train_hyper_params.entropy_coef,
+                cfg.algo.entropy_coef),
         )
 
-    return hyper_params
+    train_state = train_state.update(
+        hyper_params = train_hyper_params,
+    )
+
+    return policy_state, train_state
 
 def _pbt_cull_update(
     cfg: TrainConfig,
@@ -482,20 +569,8 @@ def _pbt_cull_update(
                 update_prng_key = train_states.update_prng_key[dst_idx],
             )
 
-            reward_mutate_rng, train_mutate_rng = random.split(mutate_rng, 2)
-
-            if src_policy_state.reward_hyper_params != None:
-                reward_hyper_params = src_policy_state.mutate_reward_hyper_params(
-                    reward_mutate_rng, src_policy_state.reward_hyper_params)
-
-                src_policy_state = src_policy_state.update(
-                    reward_hyper_params = reward_hyper_params,
-                )
-
-            src_train_state = src_train_state.update(
-                hyper_params = pbt_explore_train_hyperparams(
-                    cfg, train_mutate_rng, src_train_state.hyper_params, 0.2),
-            )
+            src_policy_state, src_train_state = pbt_explore_hyperparams(
+                cfg, mutate_rng, src_policy_state, src_train_state, 0.2)
 
             return src_policy_state, src_train_state
 

@@ -7,10 +7,10 @@ import optax
 
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Union
 
 from .actor_critic import ActorCritic
-from .cfg import AlgoConfig, TrainConfig
+from .cfg import AlgoConfig, TrainConfig, ParamExplore
 from .metrics import TrainingMetrics, Metric
 from .profile import profile
 from .train_state import HyperParams, PolicyState, PolicyTrainState
@@ -26,7 +26,7 @@ class PPOConfig(AlgoConfig):
     num_mini_batches: int
     clip_coef: float
     value_loss_coef: float
-    entropy_coef: float
+    entropy_coef: Union[float, ParamExplore]
     max_grad_norm: float
     clip_value_loss: bool = False
     huber_value_loss: bool = True
@@ -50,9 +50,19 @@ class PPO(AlgoBase):
         self,
         cfg: TrainConfig,
     ):
+        if isinstance(cfg.lr, ParamExplore):
+            lr = cfg.lr.base
+        else:
+            lr = cfg.lr
+
+        if isinstance(cfg.algo.entropy_coef, ParamExplore):
+            entropy = cfg.algo.entropy_coef.base
+        else:
+            entropy = cfg.algo.entropy_coef
+
         return PPOHyperParams(
             # Common
-            lr = cfg.lr,
+            lr = lr,
             gamma = cfg.gamma,
             gae_lambda = cfg.gae_lambda,
             normalize_values = cfg.normalize_values,
@@ -60,7 +70,7 @@ class PPO(AlgoBase):
             # PPO
             clip_coef = cfg.algo.clip_coef,
             value_loss_coef = cfg.algo.value_loss_coef,
-            entropy_coef = cfg.algo.entropy_coef,
+            entropy_coef = entropy,
             max_grad_norm = cfg.algo.max_grad_norm,
         )
 

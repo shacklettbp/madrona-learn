@@ -14,6 +14,4 @@ from .observations import ObservationsPreprocess
 class Policy:
     actor_critic: ActorCritic
     obs_preprocess: Optional[ObservationsPreprocess] = None
-    init_reward_hyper_params: Optional[Callable] = None
-    mutate_reward_hyper_params: Optional[Callable] = None
-    get_team_a_score: Optional[Callable] = None
+    get_episode_scores: Optional[Callable] = None

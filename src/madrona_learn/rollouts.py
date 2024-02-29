@@ -18,6 +18,7 @@ from .pbt import (
     PBTMatchmakeConfig,
     pbt_init_matchmaking,
     pbt_update_matchmaking,
+    pbt_update_fitness,
 )
 from .profile import profile
 from .train_state import TrainStateManager, PolicyState, PolicyTrainState
@@ -761,17 +762,24 @@ def rollout_loop(
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
 
-            if rollout_cfg.pbt.complex_matchmaking:
-                match_results = step_output['pbt']['match_results']
+            try:
+                episode_results = step_output['pbt']['episode_results']
+            except KeyError:
+                episode_results = None
 
+            if rollout_cfg.pbt.complex_matchmaking:
                 policy_assignments, policy_states, prng_key = pbt_update_matchmaking(
-                    policy_assignments, policy_states, dones, match_results,
+                    policy_assignments, policy_states, dones, episode_results,
                     prng_key, rollout_cfg.pbt)
 
                 reorder_state = _compute_reorder_state(
                     policy_assignments,
                     rollout_cfg,
                 )
+            elif episode_results != None:
+                policy_states = pbt_update_fitness(
+                    policy_assignments, policy_states, dones, episode_results,
+                    rollout_cfg.pbt)
 
             cb_state = post_step_cb(
                 step_idx, dones, rewards, reorder_state, cb_state)

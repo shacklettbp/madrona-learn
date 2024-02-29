@@ -1,8 +1,9 @@
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Dict, Union
 
 import jax
 from jax import lax, random, numpy as jnp
+from flax.core import FrozenDict
 
 class AlgoConfig:
     def name(self):
@@ -13,21 +14,25 @@ class AlgoConfig:
 
 
 @dataclass(frozen=True)
-class ParamRange:
-    min: float
-    max: float
-    log10_space: bool = False
-    ln_space: bool = False
+class ParamExplore:
+    base: float
+    min_scale: float
+    max_scale: float
+    log10_scale: bool = False
+    ln_scale: bool = False
+    clip_perturb: bool = False
+    perturb_rnd_min: float = 0.8
+    perturb_rnd_max: float = 1.2
 
     def __repr__(self):
-        if self.log10_space:
-            type_str = "[log10]"
-        elif self.ln_space:
-            type_str = "[ln]"
+        if self.log10_scale:
+            type_str = "log10, "
+        elif self.ln_scale:
+            type_str = "ln, "
         else:
             type_str = ""
 
-        return f"{self.min}, {self.max} {type_str}"
+        return f"{self.base * self.min_scale}, {self.base * self.max_scale} [{type_str}{self.perturb_rnd_min, self.perturb_rnd_max}]"
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,7 @@ class PBTConfig:
     # policy being copied must have an expected winrate greater than this
     # threshold over the overwritten policy or the copy will be skipped
     policy_overwrite_threshold: float = 0.7
-    lr_explore_range: Optional[ParamRange] = None
-    entropy_explore_range: Optional[ParamRange] = None
+    reward_hyper_params_explore: Dict[str, ParamExplore] = FrozenDict({})
     # Purely a speed / memory parameter
     rollout_policy_chunk_size_override: int = 0
 
@@ -59,7 +63,7 @@ class TrainConfig:
     num_agents_per_world: int
     num_updates: int
     steps_per_update: int
-    lr: float
+    lr: Union[float, ParamExplore]
     algo: AlgoConfig
     num_bptt_chunks: int
     gamma: float

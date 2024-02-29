@@ -32,12 +32,10 @@ class PolicyState(flax.struct.PyTreeNode):
         pytree_node=False)
     obs_preprocess_state: FrozenDict[str, Any]
 
-    mutate_reward_hyper_params: Callable = flax.struct.field(
-        pytree_node=False)
-    reward_hyper_params: Optional[jax.Array]
+    reward_hyper_params: jax.Array
 
-    get_team_a_score_fn: Callable = flax.struct.field(pytree_node=False)
-    fitness_score: Optional[jax.Array]
+    get_episode_scores_fn: Callable = flax.struct.field(pytree_node=False)
+    fitness_score: jax.Array
 
     def update(
         self,
@@ -59,12 +57,11 @@ class PolicyState(flax.struct.PyTreeNode):
                 obs_preprocess_state if obs_preprocess_state != None else
                     self.obs_preprocess_state
             ),
-            mutate_reward_hyper_params = self.mutate_reward_hyper_params,
             reward_hyper_params = (
                 reward_hyper_params if reward_hyper_params != None else
                     self.reward_hyper_params
             ),
-            get_team_a_score_fn = self.get_team_a_score_fn,
+            get_episode_scores_fn = self.get_episode_scores_fn,
             fitness_score = (
                 fitness_score if fitness_score != None else
                     self.fitness_score
@@ -165,21 +162,13 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
         num_train_policies = loaded['train_states']['update_prng_key'].shape[0]
 
-        if policy.init_reward_hyper_params != None:
-            assert policy.mutate_reward_hyper_params != None
-            mutate_reward_hp_fn = policy.mutate_reward_hyper_params
+        reward_hyper_params = to_jax(
+            loaded['policy_states']['reward_hyper_params'])
 
-            reward_hyper_params = to_jax(
-                loaded['policy_states']['reward_hyper_params'])
-
+        if policy.get_episode_scores != None:
+            get_episode_scores_fn = policy.get_episode_scores
         else:
-            mutate_reward_hp_fn = lambda *args: None
-            reward_hyper_params = None
-
-        if policy.get_team_a_score != None:
-            get_team_a_score_fn = policy.get_team_a_score
-        else:
-            get_team_a_score_fn = lambda x: x
+            get_episode_scores_fn = lambda x: 0.0
 
         fitness_score = to_jax(loaded['policy_states']['fitness_score'])
 
@@ -193,7 +182,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
                 to_jax(loaded['policy_states']['obs_preprocess_state'])),
             mutate_reward_hyper_params = mutate_reward_hp_fn,
             reward_hyper_params = reward_hyper_params,
-            get_team_a_score_fn = get_team_a_score_fn,
+            get_episode_scores_fn = get_episode_scores_fn,
             fitness_score = fitness_score,
         ), num_train_policies
 
@@ -205,14 +194,14 @@ class TrainStateManager(flax.struct.PyTreeNode):
         base_rng,
         example_obs,
         example_rnn_states,
-        track_policy_fitness,
+        track_policy_elo,
         checkify_errors,
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
         def make_policies(rnd, obs, rnn_states):
             return _make_policies(policy, cfg, algo, rnd, obs,
-                                  rnn_states, track_policy_fitness)
+                rnn_states, track_policy_elo)
 
         make_policies = jax.jit(checkify.checkify(
             make_policies, errors=checkify_errors))
@@ -244,7 +233,8 @@ def _setup_value_normalizer(hyper_params, fake_values):
 
 def _setup_policy_state(
     policy,
-    track_policy_fitness,
+    cfg,
+    track_policy_elo,
     prng_key,
     rnn_states,
     obs,
@@ -257,19 +247,6 @@ def _setup_policy_state(
     preprocessed_obs = obs_preprocess.preprocess(
         obs_preprocess_state, obs, False)
 
-    if policy.init_reward_hyper_params == None:
-        assert policy.mutate_reward_hyper_params == None
-
-        mutate_reward_hp_fn = lambda *args: None
-        reward_hyper_params = None
-    else:
-        assert policy.mutate_reward_hyper_params != None
-        prng_key, reward_hyper_params_rnd = random.split(prng_key, 2)
-
-        mutate_reward_hp_fn = policy.mutate_reward_hyper_params
-        reward_hyper_params = policy.init_reward_hyper_params(
-            reward_hyper_params_rnd)
-
     # The second prng key is passed as the key for sampling
     (fake_outs, rnn_states), variables = actor_critic.init_with_output(
         prng_key, random.PRNGKey(0), rnn_states, preprocessed_obs,
@@ -278,12 +255,23 @@ def _setup_policy_state(
     params = variables['params']
     batch_stats = variables.get('batch_stats', {})
 
-    if track_policy_fitness:
-        get_team_a_score_fn = policy.get_team_a_score
-        fitness_score = jnp.array([1500], dtype=jnp.float32)
+    num_reward_hyperparams = 0
+    if cfg.pbt:
+        num_reward_hyperparams = len(cfg.pbt.reward_hyper_params_explore)
+
+    reward_hyper_params = jnp.zeros((num_reward_hyperparams,), jnp.float32)
+
+    if not policy.get_episode_scores:
+        assert not track_policy_elo
+
+        get_episode_scores_fn = lambda x: 0.0
+        fitness_score = jnp.array([0.0], dtype=jnp.float32)
     else:
-        get_team_a_score_fn = lambda x: x
-        fitness_score = None
+        get_episode_scores_fn = policy.get_episode_scores
+        if track_policy_elo:
+            fitness_score = jnp.array([1500], dtype=jnp.float32)
+        else:
+            fitness_score = jnp.array([0.0], dtype=jnp.float32)
 
     return PolicyState(
         apply_fn = actor_critic.apply,
@@ -292,9 +280,8 @@ def _setup_policy_state(
         batch_stats = batch_stats,
         obs_preprocess = obs_preprocess,
         obs_preprocess_state = obs_preprocess_state,
-        mutate_reward_hyper_params = mutate_reward_hp_fn,
         reward_hyper_params = reward_hyper_params,
-        get_team_a_score_fn = get_team_a_score_fn,
+        get_episode_scores_fn = get_episode_scores_fn,
         fitness_score = fitness_score,
     ), fake_outs, rnn_states
 
@@ -336,10 +323,10 @@ def _make_policies(
     base_init_rnd,
     example_obs,
     example_rnn_states,
-    track_policy_fitness,
+    track_policy_elo,
 ):
     setup_policy_state = partial(
-        _setup_policy_state, policy, track_policy_fitness)
+        _setup_policy_state, policy, cfg, track_policy_elo)
     setup_policy_states = jax.vmap(setup_policy_state)
 
     if cfg.pbt != None:

@@ -3,7 +3,7 @@ from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (
     TrainConfig,
     PBTConfig,
-    ParamRange,
+    ParamExplore,
 )
 from madrona_learn.action import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
@@ -26,7 +26,7 @@ from madrona_learn.policy import Policy
 
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn", 
-    "TrainConfig", "PBTConfig", "CustomMetricConfig", "ParamRange",
+    "TrainConfig", "PBTConfig", "CustomMetricConfig", "ParamExplore",
     "eval_load_ckpt", "eval_policies", "EvalConfig",
     "Policy", "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",

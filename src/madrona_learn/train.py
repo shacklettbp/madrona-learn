@@ -19,7 +19,7 @@ from .algo_common import AlgoBase
 from .metrics import CustomMetricConfig, TrainingMetrics
 from .moving_avg import EMANormalizer
 from .train_state import PolicyTrainState, TrainStateManager
-from .pbt import pbt_update, pbt_explore_train_hyperparams
+from .pbt import pbt_update, pbt_explore_hyperparams
 from .policy import Policy
 from .profile import profile
 
@@ -249,34 +249,42 @@ def _train_impl(
         base_rng = init_rng,
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
-        track_policy_fitness = rollout_cfg.pbt.complex_matchmaking,
+        track_policy_elo = rollout_cfg.pbt.complex_matchmaking,
         checkify_errors = checkify_errors,
     )
 
     @partial(jax.jit, donate_argnums=0)
-    def sample_train_hyperparams(train_state_mgr):
+    def sample_hyperparams(train_state_mgr):
+        policy_states = train_state_mgr.policy_states
         train_states = train_state_mgr.train_states
         pbt_rng = train_state_mgr.pbt_rng
 
         explore_hyperparams = jax.vmap(
-            pbt_explore_train_hyperparams, in_axes=(None, 0, 0, None))
+            pbt_explore_hyperparams, in_axes=(None, 0, 0, 0, None))
 
         rngs = random.split(pbt_rng, cfg.pbt.num_train_policies + 1)
         pbt_rng = rngs[0]
         explore_rngs = rngs[1:]
 
-        train_states = train_states.update(
-            hyper_params = explore_hyperparams(
-                cfg, explore_rngs, train_states.hyper_params, 1.0),
+        train_policy_states = jax.tree_map(
+            lambda x: x[0:cfg.pbt.num_train_policies], policy_states)
+
+        train_policy_states, train_states = explore_hyperparams(
+            cfg, explore_rngs, train_policy_states, train_states, 1.0,
         )
 
+        policy_states = jax.tree_map(
+            lambda x, y: x.at[0:cfg.pbt.num_train_policies].set(y),
+            policy_states, train_policy_states)
+
         return train_state_mgr.replace(
+            policy_states = policy_states,
             train_states = train_states,
             pbt_rng = pbt_rng,
         )
 
     if cfg.pbt:
-        train_state_mgr = sample_train_hyperparams(train_state_mgr)
+        train_state_mgr = sample_hyperparams(train_state_mgr)
 
     if restore_ckpt != None:
         train_state_mgr, start_update_idx = train_state_mgr.load(restore_ckpt)
