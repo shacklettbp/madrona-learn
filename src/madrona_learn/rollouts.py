@@ -161,7 +161,7 @@ class RolloutState(flax.struct.PyTreeNode):
     prng_key: random.PRNGKey
     rnn_states: Any
     reorder_state: PolicyBatchReorderState
-    policy_assignments: Optional[jax.Array]
+    policy_assignments: jax.Array
 
     @staticmethod
     def create(

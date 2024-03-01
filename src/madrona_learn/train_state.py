@@ -186,6 +186,12 @@ class TrainStateManager(flax.struct.PyTreeNode):
         episode_score = to_jax(loaded['policy_states']['episode_score'])
         mmr = to_jax(loaded['policy_states']['mmr'])
 
+        if episode_score != None:
+            episode_score = MovingEpisodeScore(**episode_score)
+
+        if mmr != None:
+            mmr = MMR(**mmr)
+
         return PolicyState(
             apply_fn = actor_critic.apply,
             rnn_reset_fn = actor_critic.clear_recurrent_state,
@@ -194,7 +200,6 @@ class TrainStateManager(flax.struct.PyTreeNode):
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = frozen_dict.freeze(
                 to_jax(loaded['policy_states']['obs_preprocess_state'])),
-            mutate_reward_hyper_params = mutate_reward_hp_fn,
             reward_hyper_params = reward_hyper_params,
             get_episode_scores_fn = get_episode_scores_fn,
             episode_score = episode_score,

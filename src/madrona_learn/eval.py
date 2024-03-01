@@ -25,6 +25,7 @@ class EvalConfig:
     team_size: int
     num_eval_steps: int
     policy_dtype: jnp.dtype
+    eval_competitive: bool
     use_deterministic_policy: bool = True
     clear_fitness: bool = True
 
@@ -89,16 +90,32 @@ def _eval_policies_impl(
     num_agents_per_world = eval_cfg.team_size * eval_cfg.num_teams
     sim_batch_size = eval_cfg.num_worlds * num_agents_per_world
 
-    num_eval_policies = policy_states.fitness_score.shape[0]
+    if eval_cfg.eval_competitive:
+        num_eval_policies = policy_states.mmr.elo.shape[0]
+    else:
+        num_eval_policies = policy_states.episode_score.mean.shape[0]
 
     if eval_cfg.clear_fitness:
+        def reset_mmr(mmr):
+            if mmr == None:
+                return None
+
+            return mmr.replace(elo=mmr.elo.at[:].set(1500))
+
+        def reset_episode_score(episode_score):
+            if episode_score == None:
+                return None
+
+            return jax.tree_map(lambda x: x.at[:].set(0), episode_score)
+
         policy_states = policy_states.update(
-            fitness_score = policy_states.fitness_score.at[:, 0].set(1500),
+            mmr = reset_mmr(policy_states.mmr),
+            episode_score = reset_episode_score(policy_states.episode_score),
         )
 
-    if num_eval_policies == 1:
+    if num_eval_policies == 1 or not eval_cfg.eval_competitive:
         rollout_cfg = RolloutConfig.setup(
-            num_current_policies = 1,
+            num_current_policies = num_eval_policies,
             num_past_policies = 0,
             num_teams = 1,
             team_size = 1,
@@ -221,4 +238,7 @@ def _eval_policies_impl(
         *rollout_loop_args)
     err.throw()
 
-    return policy_states.fitness_score
+    if eval_cfg.eval_competitive:
+        return policy_states.mmr
+    else:
+        return policy_states.episode_score
