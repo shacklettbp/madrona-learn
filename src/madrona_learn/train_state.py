@@ -76,7 +76,7 @@ class PolicyState(flax.struct.PyTreeNode):
             get_episode_scores_fn = self.get_episode_scores_fn,
             episode_score = (
                 episode_score if episode_score != None else
-                    self.episode_score,
+                    self.episode_score
             ),
             mmr = mmr if mmr != None else self.mmr,
         )

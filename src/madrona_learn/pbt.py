@@ -310,13 +310,12 @@ def _update_competitive_fitness(
         diffs = compute_differences(episode_results, a_assignments,
                                     b_assignments, dones)
 
-        K = jnp.array([8], dtype=jnp.float32)
+        K = 8.0
+        new_elo = cur_mmr.elo + K * diffs.sum()
 
-        return cur_mmr.replace(
-            elo = cur_mmr.elo + K * diffs.sum(),
-        )
+        return cur_mmr.replace(elo=new_elo)
 
-    new_mmr = jax.vmap(update_elo)(
+    new_mmr = jax.vmap(update_mmr)(
         jnp.arange(policy_states.mmr.elo.shape[0]),
         policy_states.mmr)
 
