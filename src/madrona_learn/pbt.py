@@ -406,12 +406,13 @@ def pbt_update_fitness(
         x_N = valids.sum()
 
         def update_moving_avg(cur_episode_score):
-            x_mean = jnp.mean(scores, where=valids)
-            x_var = jnp.var(scores, where=valids, ddof=1)
+            x_mean = jnp.mean(x_scores, where=valids)
+            x_var = jnp.var(x_scores, where=valids, ddof=1)
 
             mean_delta = x_mean - cur_episode_score.mean
 
-            cur_weight = jnp.expm1(x_N * jnp.log(ema_decay)) + 1
+            cur_weight = jnp.expm1(
+                x_N.astype(jnp.float32) * jnp.log(ema_decay)) + 1
             x_weight = 1 - cur_weight
 
             N_max = jnp.iinfo(cur_episode_score.N.dtype).max
@@ -439,12 +440,11 @@ def pbt_update_fitness(
 
         return lax.cond(x_N > 0, update_moving_avg, skip, cur_episode_score)
 
-    new_avg_episode_scores = jax.vmap(update_avg_episode_score)(
+    new_episode_scores = jax.vmap(update_policy_episode_score)(
         jnp.arange(policy_states.episode_score.mean.shape[0]),
         policy_states.episode_score)
 
-    policy_states = policy_states.update(
-        episode_score = new_avg_episode_scores)
+    policy_states = policy_states.update(episode_score=new_episode_scores)
 
     return policy_states
 
@@ -575,8 +575,8 @@ def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
         dst_var = policy_states.episode_score.var[dst_idx]
         dst_N = policy_states.episode_score.N[dst_idx]
 
-        src_s2 = src_var / src_N
-        dst_s2 = dst_var / dst_N
+        src_s2 = src_var / src_N.astype(jnp.float32)
+        dst_s2 = dst_var / dst_N.astype(jnp.float32)
 
         t = (src_mean - dst_mean) / jnp.sqrt(src_s2 + dst_s2)
 

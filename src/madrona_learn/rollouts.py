@@ -177,15 +177,10 @@ class RolloutState(flax.struct.PyTreeNode):
             assert (rollout_cfg.pbt.static_play_batch_size ==
                     static_play_assignments.shape[0])
 
-        if (rollout_cfg.pbt.cross_play_batch_size > 0 or
-              rollout_cfg.pbt.past_play_batch_size > 0 or
-              rollout_cfg.pbt.static_play_batch_size > 0): 
-            prng_key, assign_rnd = random.split(prng_key)
-            policy_assignments = pbt_init_matchmaking(
-                assign_rnd, rollout_cfg.pbt, static_play_assignments)
-            assert policy_assignments.shape[0] == rollout_cfg.sim_batch_size
-        else:
-            policy_assignments = None
+        prng_key, assign_rnd = random.split(prng_key)
+        policy_assignments = pbt_init_matchmaking(
+            assign_rnd, rollout_cfg.pbt, static_play_assignments)
+        assert policy_assignments.shape[0] == rollout_cfg.sim_batch_size
 
         reorder_state = _compute_reorder_state(policy_assignments, rollout_cfg)
 
@@ -738,7 +733,7 @@ def rollout_loop(
 
             pbt_inputs = FrozenDict({})
 
-            if rollout_cfg.pbt.complex_matchmaking:
+            if rollout_cfg.pbt.total_num_policies > 1:
                 pbt_inputs = pbt_inputs.copy({
                     'policy_assignments': policy_assignments,
                 })

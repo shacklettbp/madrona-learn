@@ -15,7 +15,7 @@ from madrona_learn import (
 init(0.5)
 
 from madrona_learn.train_state import (
-    PolicyState, PolicyTrainState, TrainStateManager
+    PolicyState, PolicyTrainState, TrainStateManager, MMR
 )
 
 from madrona_learn.rollouts import (
@@ -361,10 +361,10 @@ def fake_rollout_setup(
             batch_stats = {},
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = obs_preprocess_state,
-            mutate_reward_hyper_params = lambda *args: None,
             reward_hyper_params = None,
-            get_team_a_score_fn = lambda x: 0.0,
-            fitness_score = jnp.array([1500], dtype=jnp.float32),
+            get_episode_scores_fn = lambda x: (0.0, 0.0),
+            mmr = MMR(elo=0),
+            episode_score=None,
         )
 
     rnd, rnd_init = random.split(rnd)
