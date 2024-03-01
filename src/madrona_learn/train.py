@@ -249,7 +249,7 @@ def _train_impl(
         base_rng = init_rng,
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
-        track_policy_elo = rollout_cfg.pbt.complex_matchmaking,
+        use_competitive_mmr = rollout_cfg.pbt.complex_matchmaking,
         checkify_errors = checkify_errors,
     )
 

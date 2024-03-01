@@ -21,6 +21,16 @@ from .moving_avg import EMANormalizer
 from .observations import ObservationsPreprocess, ObservationsPreprocessNoop
 from .policy import Policy
 
+class MovingEpisodeScore(flax.struct.PyTreeNode):
+    mean: jax.Array
+    var: jax.Array
+    N: jax.Array
+
+
+class MMR(flax.struct.PyTreeNode):
+    elo: jax.Array
+
+
 class PolicyState(flax.struct.PyTreeNode):
     apply_fn: Callable = flax.struct.field(pytree_node=False)
     rnn_reset_fn: Callable = flax.struct.field(pytree_node=False)
@@ -35,7 +45,8 @@ class PolicyState(flax.struct.PyTreeNode):
     reward_hyper_params: jax.Array
 
     get_episode_scores_fn: Callable = flax.struct.field(pytree_node=False)
-    fitness_score: jax.Array
+    episode_score: Optional[MovingEpisodeScore]
+    mmr: Optional[MMR]
 
     def update(
         self,
@@ -43,7 +54,8 @@ class PolicyState(flax.struct.PyTreeNode):
         batch_stats = None,
         obs_preprocess_state = None,
         reward_hyper_params = None,
-        fitness_score = None,
+        episode_score = None,
+        mmr = None,
     ):
         return PolicyState(
             apply_fn = self.apply_fn,
@@ -62,10 +74,11 @@ class PolicyState(flax.struct.PyTreeNode):
                     self.reward_hyper_params
             ),
             get_episode_scores_fn = self.get_episode_scores_fn,
-            fitness_score = (
-                fitness_score if fitness_score != None else
-                    self.fitness_score
+            episode_score = (
+                episode_score if episode_score != None else
+                    self.episode_score,
             ),
+            mmr = mmr if mmr != None else self.mmr,
         )
 
 
@@ -170,7 +183,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
         else:
             get_episode_scores_fn = lambda x: 0.0
 
-        fitness_score = to_jax(loaded['policy_states']['fitness_score'])
+        episode_score = to_jax(loaded['policy_states']['episode_score'])
+        mmr = to_jax(loaded['policy_states']['mmr'])
 
         return PolicyState(
             apply_fn = actor_critic.apply,
@@ -183,7 +197,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
             mutate_reward_hyper_params = mutate_reward_hp_fn,
             reward_hyper_params = reward_hyper_params,
             get_episode_scores_fn = get_episode_scores_fn,
-            fitness_score = fitness_score,
+            episode_score = episode_score,
+            mmr = mmr,
         ), num_train_policies
 
     @staticmethod
@@ -194,14 +209,14 @@ class TrainStateManager(flax.struct.PyTreeNode):
         base_rng,
         example_obs,
         example_rnn_states,
-        track_policy_elo,
+        use_competitive_mmr,
         checkify_errors,
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
         def make_policies(rnd, obs, rnn_states):
             return _make_policies(policy, cfg, algo, rnd, obs,
-                rnn_states, track_policy_elo)
+                rnn_states, use_competitive_mmr)
 
         make_policies = jax.jit(checkify.checkify(
             make_policies, errors=checkify_errors))
@@ -234,7 +249,7 @@ def _setup_value_normalizer(hyper_params, fake_values):
 def _setup_policy_state(
     policy,
     cfg,
-    track_policy_elo,
+    use_competitive_mmr,
     prng_key,
     rnn_states,
     obs,
@@ -262,16 +277,20 @@ def _setup_policy_state(
     reward_hyper_params = jnp.zeros((num_reward_hyperparams,), jnp.float32)
 
     if not policy.get_episode_scores:
-        assert not track_policy_elo
-
         get_episode_scores_fn = lambda x: 0.0
-        fitness_score = jnp.array([0.0], dtype=jnp.float32)
     else:
         get_episode_scores_fn = policy.get_episode_scores
-        if track_policy_elo:
-            fitness_score = jnp.array([1500], dtype=jnp.float32)
-        else:
-            fitness_score = jnp.array([0.0], dtype=jnp.float32)
+
+    if use_competitive_mmr:
+        mmr = MMR(elo = jnp.array(1500, jnp.float32))
+        episode_score = None
+    else:
+        mmr = None
+        episode_score = MovingEpisodeScore(
+            mean = jnp.array(0, jnp.float32),
+            var = jnp.array(0, jnp.float32),
+            N = jnp.array(0, jnp.int32),
+        )
 
     return PolicyState(
         apply_fn = actor_critic.apply,
@@ -282,7 +301,8 @@ def _setup_policy_state(
         obs_preprocess_state = obs_preprocess_state,
         reward_hyper_params = reward_hyper_params,
         get_episode_scores_fn = get_episode_scores_fn,
-        fitness_score = fitness_score,
+        episode_score = episode_score,
+        mmr = mmr,
     ), fake_outs, rnn_states
 
 def _setup_train_state(
@@ -323,10 +343,10 @@ def _make_policies(
     base_init_rnd,
     example_obs,
     example_rnn_states,
-    track_policy_elo,
+    use_competitive_mmr,
 ):
     setup_policy_state = partial(
-        _setup_policy_state, policy, cfg, track_policy_elo)
+        _setup_policy_state, policy, cfg, use_competitive_mmr)
     setup_policy_states = jax.vmap(setup_policy_state)
 
     if cfg.pbt != None:

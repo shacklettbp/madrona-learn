@@ -12,7 +12,10 @@ from typing import Callable, List, Optional
 
 from .algo_common import HyperParams
 from .cfg import TrainConfig, PBTConfig, ParamExplore
-from .train_state import PolicyState, PolicyTrainState, TrainStateManager
+from .train_state import (
+    PolicyState, PolicyTrainState, TrainStateManager,
+    MMR, MovingEpisodeScore,
+)
 
 @dataclass(frozen=True)
 class PBTMatchmakeConfig:
@@ -268,7 +271,7 @@ def _update_competitive_fitness(
     b_assignments = assignments[:, 1, 0, 0]
     dones = dones[:, 0, 0, :]
 
-    def update_elo(policy_idx, cur_fitness_score):
+    def update_mmr(policy_idx, cur_mmr):
         @jax.vmap
         def compute_differences(episode_result, a_assignment, b_assignment, done):
             is_a = a_assignment == policy_idx
@@ -286,10 +289,10 @@ def _update_competitive_fitness(
                 a_score, b_score = policy_states.get_episode_scores_fn(
                     episode_result)
 
-                a_elo = policy_states.fitness_score[a_assignment, 0]
-                b_elo = policy_states.fitness_score[b_assignment, 0]
+                a_elo = policy_states.mmr.elo[a_assignment]
+                b_elo = policy_states.mmr.elo[b_assignment]
 
-                my_score = jnp.where(is_b, 1 - a_score, a_score)
+                my_score = jnp.where(is_a, a_score, b_score)
 
                 my_elo = jnp.where(is_a, a_elo, b_elo)
                 opponent_elo = jnp.where(is_a, b_elo, a_elo)
@@ -307,32 +310,19 @@ def _update_competitive_fitness(
         diffs = compute_differences(episode_results, a_assignments,
                                     b_assignments, dones)
 
-        #expected_current_policy_matches = (
-        #    (mm_cfg.num_cross_play_matches * 2 +
-        #        mm_cfg.num_past_play_matches) /
-        #    mm_cfg.num_current_policies)
-
-        #if mm_cfg.num_past_policies > 0:
-        #    expected_past_policy_matches = (
-        #        mm_cfg.num_past_play_matches / mm_cfg.num_past_policies)
-
-        #    current_reweight = (expected_past_policy_matches /
-        #                        expected_current_policy_matches)
-        #else:
-        #    current_reweight = 1
-        #K = jnp.where(policy_idx < mm_cfg.num_current_policies,
-        #              current_reweight * K, K)
-
         K = jnp.array([8], dtype=jnp.float32)
 
-        return cur_fitness_score + K * diffs.sum()
-        #return jnp.clip(cur_fitness_score + K * diffs.sum(), a_min=100)
+        return cur_mmr.replace(
+            elo = cur_mmr.elo + K * diffs.sum(),
+        )
 
-    new_fitness_scores = jax.vmap(update_elo)(
-        jnp.arange(policy_states.fitness_score.shape[0]),
-        policy_states.fitness_score)
+    new_mmr = jax.vmap(update_elo)(
+        jnp.arange(policy_states.mmr.elo.shape[0]),
+        policy_states.mmr)
 
-    policy_states = policy_states.update(fitness_score=new_fitness_scores)
+    policy_states = policy_states.update(
+        mmr = new_mmr,
+    )
 
     return policy_states
 
@@ -385,6 +375,7 @@ def pbt_update_fitness(
     mm_cfg,
 ):
     assert mm_cfg.num_teams == 1
+    assert policy_states.mmr == None and policy_states.episode_score != None
 
     assignments = assignments.reshape(
         mm_cfg.num_total_matches, mm_cfg.team_size)
@@ -397,7 +388,7 @@ def pbt_update_fitness(
     # Note this ema is biased but equally so it seems like it shouldn't matter
     ema_decay = 0.9999
 
-    def update_fitness(policy_idx, cur_fitness_score):
+    def update_policy_episode_score(policy_idx, cur_episode_score):
         @jax.vmap
         def get_scores(episode_result, assignment, done):
             def valid(episode_result):
@@ -410,42 +401,53 @@ def pbt_update_fitness(
 
             return lax.cond(is_valid, valid, invalid, episode_result)
 
-        scores, valids = get_scores(
+        x_scores, valids = get_scores(
             episode_results, assignments, dones)
 
-        num_valids = valids.sum()
+        x_N = valids.sum()
 
-        new_avg_score = scores.sum() / num_valids
+        def update_moving_avg(cur_episode_score):
+            x_mean = jnp.mean(scores, where=valids)
+            x_var = jnp.var(scores, where=valids, ddof=1)
 
-        cur_weight = jnp.expm1(num_valids * jnp.log(ema_decay)) + 1
-        new_weight = 1 - cur_weight
+            mean_delta = x_mean - cur_episode_score.mean
 
-        return cur_weight * cur_fitness_score + new_weight * new_avg_score
+            cur_weight = jnp.expm1(x_N * jnp.log(ema_decay)) + 1
+            x_weight = 1 - cur_weight
 
-    new_fitness_scores = jax.vmap(update_elo)(
-        jnp.arange(policy_states.fitness_score.shape[0]),
-        policy_states.fitness_score)
+            N_max = jnp.iinfo(cur_episode_score.N.dtype).max
 
-    policy_states = policy_states.update(fitness_score=new_fitness_scores)
+            # Saturate new_N. At this point the scaling factor between cur_N 
+            # and new_N would be very very close to 1 anyway.
+            cur_N = cur_episode_score.N
+            new_N = jnp.where(x_N > N_max - cur_N, N_max, cur_N + x_N)
+
+            new_mean = cur_weight * cur_episode_score.mean + x_weight * x_mean
+            new_var = (
+                cur_weight * cur_episode_score.var + x_weight * x_var +
+                (cur_N.astype(jnp.float32) / (new_N.astype(jnp.float32) - 1)) *
+                    (cur_weight * x_weight) * jnp.square(mean_delta)
+            )
+
+            return cur_episode_score.replace(
+                mean = new_mean,
+                var = new_var,
+                N = new_N,
+            )
+
+        def skip(cur_episode_score):
+            return cur_episode_score
+
+        return lax.cond(x_N > 0, update_moving_avg, skip, cur_episode_score)
+
+    new_avg_episode_scores = jax.vmap(update_avg_episode_score)(
+        jnp.arange(policy_states.episode_score.mean.shape[0]),
+        policy_states.episode_score)
+
+    policy_states = policy_states.update(
+        episode_score = new_avg_episode_scores)
 
     return policy_states
-
-def _rebase_elos(policy_states):
-    # Rebase elo so average is 1500
-    elos = policy_states.fitness_score[..., 0]
-    elo_correction = jnp.mean(elos) - 1500
-
-    return policy_states.update(
-        fitness_score = policy_states.fitness_score - elo_correction,
-    )
-
-
-def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
-    src_elo = policy_states.fitness_score[src_idx, 0]
-    dst_elo = policy_states.fitness_score[dst_idx, 0]
-
-    src_expected_winrate = _elo_expected_result(src_elo, dst_elo)
-    return src_expected_winrate >= cfg.pbt.policy_overwrite_threshold
 
 def pbt_explore_hyperparams(
     cfg: TrainConfig,
@@ -538,6 +540,59 @@ def pbt_explore_hyperparams(
 
     return policy_state, train_state
 
+
+def _rebase_fitness(policy_states):
+    if policy_states.mmr == None:
+        return policy_states
+
+    mmrs = policy_states.mmr
+
+    # Rebase elo so average is 1500
+    elo_correction = jnp.mean(mmrs.elo) - 1500
+
+    mmrs = mmrs.replace(elo = mmrs.elo - elo_correction)
+
+    return policy_states.update(mmr=mmrs)
+
+
+def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
+    if policy_states.mmr != None:
+        src_elo = policy_states.mmr.elo[src_idx]
+        dst_elo = policy_states.mmr.elo[dst_idx]
+
+        src_expected_winrate = _elo_expected_result(src_elo, dst_elo)
+        return src_expected_winrate >= cfg.pbt.policy_overwrite_threshold
+    else:
+        src_episode_score = jax.tree_map(
+            lambda x: x[src_idx], policy_states.episode_score)
+        dst_episode_score = jax.tree_map(
+            lambda x: x[dst_idx], policy_states.episode_score)
+
+        src_mean = policy_states.episode_score.mean[src_idx]
+        src_var = policy_states.episode_score.var[src_idx]
+        src_N = policy_states.episode_score.N[src_idx]
+
+        dst_mean = policy_states.episode_score.mean[dst_idx]
+        dst_var = policy_states.episode_score.var[dst_idx]
+        dst_N = policy_states.episode_score.N[dst_idx]
+
+        src_s2 = src_var / src_N
+        dst_s2 = dst_var / dst_N
+
+        t = (src_mean - dst_mean) / jnp.sqrt(src_s2 + dst_s2)
+
+        p = 1 - jax.scipy.stats.norm.cdf(t)
+
+        return p < 0.20
+
+
+def _get_fitness_scores(policy_states):
+    if policy_states.mmr != None:
+        return policy_states.mmr.elo
+    else:
+        return policy_states.episode_score.mean
+
+
 def _pbt_cull_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
@@ -548,8 +603,8 @@ def _pbt_cull_update(
 
     assert 2 * cfg.pbt.num_cull_policies < cfg.pbt.num_train_policies
 
-    sort_idxs = jnp.argsort(policy_states.fitness_score[
-        0:cfg.pbt.num_train_policies, 0])
+    fitness_scores = _get_fitness_scores(policy_states)
+    sort_idxs = jnp.argsort(fitness_scores[0:cfg.pbt.num_train_policies])
     
     bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
     top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
@@ -605,7 +660,7 @@ def _pbt_cull_update(
     train_states = jax.tree_map(
         overwrite_param, train_states, overwrite_train_states)
 
-    policy_states = _rebase_elos(policy_states)
+    policy_states = _rebase_fitness(policy_states)
 
     return train_state_mgr.replace(
         policy_states = policy_states,
@@ -625,8 +680,10 @@ def _pbt_past_update(
     pbt_rng = train_state_mgr.pbt_rng
     pbt_rng, src_idx_rng = random.split(pbt_rng, 2)
 
+    fitness_scores = _get_fitness_scores(policy_states)
+
     src_idx = random.randint(src_idx_rng, (), 0, cfg.pbt.num_train_policies)
-    dst_idx = jnp.argmin(policy_states.fitness_score[cfg.pbt.num_train_policies:])
+    dst_idx = jnp.argmin(fitness_scores[cfg.pbt.num_train_policies:])
     dst_idx = dst_idx + cfg.pbt.num_train_policies
 
     def overwrite_past_policy(policy_states):
@@ -634,7 +691,6 @@ def _pbt_past_update(
             return x.at[dst_idx].set(x[src_idx])
 
         policy_states = jax.tree_map(save_param, policy_states)
-        policy_states = _rebase_elos(policy_states)
 
         jax.debug.print("Past {} {}", src_idx, dst_idx, ordered=True)
 
@@ -648,6 +704,8 @@ def _pbt_past_update(
     policy_states = lax.cond(should_overwrite,
         overwrite_past_policy, noop, policy_states)
 
+    policy_states = _rebase_fitness(policy_states)
+
     return train_state_mgr.replace(
         policy_states = policy_states,
         pbt_rng = pbt_rng,
@@ -660,7 +718,7 @@ def pbt_update(
     update_idx: jax.Array,
 ):
     if cfg.pbt == None:
-        return
+        return train_state_mgr
 
     def pbt_update_noop(train_state_mgr):
         return train_state_mgr
