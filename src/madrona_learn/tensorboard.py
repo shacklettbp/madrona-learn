@@ -41,8 +41,14 @@ class SummaryWriter:
         if not os.path.isdir(logdir):
             os.makedirs(logdir, exist_ok=True)
 
+        # I do not care about tensorflow informational warnings, just let me
+        # write my tensorboard file!
+        old_min_log_level = os.environ.get('TF_CPP_MIN_LOG_LEVEL', None)
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
         self.writer = EventFileWriter(logdir, queue_size, write_interval)
 
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = old_min_log_level
 
     def scalar(self, tag, scalar, step: int):
         self._add_event(step, Summary.Value(
