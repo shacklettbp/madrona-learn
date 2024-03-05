@@ -5,3 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "madrona_learn"
 version = "0.0.1"
+
+dependencies = [
+    "optax==0.1.9",
+    "orbax-checkpoint==0.5.3",
+    "flax==0.8.1",
+    "tensorboard==2.15.1",
+    "tensorboard-plugin-profile==2.15.0",
+]
