@@ -23,6 +23,7 @@ from madrona_learn.observations import (
     ObservationsEMANormalizer, ObservationsCaster,
 )
 from madrona_learn.policy import Policy
+from madrona_learn.tensorboard import SummaryWriter
 
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn", 
@@ -34,4 +35,5 @@ __all__ = [
     "BackboneEncoder", "RecurrentBackboneEncoder",
     "Backbone", "BackboneShared", "BackboneSeparate",
     "PPOConfig",
+    "SummaryWriter",
 ]

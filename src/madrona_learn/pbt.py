@@ -407,7 +407,11 @@ def pbt_update_fitness(
 
         def update_moving_avg(cur_episode_score):
             x_mean = jnp.mean(x_scores, where=valids)
-            x_var = jnp.var(x_scores, where=valids, ddof=1)
+
+            x_var = lax.cond(x_N > 1,
+                lambda scores, valids: jnp.var(scores, where=valids, ddof=1),
+                lambda scores, valids: jnp.float32(0),
+                x_scores, valids)
 
             mean_delta = x_mean - cur_episode_score.mean
 
@@ -422,11 +426,16 @@ def pbt_update_fitness(
             cur_N = cur_episode_score.N
             new_N = jnp.where(x_N > N_max - cur_N, N_max, cur_N + x_N)
 
+            def mean_delta_var():
+                scale = (cur_N.astype(jnp.float32) /
+                         ((new_N - 1).astype(jnp.float32)))
+
+                return scale * (cur_weight * x_weight) * jnp.square(mean_delta)
+
             new_mean = cur_weight * cur_episode_score.mean + x_weight * x_mean
             new_var = (
                 cur_weight * cur_episode_score.var + x_weight * x_var +
-                (cur_N.astype(jnp.float32) / (new_N.astype(jnp.float32) - 1)) *
-                    (cur_weight * x_weight) * jnp.square(mean_delta)
+                lax.cond(cur_N > 0, mean_delta_var, lambda: 0.0)
             )
 
             return cur_episode_score.replace(
@@ -581,6 +590,12 @@ def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
         t = (src_mean - dst_mean) / jnp.sqrt(src_s2 + dst_s2)
 
         p = 1 - jax.scipy.stats.norm.cdf(t)
+
+        jax.debug.print("{} {}, {} {}, {} {} {} {}", t, p,
+                        src_N, dst_N,
+                        src_mean, dst_mean,
+                        src_var,
+                        dst_var)
 
         return p < 0.20
 
