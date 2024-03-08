@@ -24,6 +24,7 @@ from madrona_learn.observations import (
 )
 from madrona_learn.policy import Policy
 from madrona_learn.tensorboard import SummaryWriter
+from madrona_learn.wandb import WandbWriter
 
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn", 
@@ -36,4 +37,5 @@ __all__ = [
     "Backbone", "BackboneShared", "BackboneSeparate",
     "PPOConfig",
     "SummaryWriter",
+    "WandbWriter",
 ]
