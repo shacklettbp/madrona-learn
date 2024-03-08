@@ -249,7 +249,7 @@ def _ppo(
     policy_state: PolicyState,
     train_state: PolicyTrainState,
     rollout_data: RolloutData,
-    metrics_cb: Callable,
+    user_metrics_cb: Callable,
     init_metrics: TrainingMetrics,
 ):
     def epoch_iter(epoch_i, inputs):
@@ -272,7 +272,7 @@ def _ppo(
                 cfg, mb, policy_state, train_state, metrics)
 
             with profile('Metrics Callback'):
-                metrics = metrics_cb(
+                metrics = user_metrics_cb(
                     metrics, epoch_i, mb, policy_state, train_state)
 
             return policy_state, train_state, metrics

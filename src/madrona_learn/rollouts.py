@@ -398,6 +398,7 @@ class RolloutManager:
         self,
         train_state_mgr: TrainStateManager,
         rollout_state: RolloutState,
+        user_metrics_cb: Callable,
         metrics: TrainingMetrics,
     ):
         policy_states = train_state_mgr.policy_states
@@ -447,7 +448,7 @@ class RolloutManager:
         with profile("Finalize Rollouts"):
             rollout_data, metrics = self._finalize_rollouts(
                 train_state_mgr.train_states, collect_state.store,
-                bootstrap_values, metrics)
+                bootstrap_values, user_metrics_cb, metrics)
 
         train_state_mgr = train_state_mgr.replace(
             policy_states = policy_states,
@@ -569,8 +570,8 @@ class RolloutManager:
             return collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
-    def _finalize_rollouts(self, train_states, rollouts,
-                           bootstrap_values, metrics):
+    def _finalize_rollouts(self, train_states, rollouts, bootstrap_values,
+                           user_metrics_cb, metrics):
         def invert_value_norm(train_state, v):
             return train_state.value_normalizer.invert(
                 train_state.value_normalizer_state, v)
@@ -640,6 +641,8 @@ class RolloutManager:
             metrics = metrics.record({
                 'Advantages': rollouts['advantages'],
             })
+
+        metrics = user_metrics_cb(metrics, rollouts)
 
         return RolloutData(
             data = rollouts.copy({

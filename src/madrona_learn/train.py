@@ -82,7 +82,8 @@ def _update_loop(
             with profile('Collect Rollouts'):
                 (train_state_mgr, rollout_state, rollout_data,
                  obs_stats, metrics) = rollout_mgr.collect(
-                    train_state_mgr, rollout_state, metrics)
+                    train_state_mgr, rollout_state,
+                    metrics_cfg.rollout_cb, metrics)
 
             train_policy_states = jax.tree_map(
                 lambda x: x[0:num_train_policies],
