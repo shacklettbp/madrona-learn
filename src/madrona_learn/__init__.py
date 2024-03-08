@@ -23,8 +23,7 @@ from madrona_learn.observations import (
     ObservationsEMANormalizer, ObservationsCaster,
 )
 from madrona_learn.policy import Policy
-from madrona_learn.tensorboard import SummaryWriter
-from madrona_learn.wandb import WandbWriter
+from madrona_learn.tensorboard import TensorboardWriter
 
 __all__ = [
     "init", "train", "TrainStateManager", "models", "rnn", 
@@ -36,6 +35,12 @@ __all__ = [
     "BackboneEncoder", "RecurrentBackboneEncoder",
     "Backbone", "BackboneShared", "BackboneSeparate",
     "PPOConfig",
-    "SummaryWriter",
-    "WandbWriter",
+    "TensorboardWriter"
 ]
+
+try:
+    from madrona_learn.wandb import WandbWriter
+
+    __all__.append("WandbWriter")
+except ImportError:
+    pass

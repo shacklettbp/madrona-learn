@@ -26,7 +26,7 @@ from tensorboard.compat.proto.summary_pb2 import Summary, SummaryMetadata
 from tensorboard.summary.writer.event_file_writer import EventFileWriter
 from tensorboard.util.tensor_util import make_tensor_proto
 
-class SummaryWriter:
+class TensorboardWriter:
     """Writes entries to event files in the logdir to be consumed by Tensorboard."""
 
     def __init__(self, logdir: str, queue_size: int = 20, write_interval: int = 10):

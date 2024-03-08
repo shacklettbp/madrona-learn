@@ -1,11 +1,11 @@
 import wandb
-from madrona_learn.tensorboard import SummaryWriter
+from madrona_learn.tensorboard import TensorboardWriter 
 from time import time
 from tensorboard.compat.proto.event_pb2 import Event
 from tensorboard.compat.proto.summary_pb2 import Summary
 
 # Make a class that extends summarywriter to overwrite _add_event to include wandb.log, and overwrite __init__ to include wandb.init and args
-class WandbWriter(SummaryWriter):
+class WandbWriter(TensorboardWriter):
     def __init__(self, logdir, queue_size=20, write_interval=10, args=None):
         super().__init__(logdir, queue_size, write_interval)
         wandb.init(
