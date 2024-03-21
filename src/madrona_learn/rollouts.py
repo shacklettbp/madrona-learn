@@ -164,7 +164,6 @@ class RolloutState(flax.struct.PyTreeNode):
     rnn_states: Any
     reorder_state: PolicyBatchReorderState
     policy_assignments: jax.Array
-    checkpoints: Optional[jax.Array]
 
     @staticmethod
     def create(
@@ -194,13 +193,6 @@ class RolloutState(flax.struct.PyTreeNode):
         init_obs = init_fn()
         init_obs = frozen_dict.freeze(init_obs)
 
-        if get_ckpts_fn:
-            assert load_ckpts_fn != None
-
-            init_ckpts = get_ckpts_fn()
-        else:
-            init_ckpts = None
-
         return RolloutState(
             step_fn = step_fn,
             load_ckpts_fn = load_ckpts_fn,
@@ -210,7 +202,6 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
-            checkpoints = init_ckpts,
         )
 
     def update(
@@ -220,7 +211,6 @@ class RolloutState(flax.struct.PyTreeNode):
         rnn_states=None,
         reorder_state=None,
         policy_assignments=None,
-        checkpoints=None,
     ):
         return RolloutState(
             step_fn = self.step_fn,
@@ -235,10 +225,18 @@ class RolloutState(flax.struct.PyTreeNode):
             policy_assignments = (
                 policy_assignments if policy_assignments != None else
                     self.policy_assignments),
-            checkpoints = (
-                checkpoints if checkpoints != None else
-                    self.checkpoints),
         )
+
+    def get_current_checkpoints(self):
+        return self.get_ckpts_fn()
+
+    def load_checkpoints_into_sim(self, ckpts):
+        assert ckpts.ndim == 2
+        load_trigger = jnp.ones((ckpts.shape[0], 1), jnp.int32)
+        new_obs = self.load_ckpts_fn(load_trigger, ckpts)
+        new_obs = frozen_dict.freeze(new_obs)
+
+        return self.update(cur_obs=new_obs)
 
 
 class RolloutData(flax.struct.PyTreeNode):
@@ -421,10 +419,18 @@ class RolloutManager:
         self,
         train_state_mgr: TrainStateManager,
         rollout_state: RolloutState,
-        user_metrics_cb: Callable,
         metrics: TrainingMetrics,
+        user_start_rollouts_hook: Callable,
+        user_finish_rollouts_hook: Callable,
+        user_metrics_hook: Callable,
     ):
+        # This is the only mutable state used from train_state_mgr here.
+        # Copied back into train_state_mgr at end of function.
         policy_states = train_state_mgr.policy_states
+        user_state = train_state_mgr.user_state
+
+        rollout_state, user_state = user_start_rollouts_hook(
+            rollout_state, user_state)
         
         obs_preprocess = policy_states.obs_preprocess
         obs_preprocess_train_state = jax.tree_map(
@@ -469,12 +475,14 @@ class RolloutManager:
                 rollout_state)
 
         with profile("Finalize Rollouts"):
-            rollout_data, metrics = self._finalize_rollouts(
+            rollout_data, metrics, user_state = self._finalize_rollouts(
                 train_state_mgr.train_states, collect_state.store,
-                bootstrap_values, user_metrics_cb, metrics)
+                bootstrap_values, metrics, user_state,
+                user_finish_rollouts_hook, user_metrics_hook)
 
         train_state_mgr = train_state_mgr.replace(
             policy_states = policy_states,
+            user_state = user_state,
         )
 
         return (train_state_mgr, rollout_state, rollout_data,
@@ -594,7 +602,8 @@ class RolloutManager:
                 (bptt_chunk, bptt_step), save_data)
 
     def _finalize_rollouts(self, train_states, rollouts, bootstrap_values,
-                           user_metrics_cb, metrics):
+                           metrics, user_state, user_finish_rollouts_hook,
+                           user_metrics_hook):
         def invert_value_norm(train_state, v):
             return train_state.value_normalizer.invert(
                 train_state.value_normalizer_state, v)
@@ -607,6 +616,10 @@ class RolloutManager:
 
         assert unnormalized_values.dtype == self._cfg.reward_dtype
         assert unnormalized_bootstrap_values.dtype == self._cfg.reward_dtype
+
+        rollouts, user_state = user_finish_rollouts_hook(
+            rollouts, bootstrap_values, unnormalized_values,
+            unnormalized_bootstrap_values, user_state)
 
         if self._use_advantages:
             advantages = self._compute_advantages_fn(
@@ -665,7 +678,7 @@ class RolloutManager:
                 'Advantages': rollouts['advantages'],
             })
 
-        metrics = user_metrics_cb(metrics, rollouts)
+        metrics = user_metrics_hook(metrics, rollouts, user_state)
 
         return RolloutData(
             data = rollouts.copy({
@@ -673,7 +686,7 @@ class RolloutManager:
             }),
             num_train_seqs_per_policy = self._num_train_seqs_per_policy,
             num_train_policies = self._num_train_policies,
-        ), metrics
+        ), metrics, user_state
 
 
 def rollout_loop(

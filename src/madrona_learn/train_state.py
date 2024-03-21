@@ -130,6 +130,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
     policy_states: PolicyState
     train_states: PolicyTrainState
     pbt_rng: random.PRNGKey
+    user_state: Any
 
     def save(self, update_idx, path):
         ckpt = {
@@ -137,6 +138,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             'policy_states': self.policy_states,
             'train_states': self.train_states,
             'pbt_rng': self.pbt_rng,
+            'user_state': self.user_state,
         }
 
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -151,6 +153,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             'policy_states': self.policy_states,
             'train_states': self.train_states,
             'pbt_rng': self.pbt_rng,
+            'user_state': self.user_state,
         }
         
         loaded = checkpointer.restore(path, item=restore_desc)
@@ -159,6 +162,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             policy_states = loaded['policy_states'],
             train_states = loaded['train_states'],
             pbt_rng = loaded['pbt_rng'],
+            user_state = loaded['user_state'],
         ), loaded['next_update']
 
     @staticmethod
@@ -211,6 +215,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
         policy: Policy,
         cfg: TrainConfig,
         algo: AlgoBase,
+        init_user_state_cb: Callable,
         base_rng,
         example_obs,
         example_rnn_states,
@@ -234,6 +239,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             policy_states = policy_states,
             train_states = train_states,
             pbt_rng = pbt_rng,
+            user_state = init_user_state_cb(),
         )
 
 

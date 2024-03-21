@@ -9,13 +9,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Callable, List
 
-@dataclass(frozen = True)
-class CustomMetricConfig:
-    add_metrics: Callable
-    rollout_cb: Callable = lambda metrics, *args: metrics
-    update_cb: Callable = lambda metrics, *args: metrics
-
-
 class Metric(flax.struct.PyTreeNode):
     per_policy: bool = flax.struct.field(pytree_node=False)
     mean: jnp.float32

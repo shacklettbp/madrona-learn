@@ -1,4 +1,4 @@
-from madrona_learn.train import train
+from madrona_learn.train import train, TrainHooks
 from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (
     TrainConfig,
@@ -18,7 +18,6 @@ from madrona_learn.utils import init
 from madrona_learn.eval import (
     eval_load_ckpt, eval_policies, EvalConfig
 )
-from madrona_learn.metrics import CustomMetricConfig 
 from madrona_learn.observations import (
     ObservationsEMANormalizer, ObservationsCaster,
 )
@@ -26,8 +25,9 @@ from madrona_learn.policy import Policy
 from madrona_learn.tensorboard import TensorboardWriter
 
 __all__ = [
-    "init", "train", "TrainStateManager", "models", "rnn", 
-    "TrainConfig", "PBTConfig", "CustomMetricConfig", "ParamExplore",
+    "init", "train", "TrainHooks",
+    "TrainConfig", "PBTConfig", "ParamExplore",
+    "TrainStateManager", "models", "rnn", 
     "eval_load_ckpt", "eval_policies", "EvalConfig",
     "Policy", "DiscreteActionDistributions",
     "ObservationsEMANormalizer", "ObservationsCaster",

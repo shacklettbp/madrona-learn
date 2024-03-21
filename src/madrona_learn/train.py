@@ -10,26 +10,103 @@ import math
 from os import environ as env_vars
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Optional, Dict, Callable
+from typing import List, Optional, Dict, Callable, Any
 
 from .cfg import TrainConfig
 from .rollouts import RolloutConfig, RolloutManager, RolloutState
 from .actor_critic import ActorCritic
 from .algo_common import AlgoBase
-from .metrics import CustomMetricConfig, TrainingMetrics
+from .metrics import TrainingMetrics, Metric
 from .moving_avg import EMANormalizer
-from .train_state import PolicyTrainState, TrainStateManager
+from .train_state import PolicyState, PolicyTrainState, TrainStateManager
 from .pbt import pbt_update, pbt_explore_hyperparams
 from .policy import Policy
 from .profile import profile
+
+# Inherit from this class and override any methods you see fit to modify / add
+# functionality in the training loop. Note that this class itself (and any
+# classes inherited from it) MUST be stateless. Any dataclass variables are
+# effectively compile time constants (anything accessed through self.)
+# Custom state can put in the pytree returned by init_user_state().
+# This user state will be kept in TrainStateManager and passed back to all the
+# methods of this class. Additionally it will get saved to disk in checkpoints
+# along with model parameters etc.
+@dataclass(frozen=True)
+class TrainHooks:
+    # Can override to return any pytree of jax arrays you want to store
+    # custom state.
+    def init_user_state(self):
+        return None
+
+    # You need to implement this function in your class. This is where (based
+    # on update_idx) you save train_state_mgr to disk, write metrics, etc.
+    # Return true if metrics should be reset (for example after writing them
+    # to disk). If you return false, metrics will continue to be averaged
+    # until the next call to this function.
+    # Whatever is returned by user_state above will be in
+    # train_state_mgr.user_state
+    def post_update(
+        self,
+        update_idx: int,
+        metrics: FrozenDict[str, Metric],
+        train_state_mgr: TrainStateManager,
+    ) -> bool:
+        raise NotImplementedError
+
+    # Called right before rollout collection loop starts
+    def start_rollouts(
+        self,
+        rollout_state: RolloutState,
+        user_state: Any,
+    ):
+        return rollout_state, user_state
+
+    # Called right after rollout collection loop completes, but before
+    # returns / advantages are calculated
+    def finish_rollouts(
+        self,
+        rollouts: Dict[str, Any],
+        bootstrap_values: jax.Array,
+        unnormalized_values: jax.Array,
+        unnormalized_bootstrap_values: jax.Array,
+        user_state: Any,
+    ):
+        return rollouts, user_state
+
+    def add_metrics(
+        self,
+        metrics: FrozenDict[str, Metric],
+    ):
+        # Check out RolloutManager.add_metrics for an example of how to 
+        # use this function to add new custom metrics.
+        return metrics
+    
+    # Update metrics after rollouts
+    def rollout_metrics(
+        self,
+        metrics: FrozenDict[str, Metric],
+        rollouts: Dict[str, Any],
+        user_state: Any,
+    ):
+        return metrics
+
+    # Update metrics after each minibatch
+    def optimize_metrics(
+        self,
+        metrics: FrozenDict[str, Metric],
+        epoch_idx: int,
+        minibatch: Dict[str, Any],
+        policy_state: PolicyState,
+        train_state: PolicyTrainState,
+    ):
+        return metrics
 
 def train(
     dev: jax.Device,
     cfg: TrainConfig,
     sim_fns: Dict[str, Callable],
     policy: Policy,
-    iter_cb: Callable,
-    metrics_cfg: CustomMetricConfig,
+    user_hooks: TrainHooks,
     restore_ckpt: str = None,
     profile_port: int = None,
 ):
@@ -38,15 +115,13 @@ def train(
 
     with jax.default_device(dev):
         return _train_impl(dev.platform, cfg, sim_fns,
-            policy, iter_cb, metrics_cfg,
-            restore_ckpt, profile_port)
+            policy, user_hooks, restore_ckpt, profile_port)
 
 
 def _update_loop(
     algo: AlgoBase,
-    iter_cb: Callable,
     cfg: TrainConfig,
-    metrics_cfg: CustomMetricConfig,
+    user_hooks: TrainHooks,
     rollout_state: RolloutState,
     rollout_mgr: RolloutManager,
     train_state_mgr: TrainStateManager,
@@ -70,7 +145,7 @@ def _update_loop(
             policy_state,
             train_state,
             rollout_data,
-            metrics_cfg.update_cb,
+            user_hooks.optimize_metrics,
             metrics,
         )
 
@@ -81,8 +156,9 @@ def _update_loop(
             with profile('Collect Rollouts'):
                 (train_state_mgr, rollout_state, rollout_data,
                  obs_stats, metrics) = rollout_mgr.collect(
-                    train_state_mgr, rollout_state,
-                    metrics_cfg.rollout_cb, metrics)
+                    train_state_mgr, rollout_state, metrics,
+                    user_hooks.start_rollouts, user_hooks.finish_rollouts,
+                    user_hooks.rollout_metrics)
 
             train_policy_states = jax.tree_map(
                 lambda x: x[0:num_train_policies],
@@ -118,7 +194,7 @@ def _update_loop(
                 train_states = updated_train_states,
             )
             
-        reset_metrics = iter_cb(update_idx, metrics, train_state_mgr)
+        reset_metrics = user_hooks.post_update(update_idx, metrics, train_state_mgr)
 
         metrics = lax.cond(
             reset_metrics, lambda: metrics.reset(), lambda: metrics)
@@ -145,7 +221,7 @@ def _update_loop(
     
     metrics = algo.add_metrics(cfg, FrozenDict())
     metrics = rollout_mgr.add_metrics(cfg, metrics)
-    metrics = metrics_cfg.add_metrics(metrics)
+    metrics = user_hooks.add_metrics(metrics)
     metrics = TrainingMetrics.create(cfg, metrics)
 
     num_outer_iters = num_updates_remaining // outer_loop_interval
@@ -200,8 +276,7 @@ def _train_impl(
     cfg,
     sim_fns,
     policy,
-    iter_cb,
-    metrics_cfg,
+    user_hooks,
     restore_ckpt,
     profile_port,
 ):
@@ -244,6 +319,7 @@ def _train_impl(
         policy = policy, 
         cfg = cfg,
         algo = algo,
+        init_user_state_cb = user_hooks.init_user_state,
         base_rng = init_rng,
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
@@ -299,9 +375,8 @@ def _train_impl(
     def update_loop_wrapper(rollout_state, train_state_mgr):
         return _update_loop(
             algo = algo,
-            iter_cb = iter_cb,
             cfg = cfg,
-            metrics_cfg = metrics_cfg,
+            user_hooks = user_hooks,
             rollout_state = rollout_state,
             rollout_mgr = rollout_mgr,
             train_state_mgr = train_state_mgr,
