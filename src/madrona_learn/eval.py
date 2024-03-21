@@ -59,20 +59,18 @@ def eval_load_ckpt(
 def eval_policies(
     dev: jax.Device,
     eval_cfg: EvalConfig,
-    sim_init: Callable,
-    sim_step: Callable,
+    sim_fns: Dict['str', Callable],
     policy: Policy,
     policy_states: PolicyState,
     step_cb: Callable,
 ):
     with jax.default_device(dev):
-        return _eval_policies_impl(eval_cfg, sim_init, sim_step, policy,
+        return _eval_policies_impl(eval_cfg, sim_fns, policy,
                                    policy_states, step_cb)
 
 def _eval_policies_impl(
     eval_cfg: EvalConfig,
-    sim_init: Callable,
-    sim_step: Callable,
+    sim_fns: Dict['str', Callable],
     policy: Policy,
     policy_states: PolicyState,
     step_cb: Callable,
@@ -185,8 +183,7 @@ def _eval_policies_impl(
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
-            init_fn = sim_init,
-            step_fn = sim_step,
+            sim_fns = sim_fns,
             prng_key = random.PRNGKey(0),
             rnn_states = rnn_states,
             static_play_assignments = static_play_assignments

@@ -26,8 +26,7 @@ from .profile import profile
 def train(
     dev: jax.Device,
     cfg: TrainConfig,
-    sim_init: Callable,
-    sim_step: Callable,
+    sim_fns: Dict[str, Callable],
     policy: Policy,
     iter_cb: Callable,
     metrics_cfg: CustomMetricConfig,
@@ -38,7 +37,7 @@ def train(
     print()
 
     with jax.default_device(dev):
-        return _train_impl(dev.platform, cfg, sim_init, sim_step,
+        return _train_impl(dev.platform, cfg, sim_fns,
             policy, iter_cb, metrics_cfg,
             restore_ckpt, profile_port)
 
@@ -199,8 +198,7 @@ def _setup_rollout_cfg(dev_type, cfg):
 def _train_impl(
     dev_type,
     cfg,
-    sim_init,
-    sim_step,
+    sim_fns,
     policy,
     iter_cb,
     metrics_cfg,
@@ -234,8 +232,7 @@ def _train_impl(
 
         return RolloutState.create(
             rollout_cfg = rollout_cfg,
-            init_fn = sim_init,
-            step_fn = sim_step,
+            sim_fns = sim_fns,
             prng_key = rollout_rng,
             rnn_states = rnn_states,
             static_play_assignments = None,

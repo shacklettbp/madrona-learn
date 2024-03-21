@@ -157,17 +157,19 @@ class PolicyBatchReorderState(flax.struct.PyTreeNode):
 
 class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
+    load_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
+    get_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
     cur_obs: FrozenDict[str, Any]
     prng_key: random.PRNGKey
     rnn_states: Any
     reorder_state: PolicyBatchReorderState
     policy_assignments: jax.Array
+    checkpoints: Optional[jax.Array]
 
     @staticmethod
     def create(
         rollout_cfg,
-        init_fn,
-        step_fn,
+        sim_fns,
         prng_key,
         rnn_states,
         static_play_assignments,
@@ -184,16 +186,31 @@ class RolloutState(flax.struct.PyTreeNode):
 
         reorder_state = _compute_reorder_state(policy_assignments, rollout_cfg)
 
+        init_fn = sim_fns['init']
+        step_fn = sim_fns['step']
+        load_ckpts_fn = sim_fns.get('load_ckpts', None)
+        get_ckpts_fn = sim_fns.get('get_ckpts', None)
+
         init_obs = init_fn()
         init_obs = frozen_dict.freeze(init_obs)
 
+        if get_ckpts_fn:
+            assert load_ckpts_fn != None
+
+            init_ckpts = get_ckpts_fn()
+        else:
+            init_ckpts = None
+
         return RolloutState(
             step_fn = step_fn,
+            load_ckpts_fn = load_ckpts_fn,
+            get_ckpts_fn = get_ckpts_fn,
             cur_obs = init_obs,
             prng_key = prng_key,
             rnn_states = rnn_states,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
+            checkpoints = init_ckpts,
         )
 
     def update(
@@ -203,9 +220,12 @@ class RolloutState(flax.struct.PyTreeNode):
         rnn_states=None,
         reorder_state=None,
         policy_assignments=None,
+        checkpoints=None,
     ):
         return RolloutState(
             step_fn = self.step_fn,
+            load_ckpts_fn = self.load_ckpts_fn,
+            get_ckpts_fn = self.get_ckpts_fn,
             cur_obs = (
                 cur_obs if cur_obs != None else self.cur_obs),
             prng_key = prng_key if prng_key != None else self.prng_key,
@@ -215,6 +235,9 @@ class RolloutState(flax.struct.PyTreeNode):
             policy_assignments = (
                 policy_assignments if policy_assignments != None else
                     self.policy_assignments),
+            checkpoints = (
+                checkpoints if checkpoints != None else
+                    self.checkpoints),
         )
 
 
