@@ -116,7 +116,7 @@ def _eval_policies_impl(
             num_current_policies = num_eval_policies,
             num_past_policies = 0,
             num_teams = 1,
-            team_size = 1,
+            team_size = num_agents_per_world,
             sim_batch_size = sim_batch_size,
             self_play_portion = 1.0,
             cross_play_portion = 0.0,

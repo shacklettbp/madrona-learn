@@ -159,6 +159,7 @@ class RolloutState(flax.struct.PyTreeNode):
     step_fn: Callable = flax.struct.field(pytree_node=False)
     load_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
     get_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
+    sim_state: Any
     cur_obs: FrozenDict[str, Any]
     prng_key: random.PRNGKey
     rnn_states: Any
@@ -190,13 +191,17 @@ class RolloutState(flax.struct.PyTreeNode):
         load_ckpts_fn = sim_fns.get('load_ckpts', None)
         get_ckpts_fn = sim_fns.get('get_ckpts', None)
 
-        init_obs = init_fn()
-        init_obs = frozen_dict.freeze(init_obs)
+        init_out = init_fn()
+        init_out = frozen_dict.freeze(init_out)
+
+        init_sim_state = init_out['state']
+        init_obs = init_out['obs']
 
         return RolloutState(
             step_fn = step_fn,
             load_ckpts_fn = load_ckpts_fn,
             get_ckpts_fn = get_ckpts_fn,
+            sim_state = init_sim_state,
             cur_obs = init_obs,
             prng_key = prng_key,
             rnn_states = rnn_states,
@@ -206,6 +211,7 @@ class RolloutState(flax.struct.PyTreeNode):
 
     def update(
         self,
+        sim_state=None,
         cur_obs=None,
         prng_key=None,
         rnn_states=None,
@@ -216,6 +222,8 @@ class RolloutState(flax.struct.PyTreeNode):
             step_fn = self.step_fn,
             load_ckpts_fn = self.load_ckpts_fn,
             get_ckpts_fn = self.get_ckpts_fn,
+            sim_state = (
+                sim_state if sim_state != None else self.sim_state),
             cur_obs = (
                 cur_obs if cur_obs != None else self.cur_obs),
             prng_key = prng_key if prng_key != None else self.prng_key,
@@ -733,6 +741,7 @@ def rollout_loop(
 
         prng_key = rollout_state.prng_key
         rnn_states = rollout_state.rnn_states
+        sim_state = rollout_state.sim_state
         sim_obs = rollout_state.cur_obs
         reorder_state = rollout_state.reorder_state
         policy_assignments = rollout_state.policy_assignments
@@ -765,9 +774,11 @@ def rollout_loop(
 
         with profile('Rollout Step'):
             step_input = frozen_dict.freeze({
+                'state': sim_state,
                 'actions': reorder_state.to_sim(policy_out['actions']),
                 'resets': jnp.zeros(
-                    (rollout_cfg.sim_batch_size, 1), dtype=jnp.int32),
+                    (rollout_cfg.sim_batch_size // (rollout_cfg.pbt.team_size * rollout_cfg.pbt.num_teams), 1), 
+                    dtype=jnp.int32),
             })
 
             pbt_inputs = FrozenDict({})
@@ -789,6 +800,7 @@ def rollout_loop(
             step_output = rollout_state.step_fn(step_input)
             step_output = frozen_dict.freeze(step_output)
 
+            sim_state = step_output['state']
             dones = step_output['dones'].astype(jnp.bool_)
             rewards = step_output['rewards'].astype(rollout_cfg.reward_dtype)
             sim_obs = step_output['obs']
@@ -821,6 +833,7 @@ def rollout_loop(
         rollout_state = rollout_state.update(
             prng_key = prng_key,
             rnn_states = rnn_states,
+            sim_state = sim_state,
             cur_obs = sim_obs,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,

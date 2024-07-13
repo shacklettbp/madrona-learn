@@ -296,7 +296,12 @@ def _train_impl(
 
     algo = cfg.algo.setup()
 
-    rollout_rng, init_rng = random.split(random.PRNGKey(cfg.seed))
+    if isinstance(cfg.seed, int):
+        seed = random.key(cfg.seed)
+    else:
+        seed = cfg.seed
+
+    rollout_rng, init_rng = random.split(seed)
 
     rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
