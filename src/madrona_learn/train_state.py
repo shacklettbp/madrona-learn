@@ -1,4 +1,5 @@
 import jax
+import numpy as np
 from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
 import flax
@@ -164,6 +165,35 @@ class TrainStateManager(flax.struct.PyTreeNode):
             pbt_rng = loaded['pbt_rng'],
             user_state = loaded['user_state'],
         ), loaded['next_update']
+
+    @staticmethod
+    def slice_checkpoint(src, dst, train_select, past_select):
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        loaded = checkpointer.restore(src)
+
+        train_states = jax.tree.map(
+            lambda x: x[train_select], loaded['train_states'])
+
+        train_policy_states = jax.tree.map(
+            lambda x: x[train_select], loaded['policy_states'])
+
+        past_policy_states = jax.tree.map(
+            lambda x: x[past_select], loaded['policy_states'])
+
+        policy_states = jax.tree.map(
+            lambda x, y: np.concatenate([x, y], axis=0),
+            train_policy_states, past_policy_states)
+
+        ckpt = {
+            'next_update': loaded['next_update'],
+            'policy_states': policy_states,
+            'train_states': train_states,
+            'pbt_rng': loaded['pbt_rng'],
+            'user_state': loaded['user_state'],
+        }
+
+        save_args = orbax_utils.save_args_from_target(ckpt)
+        checkpointer.save(dst, ckpt, save_args=save_args)
 
     @staticmethod
     def load_policies(policy, path):
