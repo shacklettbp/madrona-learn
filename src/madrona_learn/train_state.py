@@ -1,7 +1,7 @@
 import jax
-import numpy as np
 from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
+import numpy as np
 import flax
 from flax import linen as nn
 from flax.core import FrozenDict, frozen_dict
@@ -159,11 +159,19 @@ class TrainStateManager(flax.struct.PyTreeNode):
         
         loaded = checkpointer.restore(path, item=restore_desc)
 
+        def to_jax_and_dtype(a, b):
+            return jax.tree.map(
+                lambda x, y: jnp.asarray(x, dtype=y.dtype), a, b)
+
         return TrainStateManager(
-            policy_states = loaded['policy_states'],
-            train_states = loaded['train_states'],
-            pbt_rng = loaded['pbt_rng'],
-            user_state = loaded['user_state'],
+            policy_states = to_jax_and_dtype(
+                loaded['policy_states'], self.policy_states),
+            train_states = to_jax_and_dtype(
+                loaded['train_states'], self.train_states),
+            pbt_rng = to_jax_and_dtype(
+                loaded['pbt_rng'], self.pbt_rng),
+            user_state = to_jax_and_dtype(
+                loaded['user_state'], self.user_state),
         ), loaded['next_update']
 
     @staticmethod
