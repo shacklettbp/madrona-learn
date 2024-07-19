@@ -230,9 +230,11 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
         if episode_score != None:
             episode_score = MovingEpisodeScore(**episode_score)
+            total_num_policies = episode_score.mean.shape[0]
 
         if mmr != None:
             mmr = MMR(**mmr)
+            total_num_policies = mmr.elo.shape[0]
 
         return PolicyState(
             apply_fn = actor_critic.apply,
@@ -246,7 +248,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             get_episode_scores_fn = get_episode_scores_fn,
             episode_score = episode_score,
             mmr = mmr,
-        ), num_train_policies
+        ), num_train_policies, total_num_policies
 
     @staticmethod
     def create(

@@ -36,9 +36,8 @@ def eval_load_ckpt(
     train_only: bool = True,
     single_policy: Optional[int] = None,
 ):
-    policy_states, num_train_policies = TrainStateManager.load_policies(
-        policy, ckpt_path,
-    )
+    policy_states, num_train_policies, total_num_policies = \
+        TrainStateManager.load_policies(policy, ckpt_path)
 
     if single_policy != None:
         policy_states = jax.tree_map(
@@ -52,8 +51,7 @@ def eval_load_ckpt(
 
         return policy_states, num_train_policies
 
-
-    return policy_states, policy_states.fitness_score.shape[0]
+    return policy_states, total_num_policies
 
 
 def eval_policies(
