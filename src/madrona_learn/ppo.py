@@ -138,8 +138,8 @@ def _ppo_update(
         surr1 = advantages * ratio
 
         clipped_ratio = jnp.clip(ratio,
-            1.0 - train_state.hyper_params.clip_coef,
-            1.0 + train_state.hyper_params.clip_coef)
+            1.0 - train_state.hyper_params.clip_coef.astype(ratio.dtype),
+            1.0 + train_state.hyper_params.clip_coef.astype(ratio.dtype))
         surr2 = advantages * clipped_ratio
 
         action_obj = jnp.minimum(surr1, surr2)

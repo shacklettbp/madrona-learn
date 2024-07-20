@@ -743,15 +743,18 @@ def pbt_update(
     def pbt_cull_update(train_state_mgr):
         return _pbt_cull_update(cfg, train_state_mgr)
 
-    should_update_past = jnp.logical_and(update_idx != 0,
-        update_idx % cfg.pbt.past_policy_update_interval == 0)
-    train_state_mgr = lax.cond(should_update_past,
-        pbt_past_update, pbt_update_noop, train_state_mgr)
+    if cfg.pbt.past_policy_update_interval > 0:
+        should_update_past = jnp.logical_and(update_idx != 0,
+            update_idx % cfg.pbt.past_policy_update_interval == 0)
 
-    should_cull_policy = jnp.logical_and(update_idx != 0,
-        update_idx % cfg.pbt.train_policy_cull_interval == 0)
-    train_state_mgr = lax.cond(should_cull_policy,
-        pbt_cull_update, pbt_update_noop, train_state_mgr)
+        train_state_mgr = lax.cond(should_update_past,
+            pbt_past_update, pbt_update_noop, train_state_mgr)
+
+    if cfg.pbt.train_policy_cull_interval > 0:
+        should_cull_policy = jnp.logical_and(update_idx != 0,
+            update_idx % cfg.pbt.train_policy_cull_interval == 0)
+        train_state_mgr = lax.cond(should_cull_policy,
+            pbt_cull_update, pbt_update_noop, train_state_mgr)
 
     return train_state_mgr
 

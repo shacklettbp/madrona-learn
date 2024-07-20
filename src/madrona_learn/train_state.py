@@ -1,6 +1,7 @@
 import jax
 from jax import lax, random, numpy as jnp
 from jax.experimental import checkify
+import numpy as np
 import flax
 from flax import linen as nn
 from flax.core import FrozenDict, frozen_dict
@@ -158,12 +159,49 @@ class TrainStateManager(flax.struct.PyTreeNode):
         
         loaded = checkpointer.restore(path, item=restore_desc)
 
+        def to_jax_and_dtype(a, b):
+            return jax.tree.map(
+                lambda x, y: jnp.asarray(x, dtype=y.dtype), a, b)
+
         return TrainStateManager(
-            policy_states = loaded['policy_states'],
-            train_states = loaded['train_states'],
-            pbt_rng = loaded['pbt_rng'],
-            user_state = loaded['user_state'],
+            policy_states = to_jax_and_dtype(
+                loaded['policy_states'], self.policy_states),
+            train_states = to_jax_and_dtype(
+                loaded['train_states'], self.train_states),
+            pbt_rng = to_jax_and_dtype(
+                loaded['pbt_rng'], self.pbt_rng),
+            user_state = to_jax_and_dtype(
+                loaded['user_state'], self.user_state),
         ), loaded['next_update']
+
+    @staticmethod
+    def slice_checkpoint(src, dst, train_select, past_select):
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        loaded = checkpointer.restore(src)
+
+        train_states = jax.tree.map(
+            lambda x: x[train_select], loaded['train_states'])
+
+        train_policy_states = jax.tree.map(
+            lambda x: x[train_select], loaded['policy_states'])
+
+        past_policy_states = jax.tree.map(
+            lambda x: x[past_select], loaded['policy_states'])
+
+        policy_states = jax.tree.map(
+            lambda x, y: np.concatenate([x, y], axis=0),
+            train_policy_states, past_policy_states)
+
+        ckpt = {
+            'next_update': loaded['next_update'],
+            'policy_states': policy_states,
+            'train_states': train_states,
+            'pbt_rng': loaded['pbt_rng'],
+            'user_state': loaded['user_state'],
+        }
+
+        save_args = orbax_utils.save_args_from_target(ckpt)
+        checkpointer.save(dst, ckpt, save_args=save_args)
 
     @staticmethod
     def load_policies(policy, path):
@@ -192,9 +230,11 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
         if episode_score != None:
             episode_score = MovingEpisodeScore(**episode_score)
+            total_num_policies = episode_score.mean.shape[0]
 
         if mmr != None:
             mmr = MMR(**mmr)
+            total_num_policies = mmr.elo.shape[0]
 
         return PolicyState(
             apply_fn = actor_critic.apply,
@@ -208,7 +248,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             get_episode_scores_fn = get_episode_scores_fn,
             episode_score = episode_score,
             mmr = mmr,
-        ), num_train_policies
+        ), num_train_policies, total_num_policies
 
     @staticmethod
     def create(

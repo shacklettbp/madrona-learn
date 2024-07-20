@@ -138,6 +138,9 @@ def _update_loop(
         outer_loop_interval = num_updates_remaining
         num_train_policies = 1
 
+    if outer_loop_interval == 0:
+        outer_loop_interval = num_updates_remaining
+
     @jax.vmap
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
