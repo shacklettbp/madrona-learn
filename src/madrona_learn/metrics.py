@@ -31,11 +31,11 @@ class Metric(flax.struct.PyTreeNode):
     def reset(self):
         return Metric(
             per_policy = self.per_policy,
-            mean = self.mean.at[None].set(0),
-            m2 = self.m2.at[None].set(0),
-            min = self.min.at[None].set(jnp.finfo(jnp.float32).max),
-            max = self.max.at[None].set(jnp.finfo(jnp.float32).min),
-            count = self.count.at[None].set(0),
+            mean = jnp.zeros_like(self.mean),
+            m2 = jnp.zeros_like(self.m2),
+            min = jnp.full_like(self.min, jnp.finfo(jnp.float32).max),
+            max = jnp.full_like(self.max, jnp.finfo(jnp.float32).min),
+            count = jnp.zeros_like(self.count),
         )
 
 
