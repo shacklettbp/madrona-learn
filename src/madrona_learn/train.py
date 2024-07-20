@@ -390,7 +390,8 @@ def _train_impl(
 
     update_loop_wrapper = jax.jit(
         checkify.checkify(update_loop_wrapper, errors=checkify_errors),
-        donate_argnums=[0, 1])
+        #donate_argnums=[0, 1])
+        donate_argnums=[1]) # rollout_state has a token which breaks donation
 
     lowered_update_loop = update_loop_wrapper.lower(
         rollout_state, train_state_mgr)

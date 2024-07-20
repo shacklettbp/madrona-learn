@@ -223,7 +223,7 @@ class RolloutState(flax.struct.PyTreeNode):
             load_ckpts_fn = self.load_ckpts_fn,
             get_ckpts_fn = self.get_ckpts_fn,
             sim_state = (
-                sim_state if sim_state != None else self.sim_state),
+                sim_state if sim_state is not None else self.sim_state),
             cur_obs = (
                 cur_obs if cur_obs != None else self.cur_obs),
             prng_key = prng_key if prng_key != None else self.prng_key,
