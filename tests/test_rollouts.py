@@ -564,8 +564,8 @@ def check_rollout_loop(
             'values': rollout_store['values'].at[step_idx].set(values),
         })
 
-    def post_step_cb(step_idx, dones, rewards, reorder_state, rollout_store):
-        return rollout_store.copy({
+    def post_step_cb(step_idx, sim_state, dones, rewards, reorder_state, rollout_store):
+        return sim_state, rollout_store.copy({
             'rewards': rollout_store['rewards'].at[step_idx].set(rewards),
         })
 

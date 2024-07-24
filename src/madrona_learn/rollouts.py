@@ -596,6 +596,7 @@ class RolloutManager:
         self,
         bptt_chunk: int,
         bptt_step: int,
+        sim_state: Any,
         dones: jax.Array,
         rewards: jax.Array,
         reorder_state: PolicyBatchReorderState,
@@ -606,7 +607,7 @@ class RolloutManager:
                 'dones': dones,
                 'rewards': rewards,
             }, reorder_state)
-            return collect_state.save(
+            return sim_state, collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
     def _finalize_rollouts(self, train_states, rollouts, bootstrap_values,
@@ -827,8 +828,8 @@ def rollout_loop(
                     policy_assignments, policy_states, dones, episode_results,
                     rollout_cfg.pbt)
 
-            cb_state = post_step_cb(
-                step_idx, dones, rewards, reorder_state, cb_state)
+            sim_state, cb_state = post_step_cb(
+                step_idx, sim_state, dones, rewards, reorder_state, cb_state)
 
         rollout_state = rollout_state.update(
             prng_key = prng_key,

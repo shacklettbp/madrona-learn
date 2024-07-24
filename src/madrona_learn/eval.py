@@ -195,15 +195,15 @@ def _eval_policies_impl(
             'obs': obs,
         }))
 
-    def post_step_cb(step_idx, dones, rewards, reorder_state, cb_state):
+    def post_step_cb(step_idx, sim_state, dones, rewards, reorder_state, cb_state):
         step_data = cb_state.copy({
             'dones': dones,
             'rewards': rewards,
         })
 
-        step_cb(step_data)
+        sim_state = step_cb(sim_state, step_data)
 
-        return None
+        return sim_state, None
 
     rollout_loop_fn = partial(rollout_loop,
         rollout_cfg = rollout_cfg,
