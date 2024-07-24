@@ -197,11 +197,12 @@ def _eval_policies_impl(
 
     def post_step_cb(step_idx, sim_state, dones, rewards, reorder_state, cb_state):
         step_data = cb_state.copy({
+            'sim_state': sim_state,
             'dones': dones,
             'rewards': rewards,
         })
 
-        sim_state = step_cb(sim_state, step_data)
+        sim_state = step_cb(step_data)
 
         return sim_state, None
 
