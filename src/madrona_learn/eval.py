@@ -219,8 +219,8 @@ def _eval_policies_impl(
     rollout_loop_args = (rollout_state, policy_states)
 
     rollout_loop_fn = jax.jit(
-        checkify.checkify(rollout_loop_fn, errors=checkify_errors),
-        donate_argnums=0)
+        checkify.checkify(rollout_loop_fn, errors=checkify_errors))
+        #donate_argnums=0)
 
     lowered_rollout_loop = rollout_loop_fn.lower(*rollout_loop_args)
 
