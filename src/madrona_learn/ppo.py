@@ -135,6 +135,12 @@ def _ppo_update(
                 advantages = zscore_data(advantages)
 
         ratio = jnp.exp(new_log_probs - mb['log_probs'])
+
+        num_action_dims = len(ratio.shape) - 2
+
+        if num_action_dims > 1:
+            advantages = advantages[..., None]
+
         surr1 = advantages * ratio
 
         clipped_ratio = jnp.clip(ratio,

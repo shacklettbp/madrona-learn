@@ -6,16 +6,15 @@ import flax
 from dataclasses import dataclass
 from typing import List
 
-@dataclass(frozen=True)
-class DiscreteActionDistributions:
-    actions_num_buckets : List[int]
+class DiscreteActionDistributions(flax.struct.PyTreeNode):
+    actions_num_buckets : List[int] = flax.struct.field(pytree_node=False)
     all_logits: jax.Array
 
     def _iter_logits(self):
         cur_bucket_offset = 0
         for num_buckets in self.actions_num_buckets:
             logits_slice = self.all_logits[
-                :, cur_bucket_offset:cur_bucket_offset + num_buckets]
+                ..., cur_bucket_offset:cur_bucket_offset + num_buckets]
 
             yield logits_slice
 

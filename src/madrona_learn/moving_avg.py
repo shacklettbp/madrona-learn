@@ -72,7 +72,7 @@ class EMANormalizer:
         x = self._convert_nonfloat(x)
 
         b_mean = jnp.mean(x, axis=reduce_axes, dtype=jnp.float32)
-        b_var = jnp.mean(jnp.square(x - b_mean.astype(x.dtype)),
+        b_var = jnp.mean(jnp.square(x - b_mean),
             axis=reduce_axes, dtype=jnp.float32)
 
         delta = b_mean - a_mean

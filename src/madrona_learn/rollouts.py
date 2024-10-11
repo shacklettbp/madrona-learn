@@ -784,10 +784,9 @@ def rollout_loop(
 
             pbt_inputs = FrozenDict({})
 
-            if rollout_cfg.pbt.total_num_policies > 1:
-                pbt_inputs = pbt_inputs.copy({
-                    'policy_assignments': policy_assignments,
-                })
+            pbt_inputs = pbt_inputs.copy({
+                'policy_assignments': policy_assignments,
+            })
 
             if policy_states.reward_hyper_params != None:
                 pbt_inputs = pbt_inputs.copy({
@@ -823,7 +822,8 @@ def rollout_loop(
                     policy_assignments,
                     rollout_cfg,
                 )
-            elif episode_results != None:
+            elif (episode_results != None and
+                  policy_states.episode_score != None):
                 policy_states = pbt_update_fitness(
                     policy_assignments, policy_states, dones, episode_results,
                     rollout_cfg.pbt)

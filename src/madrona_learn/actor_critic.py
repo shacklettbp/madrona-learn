@@ -182,14 +182,18 @@ class RecurrentBackboneEncoder(nn.Module):
         train
     ):
         features = self.net(flattened_inputs, train=train)
-        features_seq = features.reshape(
-            *sequence_ends.shape[0:2], *features.shape[1:])
+
+        features_seq = jax.tree.map(
+            lambda x: x.reshape(*sequence_ends.shape[0:2], *x.shape[1:]),
+            features)
 
         with profile('rnn.fwd_sequence'):
             rnn_out_seq = self.rnn.sequence(
                 rnn_start_states, sequence_ends, features_seq, train=train)
 
-        rnn_out_flattened = rnn_out_seq.reshape(-1, *rnn_out_seq.shape[2:])
+        rnn_out_flattened = jax.tree.map(
+            lambda x: x.reshape(-1, *x.shape[2:]),
+            rnn_out_seq)
         return rnn_out_flattened
 
 

@@ -86,10 +86,12 @@ def _eval_policies_impl(
     num_agents_per_world = eval_cfg.team_size * eval_cfg.num_teams
     sim_batch_size = eval_cfg.num_worlds * num_agents_per_world
 
-    if eval_cfg.eval_competitive:
+    if eval_cfg.eval_competitive and hasattr(policy_states, 'mmr'):
         num_eval_policies = policy_states.mmr.elo.shape[0]
-    else:
+    elif hasattr(policy_states, 'episode_score'):
         num_eval_policies = policy_states.episode_score.mean.shape[0]
+    else:
+        num_eval_policies = 1
 
     if eval_cfg.clear_fitness:
         def reset_mmr(mmr):
@@ -123,7 +125,7 @@ def _eval_policies_impl(
             policy_dtype = eval_cfg.policy_dtype,
         )
 
-        static_play_assignments = None
+        static_play_assignments = jnp.zeros((sim_batch_size, 1), dtype=jnp.int32)
     else:
         rollout_cfg = RolloutConfig.setup(
             num_current_policies = num_eval_policies,
@@ -234,7 +236,9 @@ def _eval_policies_impl(
         *rollout_loop_args)
     err.throw()
 
-    if eval_cfg.eval_competitive:
+    if eval_cfg.eval_competitive and hasattr(policy_states, 'mmr'):
         return policy_states.mmr
-    else:
+    elif hasattr(policy_states, 'episode_score'):
         return policy_states.episode_score
+    else:
+        return jnp.zeros((1,))
