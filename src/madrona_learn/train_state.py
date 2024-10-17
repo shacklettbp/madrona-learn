@@ -160,17 +160,21 @@ class TrainStateManager(flax.struct.PyTreeNode):
         loaded = checkpointer.restore(path, item=restore_desc)
 
         def to_jax_and_dtype(a, b):
-            return jax.tree.map(
-                lambda x, y: jnp.asarray(x, dtype=y.dtype), a, b)
+            if jnp.issubdtype(b.dtype, jax.dtypes.prng_key):
+                return jax.random.wrap_key_data(a)
+            elif isinstance(a, np.ndarray) or isinstance(a, jax.Array):
+                return jnp.asarray(a, dtype=b.dtype)
+            else:
+                return a
 
         return TrainStateManager(
-            policy_states = to_jax_and_dtype(
+            policy_states = jax.tree.map(to_jax_and_dtype,
                 loaded['policy_states'], self.policy_states),
-            train_states = to_jax_and_dtype(
+            train_states = jax.tree.map(to_jax_and_dtype,
                 loaded['train_states'], self.train_states),
-            pbt_rng = to_jax_and_dtype(
+            pbt_rng = jax.tree.map(to_jax_and_dtype,
                 loaded['pbt_rng'], self.pbt_rng),
-            user_state = to_jax_and_dtype(
+            user_state = jax.tree.map(to_jax_and_dtype,
                 loaded['user_state'], self.user_state),
         ), loaded['next_update']
 
@@ -213,7 +217,10 @@ class TrainStateManager(flax.struct.PyTreeNode):
             policy.obs_preprocess or ObservationsPreprocessNoop.create())
 
         def to_jax(a):
-            return jax.tree_map(lambda x: jnp.asarray(x), a)
+            if isinstance(a, np.ndarray):
+                return jnp.asarray(a)
+            else:
+                return a
 
         num_train_policies = loaded['train_states']['update_prng_key'].shape[0]
 
@@ -239,11 +246,11 @@ class TrainStateManager(flax.struct.PyTreeNode):
         return PolicyState(
             apply_fn = actor_critic.apply,
             rnn_reset_fn = actor_critic.clear_recurrent_state,
-            params = to_jax(loaded['policy_states']['params']),
-            batch_stats = to_jax(loaded['policy_states']['batch_stats']),
+            params = jax.tree.map(to_jax, loaded['policy_states']['params']),
+            batch_stats = jax.tree.map(to_jax, loaded['policy_states']['batch_stats']),
             obs_preprocess = obs_preprocess,
             obs_preprocess_state = frozen_dict.freeze(
-                to_jax(loaded['policy_states']['obs_preprocess_state'])),
+                jax.tree.map(to_jax, loaded['policy_states']['obs_preprocess_state'])),
             reward_hyper_params = reward_hyper_params,
             get_episode_scores_fn = get_episode_scores_fn,
             episode_score = episode_score,
