@@ -33,6 +33,7 @@ class RolloutConfig:
     total_policy_batch_size: int
     policy_dtype: jnp.dtype
     reward_dtype: jnp.dtype
+    prob_dtype: jnp.dtype
     pbt: PBTMatchmakeConfig
 
     @staticmethod
@@ -48,6 +49,7 @@ class RolloutConfig:
         static_play_portion: float,
         policy_dtype: jnp.dtype,
         reward_dtype: jnp.dtype = jnp.float32,
+        prob_dtype: jnp.dtype = jnp.float32,
         policy_chunk_size_override: int = 0,
     ):
         pbt = PBTMatchmakeConfig.setup(
@@ -117,6 +119,7 @@ class RolloutConfig:
             total_policy_batch_size = total_policy_batch_size,
             policy_dtype = policy_dtype,
             reward_dtype = reward_dtype,
+            prob_dtype = prob_dtype,
             pbt = pbt,
         )
 
@@ -372,7 +375,7 @@ class RolloutManager:
         typed_shapes['actions'] = get_typed_shape(actions_abstract)
 
         typed_shapes['log_probs'] = TypedShape(
-            typed_shapes['actions'].shape, self._cfg.policy_dtype)
+            typed_shapes['actions'].shape, self._cfg.prob_dtype)
 
         typed_shapes['rewards'] = TypedShape(
           (self._cfg.sim_batch_size, 1), self._cfg.reward_dtype)
@@ -641,7 +644,7 @@ class RolloutManager:
             returns = advantages + unnormalized_values
 
             rollouts = rollouts.copy({
-                'advantages': advantages.astype(self._cfg.policy_dtype),
+                'advantages': advantages.astype(self._cfg.prob_dtype),
             })
 
         else:
