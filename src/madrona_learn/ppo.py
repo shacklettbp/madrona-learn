@@ -124,17 +124,18 @@ def _ppo_update(
         new_values_normalized = fwd_results['values']
 
         if cfg.compute_advantages:
-            advantages = mb['advantages']
+            advantages = mb['advantages'].astype(jnp.float32)
             if cfg.normalize_advantages:
                 advantages = zscore_data(advantages)
         else:
             # For simplicity below when computing the surrogate loss
             # just use the general name "advantages"
-            advantages = mb['returns']
+            advantages = mb['returns'].astype(jnp.float32)
             if cfg.normalize_returns:
                 advantages = zscore_data(advantages)
 
-        ratio = jnp.exp(new_log_probs - mb['log_probs'])
+        old_log_probs = mb['log_probs'].astype(jnp.float32)
+        ratio = jnp.exp(new_log_probs - old_log_probs)
 
         num_action_dims = len(ratio.shape) - 2
 

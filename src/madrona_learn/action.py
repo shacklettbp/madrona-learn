@@ -16,7 +16,7 @@ class DiscreteActionDistributions(flax.struct.PyTreeNode):
             logits_slice = self.all_logits[
                 ..., cur_bucket_offset:cur_bucket_offset + num_buckets]
 
-            yield logits_slice
+            yield logits_slice.astype(jnp.float32)
 
             cur_bucket_offset += num_buckets
 
@@ -54,9 +54,15 @@ class DiscreteActionDistributions(flax.struct.PyTreeNode):
 
         for i, logits in enumerate(self._iter_logits()):
             actions = jnp.expand_dims(all_actions[..., i], axis=-1)
+            # This is equivalent to jax.nn.log_softmax. This formulation is
+            # slightly more efficient for action sampling, so keep it the 
+            # same here. Worth noting that log_softmax doesn't have a custom
+            # jvp in jax (unlike jax.nn.softmax)
             log_probs = \
                 logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-            p_logp = jnp.exp(log_probs) * log_probs
+            # Using jax.nn.softmax here rather than jnp.exp(log_probs).
+            # jax has a custom jvp for jax.nn.softmax for one.
+            p_logp = jax.nn.softmax(logits) * log_probs
             entropies = -p_logp.sum(axis=-1, keepdims=True)
 
             action_log_probs = jnp.take_along_axis(log_probs, actions, axis=-1)
