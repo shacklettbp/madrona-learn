@@ -253,8 +253,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
                 jax.tree.map(to_jax, loaded['policy_states']['obs_preprocess_state'])),
             reward_hyper_params = reward_hyper_params,
             get_episode_scores_fn = get_episode_scores_fn,
-            episode_score = episode_score,
-            mmr = mmr,
+            episode_score = jax.tree.map(to_jax, episode_score),
+            mmr = jax.tree.map(to_jax, mmr),
         ), num_train_policies, total_num_policies
 
     @staticmethod
