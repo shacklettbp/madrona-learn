@@ -1,4 +1,5 @@
 import jax
+import numpy as np
 from jax import lax, random, numpy as jnp
 import flax
 from flax import linen as nn
@@ -93,7 +94,7 @@ class MLP(nn.Module):
     num_channels: int
     num_layers: int
     dtype: jnp.dtype
-    weight_init: Callable = jax.nn.initializers.he_normal()
+    weight_init: Callable = jax.nn.initializers.orthogonal(scale=np.sqrt(2))
 
     @nn.compact
     def __call__(self, inputs, train):
@@ -135,7 +136,7 @@ class DenseLayerDiscreteActor(nn.Module):
 
 class DenseLayerCritic(nn.Module):
     dtype: jnp.dtype
-    weight_init: Callable = jax.nn.initializers.orthogonal()
+    weight_init: Callable = jax.nn.initializers.orthogonal(scale=1.0)
 
     @nn.compact
     def __call__(self, features, train=False):
@@ -154,7 +155,7 @@ class EntitySelfAttentionNet(nn.Module):
     num_out_channels: int
     num_heads: int
     dtype: jnp.dtype
-    dense_init: Callable = jax.nn.initializers.orthogonal()
+    dense_init: Callable = jax.nn.initializers.orthogonal(scale=np.sqrt(2))
     # To follow the paper, this should be true. If the observations are
     # already egocentric, this seems redundant.
     embed_concat_self: bool = False
