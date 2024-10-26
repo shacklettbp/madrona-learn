@@ -311,6 +311,7 @@ class RolloutManager:
         cpu_dev = jax.devices('cpu')[0]
 
         self._cfg = rollout_cfg
+        self._critic_outputs_distribution = train_cfg.dreamer_v3_critic
 
         self._num_bptt_chunks = train_cfg.num_bptt_chunks
         assert train_cfg.steps_per_update % train_cfg.num_bptt_chunks == 0
@@ -384,7 +385,7 @@ class RolloutManager:
             (self._cfg.sim_batch_size, 1), jnp.bool_)
 
         typed_shapes['values'] = TypedShape(
-            (self._cfg.sim_batch_size, 1), self._cfg.policy_dtype)
+            (self._cfg.sim_batch_size, 1), self._cfg.reward_dtype)
 
         def expand_per_step_shapes(x):
             return TypedShape((
@@ -415,7 +416,8 @@ class RolloutManager:
     ):
         new_metrics = {
             'Rewards': Metric.init(True),
-            'Returns': Metric.init(True),
+            'Est Returns': Metric.init(True),
+            #'Env Returns': Metric.init(True),
             'Values': Metric.init(True),
         }
 
@@ -521,6 +523,12 @@ class RolloutManager:
 
         return jax.tree_map(to_train, data)
 
+    def _compute_value_estimate(self, critic_out):
+        if not self._critic_outputs_distribution:
+            return critic_out
+        else:
+            return critic_out.mean()
+
     def _bootstrap_values(self, policy_states, train_states, rollout_state):
         rnn_states = rollout_state.rnn_states
         obs = rollout_state.cur_obs
@@ -547,7 +555,7 @@ class RolloutManager:
                 method='critic_only',
             )
 
-            return policy_out['values']
+            return self._compute_value_estimate(policy_out['critic'])
 
         return critic_fn(policy_states, rnn_states, obs)
 
@@ -565,7 +573,8 @@ class RolloutManager:
         collect_state: RolloutCollectState,
     ):
         with profile('Pre Step Rollout Store'):
-            values = self._policy_to_train(policy_out['values'], reorder_state)
+            values = self._compute_value_estimate(policy_out['critic'])
+            values = self._policy_to_train(values, reorder_state)
 
             preprocessed_obs, actions, log_probs = self._policy_to_train(
                 (preprocessed_obs,
@@ -616,18 +625,22 @@ class RolloutManager:
     def _finalize_rollouts(self, train_states, rollouts, bootstrap_values,
                            metrics, user_state, user_finish_rollouts_hook,
                            user_metrics_hook):
-        def invert_value_norm(train_state, v):
-            return train_state.value_normalizer.invert(
-                train_state.value_normalizer_state, v)
+        if train_states.value_normalizer == None:
+            unnormalized_values = rollouts['values']
+            unnormalized_bootstrap_values = bootstrap_values
+        else:
+            def invert_value_norm(train_state, v):
+                return train_state.value_normalizer.invert(
+                    train_state.value_normalizer_state, v)
 
-        unnormalized_values = jax.vmap(invert_value_norm,
-            in_axes=(0, 2), out_axes=2)(train_states, rollouts['values'])
+            unnormalized_values = jax.vmap(invert_value_norm,
+                in_axes=(0, 2), out_axes=2)(train_states, rollouts['values'])
 
-        unnormalized_bootstrap_values = jax.vmap(invert_value_norm)(
-            train_states, bootstrap_values)
+            unnormalized_bootstrap_values = jax.vmap(invert_value_norm)(
+                train_states, bootstrap_values)
 
-        assert unnormalized_values.dtype == self._cfg.reward_dtype
-        assert unnormalized_bootstrap_values.dtype == self._cfg.reward_dtype
+            assert unnormalized_values.dtype == self._cfg.reward_dtype
+            assert unnormalized_bootstrap_values.dtype == self._cfg.reward_dtype
 
         rollouts, user_state = user_finish_rollouts_hook(
             rollouts, bootstrap_values, unnormalized_values,
@@ -681,7 +694,7 @@ class RolloutManager:
         metrics = metrics.record({
             'Rewards': rollouts['rewards'],
             'Values': reorder_seq_data(unnormalized_values),
-            'Returns': rollouts['returns'],
+            'Est Returns': rollouts['returns'],
             'Bootstrap Values': unnormalized_bootstrap_values,
         })
 

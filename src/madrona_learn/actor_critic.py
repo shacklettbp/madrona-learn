@@ -7,7 +7,7 @@ from flax.core import frozen_dict, FrozenDict
 from dataclasses import dataclass
 from typing import Optional, List, Union, Callable
 
-from .action import DiscreteActionDistributions
+from .dists import DiscreteActionDistributions
 from .profile import profile
 
 class Backbone(nn.Module):
@@ -65,10 +65,10 @@ class ActorCritic(nn.Module):
     def critic_only(self, rnn_states_in, obs_in, train=False):
         critic_features, rnn_states_out = self.backbone.critic_only(
             rnn_states_in, obs_in, train=train)
-        values = self.critic(critic_features, train=train)
+        critic_out = self.critic(critic_features, train=train)
 
         return FrozenDict({
-            'values': values,
+            'critic': critic_out,
         }), rnn_states_out
 
     def rollout(self, prng_key, rnn_states_in, obs_in, train=False,
@@ -87,7 +87,7 @@ class ActorCritic(nn.Module):
             actions = action_dists.best()
 
         results['actions'] = actions
-        results['values'] = self.critic(critic_features, train=train)
+        results['critic'] = self.critic(critic_features, train=train)
 
         if return_debug:
             results['action_probs'] = action_dists.probs()
@@ -107,7 +107,7 @@ class ActorCritic(nn.Module):
             rnn_states, sequence_breaks, obs, train=train)
 
         action_dists = self.actor(actor_features, train=train)
-        values = self.critic(critic_features, train=train)
+        critic_out = self.critic(critic_features, train=train)
 
         T, N = rollout_actions.shape[0:2]
         flattened_actions = rollout_actions.reshape(
@@ -117,12 +117,13 @@ class ActorCritic(nn.Module):
 
         log_probs = log_probs.reshape(T, N, *log_probs.shape[1:])
         entropies = entropies.reshape(T, N, *entropies.shape[1:])
-        values = values.reshape(T, N, *values.shape[1:])
+        critic_out = jax.tree.map(
+            lambda x: x.reshape(T, N, *x.shape[1:]), critic_out)
 
         return FrozenDict({
             'log_probs': log_probs,
             'entropies': entropies,
-            'values': values,
+            'critic': critic_out,
         })
 
 

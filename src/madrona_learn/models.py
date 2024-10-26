@@ -7,7 +7,7 @@ from flax.core import FrozenDict
 
 from typing import List, Callable, Any
 
-from .action import DiscreteActionDistributions
+from .dists import DiscreteActionDistributions, SymExpTwoHotDistribution
 
 #from .pallas import monkeypatch as _pl_patch
 #from .pallas import layer_norm as pl_layer_norm
@@ -147,6 +147,26 @@ class DenseLayerCritic(nn.Module):
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )(features)
+
+
+class DreamerV3Critic(nn.Module):
+    dtype: jnp.dtype
+    weight_init: Callable = jax.nn.initializers.constant(0)
+
+    # Note that default num_bins in dreamerv3 codebase is 255
+    num_bins: int = 63
+
+    @nn.compact
+    def __call__(self, features, train=False):
+        logits = nn.Dense(
+                self.num_bins,
+                use_bias=True,
+                kernel_init=self.weight_init,
+                bias_init=jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )(features)
+
+        return SymExpTwoHotDistribution.create(logits)
 
 
 # Based on the Emergent Tool Use policy paper

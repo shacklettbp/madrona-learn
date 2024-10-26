@@ -70,10 +70,11 @@ class TrainConfig:
     seed: int
     gae_lambda: float = 1.0
     pbt: Optional[PBTConfig] = None
+    dreamer_v3_critic: bool = True 
     compute_advantages: bool = True
     normalize_advantages: bool = True # Only used if compute_advantages = True
     normalize_returns: bool = True # Only used if compute_advantages = False
-    normalize_values: bool = True
+    normalize_values: bool = False
     value_normalizer_decay: float = 0.99999
     compute_dtype: jnp.dtype = jnp.float32
 

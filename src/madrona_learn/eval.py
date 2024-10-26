@@ -86,9 +86,10 @@ def _eval_policies_impl(
     num_agents_per_world = eval_cfg.team_size * eval_cfg.num_teams
     sim_batch_size = eval_cfg.num_worlds * num_agents_per_world
 
-    if eval_cfg.eval_competitive and hasattr(policy_states, 'mmr'):
+    if hasattr(policy_states, 'mmr') and policy_states.mmr != None:
         num_eval_policies = policy_states.mmr.elo.shape[0]
-    elif hasattr(policy_states, 'episode_score'):
+    elif (hasattr(policy_states, 'episode_score') and
+          policy_states.episode_score != None):
         num_eval_policies = policy_states.episode_score.mean.shape[0]
     else:
         num_eval_policies = 1

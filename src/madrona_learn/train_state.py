@@ -84,9 +84,9 @@ class PolicyState(flax.struct.PyTreeNode):
 
 
 class PolicyTrainState(flax.struct.PyTreeNode):
-    value_normalizer: EMANormalizer = flax.struct.field(pytree_node=False)
+    value_normalizer: Optional[EMANormalizer] = flax.struct.field(pytree_node=False)
     tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
-    value_normalizer_state: FrozenDict[str, Any]
+    value_normalizer_state: Optional[FrozenDict[str, Any]]
     hyper_params: HyperParams
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
@@ -291,11 +291,8 @@ class TrainStateManager(flax.struct.PyTreeNode):
 
 
 def _setup_value_normalizer(hyper_params, fake_values):
-    value_norm_decay = (hyper_params.value_normalizer_decay 
-                        if hyper_params.normalize_values else 1.0)
-
     value_normalizer = EMANormalizer(
-        decay = value_norm_decay,
+        decay = hyper_params.value_normalizer_decay,
         norm_dtype = fake_values.dtype,
         inv_dtype = jnp.float32,
         disable = not hyper_params.normalize_values,
@@ -373,8 +370,14 @@ def _setup_train_state(
     hyper_params = algo.init_hyperparams(cfg)
     optimizer = algo.make_optimizer(hyper_params)
 
-    value_norm, value_norm_state = _setup_value_normalizer(
-        hyper_params, fake_policy_out['values'])
+    if cfg.normalize_values:
+        assert fake_policy_out['critic'].shape[-1] == 1
+
+        value_norm, value_norm_state = _setup_value_normalizer(
+            hyper_params, fake_policy_out['critic'])
+    else:
+        value_norm = None
+        value_norm_state = None
 
     opt_state = optimizer.init(policy_state.params)
 

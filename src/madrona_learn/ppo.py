@@ -29,7 +29,7 @@ class PPOConfig(AlgoConfig):
     entropy_coef: Union[float, ParamExplore]
     max_grad_norm: float
     clip_value_loss: bool = False
-    huber_value_loss: bool = True
+    huber_value_loss: bool = False
 
     def name(self):
         return "ppo"
@@ -50,6 +50,11 @@ class PPO(AlgoBase):
         self,
         cfg: TrainConfig,
     ):
+        if cfg.dreamer_v3_critic:
+            assert not cfg.algo.clip_value_loss
+            assert not cfg.algo.huber_value_loss
+            assert not cfg.normalize_values
+
         if isinstance(cfg.lr, ParamExplore):
             lr = cfg.lr.base
         else:
@@ -121,7 +126,6 @@ def _ppo_update(
         fwd_results, ac_mutable_new = fwd_pass(params)
         new_log_probs = fwd_results['log_probs']
         entropies = fwd_results['entropies']
-        new_values_normalized = fwd_results['values']
 
         if cfg.compute_advantages:
             advantages = mb['advantages'].astype(jnp.float32)
@@ -151,24 +155,35 @@ def _ppo_update(
 
         action_obj = jnp.minimum(surr1, surr2)
 
-        if cfg.algo.clip_value_loss:
-            old_values_normalized = mb['values']
+        if cfg.dreamer_v3_critic:
+            critic_distributions = fwd_results['critic']
 
-            low = old_values_normalized - train_state.hyper_params.clip_coef
-            high = old_values_normalized + train_state.hyper_params.clip_coef
+            value_loss = - critic_distributions.two_hot_cross_entropy_loss(
+                mb['returns'])
 
-            new_values_normalized = jnp.clip(new_values_normalized, low, high)
-
-        new_value_norm_state, normalized_returns = (
-            value_norm.normalize_and_update_estimates(
-                train_state.value_normalizer_state, mb['returns']))
-
-        if cfg.algo.huber_value_loss:
-            value_loss = optax.huber_loss(
-                new_values_normalized, normalized_returns)
+            new_value_norm_state = None
         else:
-            value_loss = optax.l2_loss(
-                new_values_normalized, normalized_returns)
+            assert fwd_results['critic'].shape == 1
+            new_values_normalized = fwd_results['critic']
+
+            if cfg.algo.clip_value_loss:
+                old_values_normalized = mb['values']
+
+                low = old_values_normalized - train_state.hyper_params.clip_coef
+                high = old_values_normalized + train_state.hyper_params.clip_coef
+
+                new_values_normalized = jnp.clip(new_values_normalized, low, high)
+
+            new_value_norm_state, normalized_returns = (
+                value_norm.normalize_and_update_estimates(
+                    train_state.value_normalizer_state, mb['returns']))
+
+            if cfg.algo.huber_value_loss:
+                value_loss = optax.huber_loss(
+                    new_values_normalized, normalized_returns)
+            else:
+                value_loss = optax.l2_loss(
+                    new_values_normalized, normalized_returns)
 
         action_obj = jnp.mean(action_obj, dtype=jnp.float32)
         value_loss = jnp.mean(value_loss, dtype=jnp.float32)

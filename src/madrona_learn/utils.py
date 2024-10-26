@@ -31,3 +31,9 @@ def convert_float_leaves(data, desired_dtype):
             return x
 
     return jax.tree_map(convert, data)
+
+def symlog(x):
+    return jnp.sign(x) * jnp.log1p(jnp.abs(x))
+
+def symexp(x):
+    return jnp.sign(x) * jnp.expm1(jnp.abs(x))

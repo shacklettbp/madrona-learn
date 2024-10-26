@@ -5,7 +5,7 @@ from madrona_learn.cfg import (
     PBTConfig,
     ParamExplore,
 )
-from madrona_learn.action import DiscreteActionDistributions
+from madrona_learn.dists import DiscreteActionDistributions
 from madrona_learn.actor_critic import (
     ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
     Backbone, BackboneShared, BackboneSeparate,
