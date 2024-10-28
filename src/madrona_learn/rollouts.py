@@ -31,6 +31,7 @@ class RolloutConfig:
     policy_chunk_size: int
     num_policy_chunks: int
     total_policy_batch_size: int
+    reward_gamma: float
     policy_dtype: jnp.dtype
     reward_dtype: jnp.dtype
     prob_dtype: jnp.dtype
@@ -47,6 +48,7 @@ class RolloutConfig:
         cross_play_portion: float,
         past_play_portion: float,
         static_play_portion: float,
+        reward_gamma: float,
         policy_dtype: jnp.dtype,
         reward_dtype: jnp.dtype = jnp.float32,
         prob_dtype: jnp.dtype = jnp.float32,
@@ -117,6 +119,7 @@ class RolloutConfig:
             policy_chunk_size = policy_chunk_size,
             num_policy_chunks = num_policy_chunks,
             total_policy_batch_size = total_policy_batch_size,
+            reward_gamma = reward_gamma,
             policy_dtype = policy_dtype,
             reward_dtype = reward_dtype,
             prob_dtype = prob_dtype,
@@ -168,6 +171,7 @@ class RolloutState(flax.struct.PyTreeNode):
     rnn_states: Any
     reorder_state: PolicyBatchReorderState
     policy_assignments: jax.Array
+    env_returns: jax.Array
 
     @staticmethod
     def create(
@@ -200,6 +204,10 @@ class RolloutState(flax.struct.PyTreeNode):
         init_sim_state = init_out['state']
         init_obs = init_out['obs']
 
+        init_env_returns = jnp.zeros(
+            (rollout_cfg.sim_batch_size, 1),
+            dtype=rollout_cfg.reward_dtype)
+
         return RolloutState(
             step_fn = step_fn,
             load_ckpts_fn = load_ckpts_fn,
@@ -210,6 +218,7 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
+            env_returns = init_env_returns,
         )
 
     def update(
@@ -220,6 +229,7 @@ class RolloutState(flax.struct.PyTreeNode):
         rnn_states=None,
         reorder_state=None,
         policy_assignments=None,
+        env_returns=None,
     ):
         return RolloutState(
             step_fn = self.step_fn,
@@ -236,6 +246,8 @@ class RolloutState(flax.struct.PyTreeNode):
             policy_assignments = (
                 policy_assignments if policy_assignments != None else
                     self.policy_assignments),
+            env_returns = (env_returns if env_returns != None else
+                self.env_returns),
         )
 
     def get_current_checkpoints(self):
@@ -274,13 +286,20 @@ class RolloutData(flax.struct.PyTreeNode):
 class RolloutCollectState(flax.struct.PyTreeNode):
     store: FrozenDict[str, Any]
     obs_stats: FrozenDict[str, Any]
+    env_returns_metric: Metric 
 
     @staticmethod
-    def create(store_typed_shapes, init_obs_stats):
+    def create(store_typed_shapes, init_obs_stats, num_train_policies):
+        @partial(jax.vmap, in_axes=None, out_axes=0,
+                 axis_size=num_train_policies)
+        def expand_metric(x):
+            return x
+
         return RolloutCollectState(
             store = jax.tree_map(
                 lambda x: jnp.empty(x.shape, x.dtype), store_typed_shapes),
             obs_stats = init_obs_stats,
+            env_returns_metric = expand_metric(Metric.init(True)),
         )
 
     def save(self, indices, data):
@@ -417,7 +436,7 @@ class RolloutManager:
         new_metrics = {
             'Rewards': Metric.init(True),
             'Est Returns': Metric.init(True),
-            #'Env Returns': Metric.init(True),
+            'Env Returns': Metric.init(True),
             'Values': Metric.init(True),
         }
 
@@ -476,11 +495,16 @@ class RolloutManager:
         collect_state = RolloutCollectState.create(
             self._store_typed_shape_tree,
             obs_preprocess.init_obs_stats(obs_preprocess_train_state, True),
+            self._num_train_policies,
         )
 
         rollout_state, policy_states, collect_state = lax.fori_loop(
             0, self._num_bptt_chunks, iter_bptt_chunk,
             (rollout_state, policy_states, collect_state))
+
+        metrics = metrics.update_metrics({
+            'Env Returns': collect_state.env_returns_metric,
+        })
 
         with profile("Bootstrap Values"):
             bootstrap_values = self._bootstrap_values(
@@ -611,10 +635,26 @@ class RolloutManager:
         sim_state: Any,
         dones: jax.Array,
         rewards: jax.Array,
+        env_returns: jax.Array,
         reorder_state: PolicyBatchReorderState,
         collect_state: RolloutCollectState,
     ):
         with profile('Post Step Rollout Store'):
+            @jax.vmap
+            def compute_env_returns_metrics(env_returns, dones):
+                return Metric.init_from_data_masked(
+                    per_policy=True,
+                    data=env_returns,
+                    mask=dones,
+                )
+
+            new_env_returns_metrics = compute_env_returns_metrics(
+                self._sim_to_train(env_returns, reorder_state),
+                self._sim_to_train(dones, reorder_state))
+
+            collect_state = collect_state.replace(env_returns_metric =
+                collect_state.env_returns_metric.merge(new_env_returns_metrics))
+
             save_data = self._sim_to_train({
                 'dones': dones,
                 'rewards': rewards,
@@ -622,9 +662,16 @@ class RolloutManager:
             return sim_state, collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
-    def _finalize_rollouts(self, train_states, rollouts, bootstrap_values,
-                           metrics, user_state, user_finish_rollouts_hook,
-                           user_metrics_hook):
+    def _finalize_rollouts(
+        self,
+        train_states,
+        rollouts,
+        bootstrap_values,
+        metrics,
+        user_state,
+        user_finish_rollouts_hook,
+        user_metrics_hook
+    ):
         if train_states.value_normalizer == None:
             unnormalized_values = rollouts['values']
             unnormalized_bootstrap_values = bootstrap_values
@@ -821,6 +868,9 @@ def rollout_loop(
             rewards = step_output['rewards'].astype(rollout_cfg.reward_dtype)
             sim_obs = step_output['obs']
 
+            env_returns = (
+                rewards + rollout_cfg.reward_gamma * rollout_state.env_returns)
+
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
 
@@ -845,7 +895,10 @@ def rollout_loop(
                     rollout_cfg.pbt)
 
             sim_state, cb_state = post_step_cb(
-                step_idx, sim_state, dones, rewards, reorder_state, cb_state)
+                step_idx, sim_state, dones, rewards, env_returns,
+                reorder_state, cb_state)
+
+            env_returns = jnp.where(dones, 0, env_returns)
 
         rollout_state = rollout_state.update(
             prng_key = prng_key,
@@ -854,6 +907,7 @@ def rollout_loop(
             cur_obs = sim_obs,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
+            env_returns = env_returns,
         )
 
         return rollout_state, policy_states, cb_state

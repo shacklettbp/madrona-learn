@@ -40,9 +40,6 @@ class TrainHooks:
 
     # You need to implement this function in your class. This is where (based
     # on update_idx) you save train_state_mgr to disk, write metrics, etc.
-    # Return true if metrics should be reset (for example after writing them
-    # to disk). If you return false, metrics will continue to be averaged
-    # until the next call to this function.
     # Whatever is returned by user_state above will be in
     # train_state_mgr.user_state
     def post_update(
@@ -141,7 +138,17 @@ def _update_loop(
     if outer_loop_interval == 0:
         outer_loop_interval = num_updates_remaining
 
-    @jax.vmap
+    metrics = algo.add_metrics(cfg, FrozenDict())
+    metrics = rollout_mgr.add_metrics(cfg, metrics)
+    metrics = user_hooks.add_metrics(metrics)
+    metrics = TrainingMetrics.create(cfg, metrics, start_update_idx)
+
+    metrics_vmap = jax.tree_util.tree_map_with_path(
+        lambda kp, x: 1 if kp[0].name == 'metrics' else None, metrics)
+
+    @partial(jax.vmap,
+             in_axes=(0, 0, 0, metrics_vmap),
+             out_axes=(0, 0, metrics_vmap))
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
             cfg, 
@@ -197,10 +204,9 @@ def _update_loop(
                 train_states = updated_train_states,
             )
             
-        reset_metrics = user_hooks.post_update(update_idx, metrics, train_state_mgr)
+        user_hooks.post_update(update_idx, metrics, train_state_mgr)
 
-        metrics = lax.cond(
-            reset_metrics, lambda: metrics.reset(), lambda: metrics)
+        metrics = metrics.advance()
 
         return rollout_state, train_state_mgr, metrics
 
@@ -222,11 +228,6 @@ def _update_loop(
         
         return rollout_state, train_state_mgr, metrics
     
-    metrics = algo.add_metrics(cfg, FrozenDict())
-    metrics = rollout_mgr.add_metrics(cfg, metrics)
-    metrics = user_hooks.add_metrics(metrics)
-    metrics = TrainingMetrics.create(cfg, metrics)
-
     num_outer_iters = num_updates_remaining // outer_loop_interval
     if num_outer_iters * outer_loop_interval < num_updates_remaining:
         num_outer_iters += 1
@@ -255,6 +256,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
             static_play_portion = 0.0,
+            reward_gamma = cfg.gamma,
             policy_dtype = cfg.compute_dtype,
             policy_chunk_size_override = \
                 cfg.pbt.rollout_policy_chunk_size_override,
@@ -270,6 +272,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 0.0,
+            reward_gamma = cfg.gamma,
             policy_dtype = cfg.compute_dtype,
         )
 

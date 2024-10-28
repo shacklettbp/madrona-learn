@@ -28,6 +28,44 @@ class Metric(flax.struct.PyTreeNode):
             count = jnp.int32(0),
         )
 
+    @staticmethod
+    def init_from_data(per_policy, data):
+        num_new_elems = jnp.int32(data.size)
+        mean = jnp.mean(data, dtype=jnp.float32)
+        min = jnp.min(data).astype(jnp.float32)
+        max = jnp.max(data).astype(jnp.float32)
+
+        deltas = data.astype(jnp.float32) - mean
+        m2 = jnp.sum(deltas * deltas, dtype=jnp.float32)
+        
+        return Metric(
+            per_policy = per_policy,
+            mean = mean,
+            m2 = m2,
+            min = min,
+            max = max,
+            count = num_new_elems,
+        )
+
+    @staticmethod
+    def init_from_data_masked(per_policy, data, mask):
+        num_new_elems = jnp.int32(data.size)
+        mean = jnp.mean(data, dtype=jnp.float32)
+        min = jnp.min(data).astype(jnp.float32)
+        max = jnp.max(data).astype(jnp.float32)
+
+        deltas = data.astype(jnp.float32) - mean
+        m2 = jnp.sum(deltas * deltas, dtype=jnp.float32)
+        
+        return Metric(
+            per_policy = per_policy,
+            mean = mean,
+            m2 = m2,
+            min = min,
+            max = max,
+            count = num_new_elems,
+        )
+
     def reset(self):
         return Metric(
             per_policy = self.per_policy,
@@ -38,13 +76,37 @@ class Metric(flax.struct.PyTreeNode):
             count = jnp.zeros_like(self.count),
         )
 
+    def merge(self, new_metric):
+        new_count = self.count + new_metric.count 
+
+        delta = new_metric.mean - self.mean
+
+        safe_denom = 1 / jnp.maximum(new_count.astype(jnp.float32), 1)
+
+        mean = (self.mean + delta * 
+                new_metric.count.astype(jnp.float32) * safe_denom)
+        m2 = (self.m2 + new_metric.m2 + delta * delta *
+              self.count.astype(jnp.float32) *
+              new_metric.count.astype(jnp.float32) * safe_denom)
+
+        return self.replace(
+            mean = mean,
+            m2 = m2,
+            min = jnp.minimum(self.min, new_metric.min),
+            max = jnp.maximum(self.max, new_metric.max),
+            count = new_count,
+        )
+
 
 class TrainingMetrics(flax.struct.PyTreeNode):
     metrics: FrozenDict[str, Metric]
+    update_idx: jnp.int32
+    cur_buffer_offset: jnp.int32
+    update_buffer_size: jnp.int32
     print_names: FrozenDict[str, str] = flax.struct.field(pytree_node=False)
 
     @staticmethod
-    def create(cfg, metrics: FrozenDict[str, Metric]):
+    def create(cfg, metrics: FrozenDict[str, Metric], start_update_idx: int):
         max_keylen = 0
         for name in metrics.keys():
             max_keylen = max(max_keylen, len(name))
@@ -55,77 +117,69 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
         num_policies = cfg.pbt.num_train_policies if cfg.pbt else 1
 
-        @partial(jax.vmap, in_axes=None, out_axes=0,
-                 axis_size=num_policies)
-        def expand_policy_dim(x):
-            return x
-
         def expand_metric(x):
-            if x.per_policy:
-                return expand_policy_dim(x)
-            else:
+            @partial(jax.vmap, in_axes=None, out_axes=0,
+                     axis_size=num_policies)
+            def expand_policy_dim(x):
                 return x
+
+            @partial(jax.vmap, in_axes=None, out_axes=0,
+                     axis_size=cfg.metrics_buffer_size)
+            def expand_time_dim(x):
+                return x
+
+            if x.per_policy:
+                x = expand_policy_dim(x)
+
+            x = expand_time_dim(x)
+
+            return x
 
         metrics = FrozenDict({k: expand_metric(v) for k,v in metrics.items()})
 
         return TrainingMetrics(
             metrics = metrics,
+            update_idx = jnp.asarray(start_update_idx, dtype=jnp.int32),
+            cur_buffer_offset = jnp.asarray(0, dtype=jnp.int32),
+            update_buffer_size = jnp.asarray(
+                cfg.metrics_buffer_size, dtype=jnp.int32),
             print_names = print_names,
         )
 
-    def _update_metric(self, cur_metric, new_data):
-        num_new_elems = new_data.size
-        new_data_mean = jnp.mean(new_data, dtype=jnp.float32)
-        new_data_min = jnp.asarray(jnp.min(new_data), dtype=jnp.float32)
-        new_data_max = jnp.asarray(jnp.max(new_data), dtype=jnp.float32)
+    def update_metrics(self, metrics):
+        updated_metrics = {}
+        for k in metrics.keys():
+            updated_metrics[k] = jax.tree.map(
+                lambda x, y: x.at[self.cur_buffer_offset].set(y),
+                self.metrics[k], metrics[k])
 
-        new_data_deltas = new_data - jnp.asarray(
-            new_data_mean, dtype=new_data.dtype)
-        new_data_m2 = jnp.sum(new_data_deltas * new_data_deltas,
-                              dtype=jnp.float32)
-
-        new_count = cur_metric.count + num_new_elems
-
-        delta = new_data_mean - cur_metric.mean
-
-        mean = (cur_metric.mean + delta * 
-            jnp.asarray(num_new_elems, dtype=jnp.float32) /
-            jnp.asarray(new_count, dtype=jnp.float32))
-        m2 = (cur_metric.m2 + new_data_m2  + delta * delta *
-              jnp.asarray(cur_metric.count, dtype=jnp.float32) *
-              jnp.asarray(num_new_elems, dtype=jnp.float32) /
-              jnp.asarray(new_count, dtype=jnp.float32))
-
-        return cur_metric.replace(
-            mean = mean,
-            m2 = m2,
-            min = jnp.minimum(cur_metric.min, new_data_min),
-            max = jnp.maximum(cur_metric.max, new_data_max),
-            count = new_count,
-        )
+        return self.replace(metrics = self.metrics.copy(updated_metrics))
 
     def record(self, data):
-        merged_metrics = {}
+        updated_metrics = {}
         for k in data.keys():
-            old_metric = self.metrics[k]
+            per_policy = self.metrics[k].per_policy
+
+            def init_metric(data):
+                return Metric.init_from_data(per_policy, data)
 
             # If this is a per-policy metric and record isn't being
-            # called in a vmap'd region, _update_metric needs to be vmapped
-            if old_metric.per_policy and old_metric.mean.ndim > 0:
-                update_metric = jax.vmap(self._update_metric)
-            else:
-                update_metric = self._update_metric
+            # called in a vmap'd region, update_metric needs to be vmapped
+            if per_policy and self.metrics[k].mean.ndim > 1:
+                init_metric = jax.vmap(init_metric)
 
-            merged_metrics[k] = update_metric(old_metric, data[k])
+            updated_metrics[k] = jax.tree.map(
+                lambda x, y: x.at[self.cur_buffer_offset].set(y),
+                self.metrics[k], init_metric(data[k]))
 
-        return self.replace(metrics = self.metrics.copy(merged_metrics))
-
-    def reset(self):
-        reset_metrics = FrozenDict({
-            k: m.reset() for k, m in self.metrics.items()
-        })
-
-        return self.replace(metrics = reset_metrics)
+        return self.replace(metrics = self.metrics.copy(updated_metrics))
+    
+    def advance(self):
+        return self.replace(
+            update_idx = self.update_idx + 1,
+            cur_buffer_offset =
+                (self.cur_buffer_offset + 1) % self.update_buffer_size,
+        )
 
     def pretty_print(self, tab=2):
         tab = ' ' * tab
@@ -155,22 +209,30 @@ class TrainingMetrics(flax.struct.PyTreeNode):
         
         print("\n".join(formatted))
 
-    def tensorboard_log(self, writer, update):
-        for name, metric in self.metrics.items():
-            if not metric.per_policy:
-                stddev = np.sqrt(metric.m2 / metric.count)
+    def tensorboard_log(self, writer):
+        for buf_idx in range(self.cur_buffer_offset):
+            out_idx = self.update_idx + buf_idx
 
-                writer.scalar(f"{name} Mean", metric.mean, update)
-                writer.scalar(f"{name} σ", stddev, update)
-                writer.scalar(f"{name} Min", metric.min, update)
-                writer.scalar(f"{name} Max", metric.max, update)
-            else:
-                num_policies = metric.mean.shape[0]
+            for name, metric in self.metrics.items():
+                if not metric.per_policy:
+                    stddev = np.sqrt(
+                        metric.m2[buf_idx] / metric.count[buf_idx])
 
-                for i in range(num_policies):
-                    stddev = np.sqrt(metric.m2[i] / metric.count[i])
+                    writer.scalar(f"{name} Mean", metric.mean[buf_idx], out_idx)
+                    writer.scalar(f"{name} σ", stddev, out_idx)
+                    writer.scalar(f"{name} Min", metric.min[buf_idx], out_idx)
+                    writer.scalar(f"{name} Max", metric.max[buf_idx], out_idx)
+                else:
+                    num_policies = metric.mean.shape[1]
 
-                    writer.scalar(f"p{i}/{name} Mean", metric.mean[i], update)
-                    writer.scalar(f"p{i}/{name} σ", stddev, update)
-                    writer.scalar(f"p{i}/{name} Min", metric.min[i], update)
-                    writer.scalar(f"p{i}/{name} Max", metric.max[i], update)
+                    for i in range(num_policies):
+                        stddev = np.sqrt(
+                            metric.m2[buf_idx, i] / metric.count[buf_idx, i])
+
+                        writer.scalar(f"p{i}/{name} Mean",
+                                      metric.mean[buf_idx, i], out_idx)
+                        writer.scalar(f"p{i}/{name} σ", stddev, out_idx)
+                        writer.scalar(f"p{i}/{name} Min",
+                                      metric.min[buf_idx, i], out_idx)
+                        writer.scalar(f"p{i}/{name} Max",
+                                      metric.max[buf_idx, i], out_idx)

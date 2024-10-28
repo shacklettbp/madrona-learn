@@ -68,6 +68,7 @@ class TrainConfig:
     num_bptt_chunks: int
     gamma: float
     seed: int
+    metrics_buffer_size: int
     gae_lambda: float = 1.0
     pbt: Optional[PBTConfig] = None
     dreamer_v3_critic: bool = True 

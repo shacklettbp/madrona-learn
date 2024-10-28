@@ -131,7 +131,7 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
         # Default bin spacing is e^-20 to e^20 in dreamerv3
         # Reduce the range as we're trying to use fewer bins / smaller models
         half = jnp.linspace(
-            -20, 0, (num_bins - 1) // 2 + 1, dtype=jnp.float32)
+            -14, 0, num_bins // 2 + 1, dtype=jnp.float32)
         half = symexp(half)
         bins = jnp.concatenate([half, -half[:-1][::-1]], axis=0)
 

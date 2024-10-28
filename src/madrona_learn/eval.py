@@ -24,6 +24,7 @@ class EvalConfig:
     num_teams: int
     team_size: int
     num_eval_steps: int
+    reward_gamma: float
     policy_dtype: jnp.dtype
     eval_competitive: bool
     use_deterministic_policy: bool = True
@@ -123,6 +124,7 @@ def _eval_policies_impl(
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 0.0,
+            reward_gamma = cfg.gamma,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
@@ -138,6 +140,7 @@ def _eval_policies_impl(
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 1.0,
+            reward_gamma = cfg.gamma,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
@@ -198,11 +201,13 @@ def _eval_policies_impl(
             'obs': obs,
         }))
 
-    def post_step_cb(step_idx, sim_state, dones, rewards, reorder_state, cb_state):
+    def post_step_cb(step_idx, sim_state, dones, rewards, env_returns,
+                     reorder_state, cb_state):
         step_data = cb_state.copy({
             'sim_state': sim_state,
             'dones': dones,
             'rewards': rewards,
+            'returns': env_returns,
         })
 
         sim_state = step_cb(step_data)
