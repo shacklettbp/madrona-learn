@@ -97,9 +97,10 @@ class PPO(AlgoBase):
     ):
         return metrics.copy({
             'Loss': Metric.init(True),
-            'Action Loss': Metric.init(True),
+            'Action Obj': Metric.init(True),
             'Value Loss': Metric.init(True),
-            'Entropy Loss': Metric.init(True),
+            'Value Errors': Metric.init(True),
+            'Entropy': Metric.init(True),
         })
 
 
@@ -153,18 +154,24 @@ def _ppo_update(
             1.0 + train_state.hyper_params.clip_coef.astype(ratio.dtype))
         surr2 = advantages * clipped_ratio
 
-        action_obj = jnp.minimum(surr1, surr2)
+        action_objs = jnp.minimum(surr1, surr2)
 
         if cfg.dreamer_v3_critic:
             critic_distributions = fwd_results['critic']
 
-            value_loss = - critic_distributions.two_hot_cross_entropy_loss(
+            value_losses = - critic_distributions.two_hot_cross_entropy_loss(
                 mb['returns'])
+
+            value_errs = critic_distributions.mean() - mb['returns']
 
             new_value_norm_state = None
         else:
             assert fwd_results['critic'].shape == 1
             new_values_normalized = fwd_results['critic']
+
+            value_errs = (value_norm.invert(train_state.value_normalizer_state,
+                                            new_values_normalized) - 
+                          mb['returns'])
 
             if cfg.algo.clip_value_loss:
                 old_values_normalized = mb['values']
@@ -179,18 +186,18 @@ def _ppo_update(
                     train_state.value_normalizer_state, mb['returns']))
 
             if cfg.algo.huber_value_loss:
-                value_loss = optax.huber_loss(
+                value_losses = optax.huber_loss(
                     new_values_normalized, normalized_returns)
             else:
-                value_loss = optax.l2_loss(
+                value_losses = optax.l2_loss(
                     new_values_normalized, normalized_returns)
 
-        action_obj = jnp.mean(action_obj, dtype=jnp.float32)
-        value_loss = jnp.mean(value_loss, dtype=jnp.float32)
+        action_obj_avg = jnp.mean(action_objs, dtype=jnp.float32)
+        value_loss = jnp.mean(value_losses, dtype=jnp.float32)
         entropy_avg = jnp.mean(entropies, dtype=jnp.float32)
 
         # Maximize the action objective function
-        action_loss = -action_obj 
+        action_loss = -action_obj_avg
         value_loss = train_state.hyper_params.value_loss_coef * value_loss
         # Maximize entropy
         entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
@@ -201,9 +208,10 @@ def _ppo_update(
             ac_mutable_new['batch_stats'],
             new_value_norm_state,
             loss,
-            action_loss,
-            value_loss,
-            entropy_loss,
+            action_objs,
+            value_losses,
+            entropies,
+            value_errs,
         )
 
     with profile('Optimize'):
@@ -239,9 +247,10 @@ def _ppo_update(
             new_ac_batch_stats,
             new_value_norm_state,
             combined_loss,
-            action_loss,
-            value_loss,
-            entropy_loss,
+            action_objs,
+            value_losses,
+            entropies,
+            value_errs,
         ) = aux[1]
 
         policy_state = policy_state.update(
@@ -258,9 +267,10 @@ def _ppo_update(
     with profile('Record Metrics'):
         metrics = metrics.record({
             'Loss': combined_loss,
-            'Action Loss': action_loss,
-            'Value Loss': value_loss,
-            'Entropy Loss': entropy_loss,
+            'Action Obj': action_objs,
+            'Value Loss': value_losses,
+            'Value Errors': value_errs,
+            'Entropy': entropies,
         })
 
     return policy_state, train_state, metrics
