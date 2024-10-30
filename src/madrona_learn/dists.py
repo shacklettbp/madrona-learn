@@ -165,7 +165,7 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
              (p3 * b3)).sum(axis=-1, keepdims=True)
         )
 
-        return symexp(weighted_avg)
+        return weighted_avg
 
     def two_hot_cross_entropy_loss(self, targets):
         assert targets.dtype == jnp.float32
@@ -173,7 +173,6 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
         bins = self._compute_bins()
         num_bins = bins.shape[-1]
 
-        targets = symlog(targets)
         lower_bin_idx = (
             (bins <= targets).astype(jnp.int32).sum(axis=-1) - 1
         )

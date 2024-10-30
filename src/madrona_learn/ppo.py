@@ -196,7 +196,6 @@ def _ppo_update(
         entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
 
         loss = action_loss + value_loss + entropy_loss
-        loss = loss.astype(cfg.compute_dtype)
 
         return loss, (
             ac_mutable_new['batch_stats'],

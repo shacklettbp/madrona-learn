@@ -124,7 +124,7 @@ def _eval_policies_impl(
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 0.0,
-            reward_gamma = cfg.gamma,
+            reward_gamma = eval_cfg.reward_gamma,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
@@ -140,7 +140,7 @@ def _eval_policies_impl(
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
             static_play_portion = 1.0,
-            reward_gamma = cfg.gamma,
+            reward_gamma = eval_cfg.reward_gamma,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
