@@ -167,7 +167,7 @@ class TrainStateManager(flax.struct.PyTreeNode):
             else:
                 return a
 
-        return TrainStateManager(
+        return self.replace(
             policy_states = jax.tree.map(to_jax_and_dtype,
                 loaded['policy_states'], self.policy_states),
             train_states = jax.tree.map(to_jax_and_dtype,

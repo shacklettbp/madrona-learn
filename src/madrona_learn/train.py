@@ -22,6 +22,33 @@ from .train_state import PolicyState, PolicyTrainState, TrainStateManager
 from .pbt import pbt_update, pbt_explore_hyperparams
 from .policy import Policy
 from .profile import profile
+from .utils import aot_compile, get_checkify_errors
+
+class TrainingManager(flax.struct.PyTreeNode):
+    state: TrainStateManager
+    rollout: RolloutState
+    metrics: TrainingMetrics
+    update_idx: int
+    update_fn: Callable = flax.struct.field(pytree_node=False)
+    profile_port: int = flax.struct.field(pytree_node=False)
+
+    def save_ckpt(self, path):
+        self.state.save(self.update_idx, path)
+
+    def load_ckpt(self, path):
+        return self.replace(state=self.load(path))
+
+    def update_iter(self):
+        new_state, new_rollout, new_metrics = self.update_fn(
+            self.state, self.rollout, self.metrics, self.update_idx)
+
+        return self.replace(
+            state=new_state,
+            rollout=new_rollout,
+            metrics=new_metrics,
+            update_idx=self.update_idx + 1,
+        )
+
 
 # Inherit from this class and override any methods you see fit to modify / add
 # functionality in the training loop. Note that this class itself (and any
@@ -98,7 +125,8 @@ class TrainHooks:
     ):
         return metrics
 
-def train(
+
+def init_training(
     dev: jax.Device,
     cfg: TrainConfig,
     sim_fns: Dict[str, Callable],
@@ -106,43 +134,31 @@ def train(
     user_hooks: TrainHooks,
     restore_ckpt: str = None,
     profile_port: int = None,
-):
+) -> TrainingManager:
     print(cfg)
     print()
 
     with jax.default_device(dev):
-        return _train_impl(dev.platform, cfg, sim_fns,
+        return _init_training(dev.platform, cfg, sim_fns,
             policy, user_hooks, restore_ckpt, profile_port)
 
+def stop_training(
+    training_mgr: TrainingManager, 
+):
+    if training_mgr.profile_port != None:
+        training_mgr.state.train_states.update_prng_key.block_until_ready()
+        jax.profiler.stop_server()
 
-def _update_loop(
+def _update_impl(
     algo: AlgoBase,
     cfg: TrainConfig,
     user_hooks: TrainHooks,
     rollout_state: RolloutState,
     rollout_mgr: RolloutManager,
     train_state_mgr: TrainStateManager,
-    start_update_idx: int,
+    metrics: TrainingMetrics,
+    update_idx: int,
 ):
-    num_updates_remaining = cfg.num_updates - start_update_idx
-    if cfg.pbt != None:
-        outer_loop_interval = math.gcd(
-            cfg.pbt.past_policy_update_interval,
-            cfg.pbt.train_policy_cull_interval)
-
-        num_train_policies = cfg.pbt.num_train_policies
-    else:
-        outer_loop_interval = num_updates_remaining
-        num_train_policies = 1
-
-    if outer_loop_interval == 0:
-        outer_loop_interval = num_updates_remaining
-
-    metrics = algo.add_metrics(cfg, FrozenDict())
-    metrics = rollout_mgr.add_metrics(cfg, metrics)
-    metrics = user_hooks.add_metrics(metrics)
-    metrics = TrainingMetrics.create(cfg, metrics, start_update_idx)
-
     metrics_vmap = jax.tree_util.tree_map_with_path(
         lambda kp, x: 1 if kp[0].name == 'metrics' else None, metrics)
 
@@ -159,85 +175,58 @@ def _update_loop(
             metrics,
         )
 
-    def inner_update_iter(update_idx, inputs):
-        rollout_state, train_state_mgr, metrics = inputs
+    if cfg.pbt != None:
+        num_train_policies = cfg.pbt.num_train_policies
+    else:
+        num_train_policies = 1
 
-        with profile("Update Iter"):
-            with profile('Collect Rollouts'):
-                (train_state_mgr, rollout_state, rollout_data,
-                 obs_stats, metrics) = rollout_mgr.collect(
-                    train_state_mgr, rollout_state, metrics,
-                    user_hooks.start_rollouts, user_hooks.finish_rollouts,
-                    user_hooks.rollout_metrics)
+    with profile("Update Iter"):
+        with profile('Collect Rollouts'):
+            (train_state_mgr, rollout_state, rollout_data,
+             obs_stats, metrics) = rollout_mgr.collect(
+                train_state_mgr, rollout_state, metrics,
+                user_hooks.start_rollouts, user_hooks.finish_rollouts,
+                user_hooks.rollout_metrics)
 
-            train_policy_states = jax.tree_map(
-                lambda x: x[0:num_train_policies],
-                train_state_mgr.policy_states)
+        train_policy_states = jax.tree_map(
+            lambda x: x[0:num_train_policies],
+            train_state_mgr.policy_states)
 
-            with profile('Update Observations Stats'):
-                # Policy optimization only uses preprocessed observations,
-                # so it is safe to update the preprocess state immediately,
-                # because this will only affect the next set of rollouts
-                train_policy_states = \
-                    train_policy_states.update(obs_preprocess_state = \
-                        train_policy_states.obs_preprocess.update_state(
-                            train_policy_states.obs_preprocess_state,
-                            obs_stats,
-                            True,
-                        )
+        with profile('Update Observations Stats'):
+            # Policy optimization only uses preprocessed observations,
+            # so it is safe to update the preprocess state immediately,
+            # because this will only affect the next set of rollouts
+            train_policy_states = \
+                train_policy_states.update(obs_preprocess_state = \
+                    train_policy_states.obs_preprocess.update_state(
+                        train_policy_states.obs_preprocess_state,
+                        obs_stats,
+                        True,
                     )
+                )
 
-            with profile('Learn'):
-                (train_policy_states, updated_train_states,
-                 metrics) = algo_wrapper(
-                    train_policy_states, train_state_mgr.train_states,
-                    rollout_data, metrics)
+        with profile('Learn'):
+            (train_policy_states, updated_train_states,
+             metrics) = algo_wrapper(
+                train_policy_states, train_state_mgr.train_states,
+                rollout_data, metrics)
 
-            # Copy new params into the full policy_state array
-            with profile('Set New Policy States'):
-                policy_states = jax.tree_map(
-                    lambda full, new: full.at[0:num_train_policies].set(new),
-                    train_state_mgr.policy_states, train_policy_states)
+        # Copy new params into the full policy_state array
+        with profile('Set New Policy States'):
+            policy_states = jax.tree_map(
+                lambda full, new: full.at[0:num_train_policies].set(new),
+                train_state_mgr.policy_states, train_policy_states)
 
-            train_state_mgr = train_state_mgr.replace(
-                policy_states = policy_states,
-                train_states = updated_train_states,
-            )
-            
-        user_hooks.post_update(update_idx, metrics, train_state_mgr)
-
-        metrics = metrics.advance()
-
-        return rollout_state, train_state_mgr, metrics
-
-    def outer_update_iter(outer_update_idx, inputs):
-        rollout_state, train_state_mgr, metrics = inputs
-
-        inner_begin_idx = (
-            start_update_idx + outer_update_idx * outer_loop_interval
+        train_state_mgr = train_state_mgr.replace(
+            policy_states = policy_states,
+            train_states = updated_train_states,
         )
         
-        train_state_mgr = pbt_update(cfg, train_state_mgr, inner_begin_idx)
+    user_hooks.post_update(update_idx, metrics, train_state_mgr)
 
-        inner_end_idx = inner_begin_idx + outer_loop_interval
-        inner_end_idx = jnp.minimum(inner_end_idx, cfg.num_updates)
+    metrics = metrics.advance()
 
-        rollout_state, train_state_mgr, metrics = lax.fori_loop(
-            inner_begin_idx, inner_end_idx,
-            inner_update_iter, (rollout_state, train_state_mgr, metrics))
-        
-        return rollout_state, train_state_mgr, metrics
-    
-    num_outer_iters = num_updates_remaining // outer_loop_interval
-    if num_outer_iters * outer_loop_interval < num_updates_remaining:
-        num_outer_iters += 1
-
-    rollout_state, train_state_mgr, metrics = lax.fori_loop(
-        0, num_outer_iters, outer_update_iter,
-        (rollout_state, train_state_mgr, metrics))
-
-    return rollout_state, train_state_mgr
-
+    return train_state_mgr, rollout_state, metrics
 
 def _setup_rollout_cfg(dev_type, cfg):
     sim_batch_size = cfg.num_agents_per_world * cfg.num_worlds
@@ -276,8 +265,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             policy_dtype = cfg.compute_dtype,
         )
 
-
-def _train_impl(
+def _init_training(
     dev_type,
     cfg,
     sim_fns,
@@ -289,16 +277,6 @@ def _train_impl(
     if profile_port != None:
         jax.profiler.start_server(profile_port)
         env_vars['TF_GPU_CUPTI_FORCE_CONCURRENT_KERNEL'] = '1'
-
-    checkify_errors = checkify.user_checks
-    if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
-            env_vars['MADRONA_LEARN_FULL_CHECKIFY'] == '1':
-        checkify_errors |= (
-            checkify.float_checks |
-            checkify.nan_checks |
-            checkify.div_checks |
-            checkify.index_checks
-        )
 
     algo = cfg.algo.setup()
 
@@ -335,7 +313,7 @@ def _train_impl(
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
         use_competitive_mmr = rollout_cfg.pbt.complex_matchmaking,
-        checkify_errors = checkify_errors,
+        checkify_errors = get_checkify_errors(),
     )
 
     @partial(jax.jit, donate_argnums=0)
@@ -383,41 +361,28 @@ def _train_impl(
         example_policy_states = train_state_mgr.policy_states,
     )
 
-    def update_loop_wrapper(rollout_state, train_state_mgr):
-        return _update_loop(
+    metrics = algo.add_metrics(cfg, FrozenDict())
+    metrics = rollout_mgr.add_metrics(cfg, metrics)
+    metrics = user_hooks.add_metrics(metrics)
+    metrics = TrainingMetrics.create(cfg, metrics, start_update_idx)
+
+    def update_wrapper(train_state_mgr, rollout_state, metrics, update_idx):
+        return _update_impl(
             algo = algo,
             cfg = cfg,
             user_hooks = user_hooks,
             rollout_state = rollout_state,
             rollout_mgr = rollout_mgr,
             train_state_mgr = train_state_mgr,
-            start_update_idx = start_update_idx,
+            metrics = metrics,
+            update_idx = update_idx,
         )
 
-    update_loop_wrapper = jax.jit(
-        checkify.checkify(update_loop_wrapper, errors=checkify_errors),
-        #donate_argnums=[0, 1])
-        donate_argnums=[1]) # rollout_state has a token which breaks donation
-
-    lowered_update_loop = update_loop_wrapper.lower(
-        rollout_state, train_state_mgr)
-
-    if 'MADRONA_LEARN_DUMP_LOWERED' in env_vars:
-        with open(env_vars['MADRONA_LEARN_DUMP_LOWERED'], 'w') as f:
-            print(lowered_update_loop.as_text(), file=f)
-
-    compiled_update_loop = lowered_update_loop.compile()
-
-    if 'MADRONA_LEARN_DUMP_IR' in env_vars:
-        with open(env_vars['MADRONA_LEARN_DUMP_IR'], 'w') as f:
-            print(compiled_update_loop.as_text(), file=f)
-
-    err, (rollout_state, train_state_mgr) = compiled_update_loop(
-        rollout_state, train_state_mgr)
-    err.throw()
-
-    if profile_port != None:
-        train_state_mgr.train_states.update_prng_key.block_until_ready()
-        jax.profiler.stop_server()
-
-    return train_state_mgr
+    return TrainingManager(
+        state=train_state_mgr,
+        rollout=rollout_state,
+        metrics=metrics,
+        update_idx=jnp.asarray(start_update_idx, jnp.int32),
+        update_fn=update_wrapper,
+        profile_port=profile_port,
+    )
