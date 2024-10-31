@@ -52,11 +52,11 @@ def get_checkify_errors():
 
     return checkify_errors
 
-def aot_compile(func, donate_argnums, *args, **kwargs):
+def aot_compile(func, *args):
     func = jax.jit(checkify.checkify(func, errors=get_checkify_errors()),
-                   donate_argnums=donate_argnums)
+                   donate_argnums=range(len(args)))
 
-    lowered = func.lower(*args, **kwargs)
+    lowered = func.lower(*args)
 
     if 'MADRONA_LEARN_DUMP_LOWERED' in env_vars:
         with open(env_vars['MADRONA_LEARN_DUMP_LOWERED'], 'w') as f:
