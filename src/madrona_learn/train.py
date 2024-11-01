@@ -5,8 +5,10 @@ import flax
 from flax import linen as nn
 from flax.core import frozen_dict, FrozenDict
 import optax
+import numpy as np
 
 import math
+import os
 from os import environ as env_vars
 from dataclasses import dataclass
 from functools import partial
@@ -33,10 +35,11 @@ class TrainingManager(flax.struct.PyTreeNode):
     profile_port: int = flax.struct.field(pytree_node=False)
 
     def save_ckpt(self, path):
-        self.state.save(self.update_idx, path)
+        update_idx = int(self.update_idx)
+        self.state.save(update_idx, os.path.join(path, str(update_idx)))
 
     def load_ckpt(self, path):
-        return self.replace(state=self.load(path))
+        return self.replace(state=self.state.load(path))
 
     def update_iter(self):
         new_state, new_rollout, new_metrics = self.update_fn(
@@ -48,6 +51,10 @@ class TrainingManager(flax.struct.PyTreeNode):
             metrics=new_metrics,
             update_idx=self.update_idx + 1,
         )
+
+    def log_metrics_tensorboard(self, tb_writer):
+        cpu_metrics = jax.tree.map(np.asarray, self.metrics)
+        cpu_metrics.tensorboard_log(self.update_idx - 1, tb_writer)
 
 
 # Inherit from this class and override any methods you see fit to modify / add
@@ -64,18 +71,6 @@ class TrainHooks:
     # custom state.
     def init_user_state(self):
         return None
-
-    # You need to implement this function in your class. This is where (based
-    # on update_idx) you save train_state_mgr to disk, write metrics, etc.
-    # Whatever is returned by user_state above will be in
-    # train_state_mgr.user_state
-    def post_update(
-        self,
-        update_idx: int,
-        metrics: FrozenDict[str, Metric],
-        train_state_mgr: TrainStateManager,
-    ) -> bool:
-        raise NotImplementedError
 
     # Called right before rollout collection loop starts
     def start_rollouts(
@@ -131,7 +126,7 @@ def init_training(
     cfg: TrainConfig,
     sim_fns: Dict[str, Callable],
     policy: Policy,
-    user_hooks: TrainHooks,
+    user_hooks: TrainHooks = TrainHooks(),
     restore_ckpt: str = None,
     profile_port: int = None,
 ) -> TrainingManager:
@@ -222,8 +217,6 @@ def _update_impl(
             train_states = updated_train_states,
         )
         
-    user_hooks.post_update(update_idx, metrics, train_state_mgr)
-
     metrics = metrics.advance()
 
     return train_state_mgr, rollout_state, metrics

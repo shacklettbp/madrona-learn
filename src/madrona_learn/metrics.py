@@ -209,9 +209,9 @@ class TrainingMetrics(flax.struct.PyTreeNode):
         
         print("\n".join(formatted))
 
-    def tensorboard_log(self, writer):
+    def tensorboard_log(self, base_update_idx, writer):
         for buf_idx in range(self.cur_buffer_offset):
-            out_idx = self.update_idx + buf_idx
+            out_idx = base_update_idx + buf_idx
 
             for name, metric in self.metrics.items():
                 if not metric.per_policy:

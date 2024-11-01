@@ -91,7 +91,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
     scaler: Optional[DynamicScale]
-    update_prng_key: random.PRNGKey
+    update_prng_key: jax.Array
 
     def update(
         self,
@@ -130,16 +130,24 @@ class PolicyTrainState(flax.struct.PyTreeNode):
 class TrainStateManager(flax.struct.PyTreeNode):
     policy_states: PolicyState
     train_states: PolicyTrainState
-    pbt_rng: random.PRNGKey
+    pbt_rng: jax.Array
     user_state: Any
 
-    def save(self, update_idx, path):
+    def save(self, next_update, path):
+        def prepare_for_ckpt(x):
+            if jnp.issubdtype(x.dtype, jax.dtypes.prng_key):
+                x = random.key_data(x)
+
+            return np.asarray(x)
+
+        prepared = jax.tree.map(prepare_for_ckpt, jax.device_get(self))
+
         ckpt = {
-            'next_update': update_idx + 1,
-            'policy_states': self.policy_states,
-            'train_states': self.train_states,
-            'pbt_rng': self.pbt_rng,
-            'user_state': self.user_state,
+            'next_update': next_update,
+            'policy_states': prepared.policy_states,
+            'train_states': prepared.train_states,
+            'pbt_rng': prepared.pbt_rng,
+            'user_state': prepared.user_state,
         }
 
         checkpointer = orbax.checkpoint.PyTreeCheckpointer()
