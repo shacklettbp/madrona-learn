@@ -1,6 +1,9 @@
-from madrona_learn.train import init_training, stop_training, TrainHooks
+from madrona_learn.train import (
+    init_training, stop_training, eval_elo, TrainHooks
+)
 from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (
+    ActionsConfig,
     TrainConfig,
     PBTConfig,
     ParamExplore,
@@ -26,7 +29,7 @@ from madrona_learn.tensorboard import TensorboardWriter
 
 __all__ = [
     "cfg_jax_mem", "init_training", "stop_training", "TrainHooks",
-    "TrainConfig", "PBTConfig", "ParamExplore",
+    "ActionsConfig", "TrainConfig", "PBTConfig", "ParamExplore",
     "TrainStateManager", "models", "rnn", 
     "eval_load_ckpt", "eval_policies", "EvalConfig",
     "Policy", "DiscreteActionDistributions",

@@ -12,16 +12,20 @@ import os
 from os import environ as env_vars
 from dataclasses import dataclass
 from functools import partial
+import itertools
 from typing import List, Optional, Dict, Callable, Any
 
 from .cfg import TrainConfig
-from .rollouts import RolloutConfig, RolloutManager, RolloutState
+from .rollouts import (
+    RolloutConfig, RolloutManager, RolloutState,
+    rollouts_reset, rollout_loop,
+)
 from .actor_critic import ActorCritic
 from .algo_common import AlgoBase
 from .metrics import TrainingMetrics, Metric
 from .moving_avg import EMANormalizer
 from .train_state import PolicyState, PolicyTrainState, TrainStateManager
-from .pbt import pbt_update, pbt_explore_hyperparams
+from .pbt import pbt_explore_hyperparams, pbt_update_elo
 from .policy import Policy
 from .profile import profile
 from .utils import aot_compile, get_checkify_errors
@@ -31,6 +35,7 @@ class TrainingManager(flax.struct.PyTreeNode):
     rollout: RolloutState
     metrics: TrainingMetrics
     update_idx: int
+    cfg: TrainConfig = flax.struct.field(pytree_node=False)
     update_fn: Callable = flax.struct.field(pytree_node=False)
     profile_port: int = flax.struct.field(pytree_node=False)
 
@@ -234,6 +239,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             num_teams = cfg.pbt.num_teams,
             team_size = cfg.pbt.team_size,
             sim_batch_size = sim_batch_size,
+            actions_cfg = cfg.actions,
             self_play_portion = cfg.pbt.self_play_portion,
             cross_play_portion = cfg.pbt.cross_play_portion,
             past_play_portion = cfg.pbt.past_play_portion,
@@ -250,6 +256,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             num_teams = 1,
             team_size = cfg.num_agents_per_world,
             sim_batch_size = sim_batch_size,
+            actions_cfg = cfg.actions,
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
@@ -349,7 +356,6 @@ def _init_training(
 
     rollout_mgr = RolloutManager(
         train_cfg = cfg,
-        rollout_cfg = rollout_cfg,
         init_rollout_state = rollout_state,
         example_policy_states = train_state_mgr.policy_states,
     )
@@ -376,6 +382,129 @@ def _init_training(
         rollout=rollout_state,
         metrics=metrics,
         update_idx=jnp.asarray(start_update_idx, jnp.int32),
+        cfg=cfg,
         update_fn=update_wrapper,
         profile_port=profile_port,
+    )
+
+class MatchmakeEvalState(flax.struct.PyTreeNode):
+    policy_elos: jax.Array
+
+
+def eval_elo(
+    training_mgr: TrainingManager,
+):
+    train_cfg = training_mgr.cfg
+    policy_states = training_mgr.state.policy_states
+    train_states = training_mgr.state.train_states
+    rollout_state = training_mgr.rollout
+    pbt_mm_cfg = rollout_state.cfg.pbt
+
+    num_eval_policies = policy_states.mmr.elo.shape[0]
+
+    num_agents_per_world = train_cfg.num_agents_per_world
+    sim_batch_size = train_cfg.num_worlds * num_agents_per_world
+
+    rollout_state = rollouts_reset(rollout_state, policy_states)
+    (train_self_play_portion,
+     train_cross_play_portion,
+     train_past_play_portion,
+     train_static_play_portion) = (
+            rollout_state.cfg.pbt.self_play_portion,
+            rollout_state.cfg.pbt.cross_play_portion,
+            rollout_state.cfg.pbt.past_play_portion,
+            rollout_state.cfg.pbt.static_play_portion,
+        )
+    train_policy_assignments = rollout_state.policy_assignments
+
+    num_unique_static_assignments = num_eval_policies * num_eval_policies
+
+    num_static_repeats = sim_batch_size // num_unique_static_assignments
+
+    assert sim_batch_size % num_unique_static_assignments == 0
+
+    static_assignments_list = []
+
+    for combo in itertools.product(
+            range(num_eval_policies),
+            repeat=rollout_state.cfg.pbt.num_teams):
+        for i in combo:
+            static_assignments_list.append(i)
+
+    num_assignment_duplicates = (
+        (sim_batch_size // rollout_state.cfg.pbt.team_size) //
+        len(static_assignments_list))
+
+    def gen_static_assignments():
+        assignments = jnp.array(
+            static_assignments_list, dtype=jnp.int32)
+
+        assignments = assignments.reshape(-1, rollout_state.cfg.pbt.num_teams)
+        assignments = jnp.repeat(
+            assignments, num_assignment_duplicates, axis=0)
+        assignments = jnp.repeat(
+            assignments.reshape(-1), rollout_state.cfg.pbt.team_size)
+
+        return assignments
+
+    static_play_assignments = gen_static_assignments()
+
+    rollout_state = rollout_state.update_matchmaking(
+        0.0, 0.0, 0.0, 1.0, static_play_assignments)
+
+    assert (static_play_assignments.shape[0] ==
+            rollout_state.cfg.pbt.static_play_batch_size)
+
+    def post_policy_cb(step_idx, obs, preprocessed_obs, policy_out,
+                       reorder_state, matchmake_eval_state):
+        return matchmake_eval_state
+
+    def post_step_cb(step_idx, rollout_state, dones, rewards,
+                     episode_results, matchmake_eval_state):
+        elos = matchmake_eval_state.policy_elos
+        
+        elos = pbt_update_elo(
+            policy_states.get_episode_scores_fn,
+            rollout_state.policy_assignments,
+            dones, episode_results, elos, rollout_state.cfg.pbt)
+
+        matchmake_eval_state = matchmake_eval_state.replace(
+            policy_elos = elos,
+        )
+
+        return rollout_state, matchmake_eval_state
+
+    matchmake_eval_state = MatchmakeEvalState(
+        policy_elos = jnp.full_like(policy_states.mmr.elo, 1500),
+    )
+
+    rollout_state = rollouts_reset(rollout_state, policy_states)
+
+    rollout_state, policy_states, matchmake_eval_state = rollout_loop(
+        rollout_state, policy_states,
+        num_steps = 10000,
+        post_inference_cb = post_policy_cb,
+        post_step_cb = post_step_cb,
+        cb_state = matchmake_eval_state,
+        sample_actions = True,
+    )
+
+    rollout_state = rollouts_reset(rollout_state, policy_states)
+
+    rollout_state = rollout_state.update_matchmaking(
+        train_self_play_portion, train_cross_play_portion,
+        train_past_play_portion, train_static_play_portion,
+        train_policy_assignments)
+
+    policy_states = policy_states.update(
+        mmr = policy_states.mmr.replace(
+            elo = matchmake_eval_state.policy_elos,
+        )
+    )
+
+    return training_mgr.replace(
+        rollout = rollout_state,
+        state = training_mgr.state.replace(
+            policy_states = policy_states,
+        ),
     )

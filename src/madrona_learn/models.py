@@ -7,6 +7,7 @@ from flax.core import FrozenDict
 
 from typing import List, Callable, Any
 
+from .cfg import ActionsConfig
 from .dists import DiscreteActionDistributions, SymExpTwoHotDistribution
 
 #from .pallas import monkeypatch as _pl_patch
@@ -115,12 +116,12 @@ class MLP(nn.Module):
 
 
 class DenseLayerDiscreteActor(nn.Module):
-    actions_num_buckets: List[int]
+    cfg: ActionsConfig
     dtype: jnp.dtype
     weight_init: Callable = jax.nn.initializers.orthogonal(scale=0.01)
 
     def setup(self):
-        total_action_dim = sum(self.actions_num_buckets)
+        total_action_dim = sum(self.cfg.actions_num_buckets)
         self.impl = nn.Dense(
                 total_action_dim,
                 use_bias=True,
@@ -131,7 +132,7 @@ class DenseLayerDiscreteActor(nn.Module):
 
     def __call__(self, features, train=False):
         logits = self.impl(features)
-        return DiscreteActionDistributions(self.actions_num_buckets, logits)
+        return DiscreteActionDistributions(self.cfg.actions_num_buckets, logits)
 
 
 class DenseLayerCritic(nn.Module):

@@ -4,13 +4,14 @@ import flax
 from flax import linen as nn
 from flax.core import frozen_dict, FrozenDict
 
+import dataclasses
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Callable, Any
 from functools import partial
 import itertools
 import math
 
-from .cfg import TrainConfig
+from .cfg import TrainConfig, ActionsConfig
 from .actor_critic import ActorCritic
 from .algo_common import compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
@@ -18,7 +19,6 @@ from .pbt import (
     PBTMatchmakeConfig,
     pbt_init_matchmaking,
     pbt_update_matchmaking,
-    pbt_update_fitness,
 )
 from .profile import profile
 from .train_state import TrainStateManager, PolicyState, PolicyTrainState
@@ -28,6 +28,7 @@ from .observations import ObservationsPreprocess
 @dataclass(frozen = True)
 class RolloutConfig:
     sim_batch_size: int
+    actions_cfg: ActionsConfig
     policy_chunk_size: int
     num_policy_chunks: int
     total_policy_batch_size: int
@@ -44,6 +45,7 @@ class RolloutConfig:
         num_teams: int,
         team_size: int,
         sim_batch_size: int,
+        actions_cfg: ActionsConfig,
         self_play_portion: float,
         cross_play_portion: float,
         past_play_portion: float,
@@ -116,6 +118,7 @@ class RolloutConfig:
 
         return RolloutConfig(
             sim_batch_size = sim_batch_size,
+            actions_cfg = actions_cfg,
             policy_chunk_size = policy_chunk_size,
             num_policy_chunks = num_policy_chunks,
             total_policy_batch_size = total_policy_batch_size,
@@ -162,6 +165,7 @@ class PolicyBatchReorderState(flax.struct.PyTreeNode):
 
 
 class RolloutState(flax.struct.PyTreeNode):
+    cfg: RolloutConfig = flax.struct.field(pytree_node=False)
     step_fn: Callable = flax.struct.field(pytree_node=False)
     load_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
     get_ckpts_fn: Optional[Callable] = flax.struct.field(pytree_node=False)
@@ -209,6 +213,7 @@ class RolloutState(flax.struct.PyTreeNode):
             dtype=rollout_cfg.reward_dtype)
 
         return RolloutState(
+            cfg = rollout_cfg,
             step_fn = step_fn,
             load_ckpts_fn = load_ckpts_fn,
             get_ckpts_fn = get_ckpts_fn,
@@ -219,6 +224,35 @@ class RolloutState(flax.struct.PyTreeNode):
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
             env_returns = init_env_returns,
+        )
+
+    def update_matchmaking(
+        self,
+        self_play_portion: float,
+        cross_play_portion: float,
+        past_play_portion: float,
+        static_play_portion: float,
+        policy_assignments: jax.Array,
+    ):
+        new_pbt_cfg = PBTMatchmakeConfig.setup(
+            self.cfg.pbt.num_current_policies,
+            self.cfg.pbt.num_past_policies,
+            self.cfg.pbt.num_teams,
+            self.cfg.pbt.team_size,
+            self.cfg.sim_batch_size,
+            self_play_portion,
+            cross_play_portion,
+            past_play_portion,
+            static_play_portion,
+        )
+
+        new_cfg = dataclasses.replace(self.cfg, pbt=new_pbt_cfg)
+
+        return self.replace(
+            cfg = new_cfg,
+            reorder_state = _compute_reorder_state(
+                policy_assignments, new_cfg),
+            policy_assignments = policy_assignments,
         )
 
     def update(
@@ -232,6 +266,7 @@ class RolloutState(flax.struct.PyTreeNode):
         env_returns=None,
     ):
         return RolloutState(
+            cfg = self.cfg,
             step_fn = self.step_fn,
             load_ckpts_fn = self.load_ckpts_fn,
             get_ckpts_fn = self.get_ckpts_fn,
@@ -260,7 +295,6 @@ class RolloutState(flax.struct.PyTreeNode):
         new_obs = frozen_dict.freeze(new_obs)
 
         return self.update(cur_obs=new_obs)
-
 
 class RolloutData(flax.struct.PyTreeNode):
     data: FrozenDict[str, Any]
@@ -323,13 +357,12 @@ class RolloutManager:
     def __init__(
         self,
         train_cfg: TrainConfig,
-        rollout_cfg: RolloutConfig,
         init_rollout_state: RolloutState,
         example_policy_states: PolicyState,
     ):
         cpu_dev = jax.devices('cpu')[0]
 
-        self._cfg = rollout_cfg
+        self._cfg = init_rollout_state.cfg
         self._critic_outputs_distribution = train_cfg.dreamer_v3_critic
 
         self._num_bptt_chunks = train_cfg.num_bptt_chunks
@@ -337,15 +370,15 @@ class RolloutManager:
         self._num_bptt_steps = (
             train_cfg.steps_per_update // train_cfg.num_bptt_chunks)
 
-        self._num_train_policies = rollout_cfg.pbt.num_current_policies
+        self._num_train_policies = self._cfg.pbt.num_current_policies
         self._num_train_agents_per_policy = \
-            _compute_num_train_agents_per_policy(rollout_cfg)
+            _compute_num_train_agents_per_policy(self._cfg)
 
         self._num_train_seqs_per_policy = (
             self._num_train_agents_per_policy * self._num_bptt_chunks)
 
         def compute_sim_to_train_indices():
-            return _compute_sim_to_train_indices(rollout_cfg)
+            return _compute_sim_to_train_indices(self._cfg)
 
         self._sim_to_train_idxs = jax.jit(compute_sim_to_train_indices)()
         assert (self._sim_to_train_idxs.shape[1] ==
@@ -486,7 +519,7 @@ class RolloutManager:
                 })
 
             rollout_state, policy_states, collect_state = rollout_loop(
-                rollout_state, policy_states, self._cfg,
+                rollout_state, policy_states,
                 self._num_bptt_steps,  post_inference_cb, post_step_cb,
                 collect_state, sample_actions = True, return_debug = False)
 
@@ -632,11 +665,10 @@ class RolloutManager:
         self,
         bptt_chunk: int,
         bptt_step: int,
-        sim_state: Any,
+        rollout_state: RolloutState,
         dones: jax.Array,
         rewards: jax.Array,
-        env_returns: jax.Array,
-        reorder_state: PolicyBatchReorderState,
+        episode_results: jax.Array,
         collect_state: RolloutCollectState,
     ):
         with profile('Post Step Rollout Store'):
@@ -649,8 +681,9 @@ class RolloutManager:
                 )
 
             new_env_returns_metrics = compute_env_returns_metrics(
-                self._sim_to_train(env_returns, reorder_state),
-                self._sim_to_train(dones, reorder_state))
+                self._sim_to_train(
+                    rollout_state.env_returns, rollout_state.reorder_state),
+                self._sim_to_train(dones, rollout_state.reorder_state))
 
             collect_state = collect_state.replace(env_returns_metric =
                 collect_state.env_returns_metric.merge(new_env_returns_metrics))
@@ -658,8 +691,8 @@ class RolloutManager:
             save_data = self._sim_to_train({
                 'dones': dones,
                 'rewards': rewards,
-            }, reorder_state)
-            return sim_state, collect_state.save(
+            }, rollout_state.reorder_state)
+            return rollout_state, collect_state.save(
                 (bptt_chunk, bptt_step), save_data)
 
     def _finalize_rollouts(
@@ -764,7 +797,6 @@ class RolloutManager:
 def rollout_loop(
     rollout_state: RolloutState,
     policy_states: PolicyState,
-    rollout_cfg: RolloutConfig,
     num_steps: int,
     post_inference_cb: Callable,
     post_step_cb: Callable,
@@ -793,7 +825,7 @@ def rollout_loop(
     rnn_reset_fn = policy_states.rnn_reset_fn
 
     def reorder_policy_states(states, assignments, reorder_state):
-        if not rollout_cfg.pbt.complex_matchmaking:
+        if not rollout_state.cfg.pbt.complex_matchmaking:
             return states 
         else:
             # FIXME: more efficient way to get this?
@@ -813,7 +845,7 @@ def rollout_loop(
         with profile('Policy Inference'):
             prng_key, step_key = random.split(prng_key)
             step_keys = random.split(
-                step_key, rollout_cfg.num_policy_chunks)
+                step_key, rollout_state.cfg.num_policy_chunks)
 
             reordered_policy_states = reorder_policy_states(
                 policy_states, policy_assignments, reorder_state)
@@ -841,7 +873,9 @@ def rollout_loop(
                 'state': sim_state,
                 'actions': reorder_state.to_sim(policy_out['actions']),
                 'resets': jnp.zeros(
-                    (rollout_cfg.sim_batch_size // (rollout_cfg.pbt.team_size * rollout_cfg.pbt.num_teams), 1), 
+                    (rollout_state.cfg.sim_batch_size //
+                     (rollout_state.cfg.pbt.team_size *
+                      rollout_state.cfg.pbt.num_teams), 1), 
                     dtype=jnp.int32),
             })
 
@@ -865,11 +899,12 @@ def rollout_loop(
 
             sim_state = step_output['state']
             dones = step_output['dones'].astype(jnp.bool_)
-            rewards = step_output['rewards'].astype(rollout_cfg.reward_dtype)
+            rewards = step_output['rewards'].astype(
+                rollout_state.cfg.reward_dtype)
             sim_obs = step_output['obs']
 
-            env_returns = (
-                rewards + rollout_cfg.reward_gamma * rollout_state.env_returns)
+            env_returns = (rewards + rollout_state.cfg.reward_gamma *
+                rollout_state.env_returns)
 
             # rnn_states kept in sim ordering
             rnn_states = rnn_reset_fn(rnn_states, dones)
@@ -879,41 +914,94 @@ def rollout_loop(
             except KeyError:
                 episode_results = None
 
-            if rollout_cfg.pbt.complex_matchmaking:
-                policy_assignments, policy_states, prng_key = pbt_update_matchmaking(
-                    policy_assignments, policy_states, dones, episode_results,
-                    prng_key, rollout_cfg.pbt)
 
-                reorder_state = _compute_reorder_state(
-                    policy_assignments,
-                    rollout_cfg,
-                )
-            elif (episode_results != None and
-                  policy_states.episode_score != None):
-                policy_states = pbt_update_fitness(
-                    policy_assignments, policy_states, dones, episode_results,
-                    rollout_cfg.pbt)
+            policy_assignments, prng_key = pbt_update_matchmaking(
+                policy_assignments, policy_states, dones, episode_results,
+                prng_key, rollout_state.cfg.pbt)
 
-            sim_state, cb_state = post_step_cb(
-                step_idx, sim_state, dones, rewards, env_returns,
-                reorder_state, cb_state)
+            reorder_state = _compute_reorder_state(
+                policy_assignments, rollout_state.cfg)
 
-            env_returns = jnp.where(dones, 0, env_returns)
+            rollout_state = rollout_state.update(
+                prng_key = prng_key,
+                rnn_states = rnn_states,
+                sim_state = sim_state,
+                cur_obs = sim_obs,
+                reorder_state = reorder_state,
+                policy_assignments = policy_assignments,
+                env_returns = env_returns,
+            )
 
-        rollout_state = rollout_state.update(
-            prng_key = prng_key,
-            rnn_states = rnn_states,
-            sim_state = sim_state,
-            cur_obs = sim_obs,
-            reorder_state = reorder_state,
-            policy_assignments = policy_assignments,
-            env_returns = env_returns,
-        )
+            rollout_state, cb_state = post_step_cb(
+                step_idx, rollout_state, dones, rewards,
+                episode_results, cb_state)
+
+            rollout_state = rollout_state.update(
+                env_returns = jnp.where(dones, 0, rollout_state.env_returns),
+            )
 
         return rollout_state, policy_states, cb_state
 
     return lax.fori_loop(0, num_steps, rollout_iter,
                          (rollout_state, policy_states, cb_state))
+
+
+def rollouts_reset(
+    rollout_state: RolloutState,
+    policy_states: PolicyState,
+):
+    step_input = frozen_dict.freeze({
+        'state': rollout_state.sim_state,
+        'actions': jnp.zeros(
+            (rollout_state.cfg.sim_batch_size,
+             len(rollout_state.cfg.actions_cfg.actions_num_buckets)),
+            dtype=jnp.int32),
+        'resets': jnp.ones(
+            (rollout_state.cfg.sim_batch_size //
+                (rollout_state.cfg.pbt.team_size *
+                 rollout_state.cfg.pbt.num_teams), 1), 
+            dtype=jnp.int32),
+    })
+
+    pbt_inputs = FrozenDict({})
+
+    pbt_inputs = pbt_inputs.copy({
+        'policy_assignments': jnp.zeros(
+            (rollout_state.cfg.sim_batch_size, 1), dtype=jnp.int32),
+    })
+
+    if policy_states.reward_hyper_params != None:
+        pbt_inputs = pbt_inputs.copy({
+            'reward_hyper_params': (
+                policy_states.reward_hyper_params),
+        })
+
+    if len(pbt_inputs) > 0:
+        step_input = step_input.copy({'pbt': pbt_inputs})
+
+    step_output = rollout_state.step_fn(step_input)
+    step_output = frozen_dict.freeze(step_output)
+
+    sim_state = step_output['state']
+    dones = step_output['dones'].astype(jnp.bool_)
+    rewards = step_output['rewards'].astype(rollout_state.cfg.reward_dtype)
+    sim_obs = step_output['obs']
+
+    env_returns = jnp.zeros_like(rollout_state.env_returns)
+
+    rnn_states = policy_states.rnn_reset_fn(
+        rollout_state.rnn_states, jnp.ones_like(dones))
+
+    rollout_state = rollout_state.update(
+        rnn_states = rnn_states,
+        sim_state = sim_state,
+        cur_obs = sim_obs,
+        reorder_state = rollout_state.reorder_state,
+        policy_assignments = rollout_state.policy_assignments,
+        env_returns = env_returns,
+    )
+
+    return rollout_state
 
 
 def _compute_num_train_agents_per_policy(rollout_cfg):

@@ -5,6 +5,11 @@ import jax
 from jax import lax, random, numpy as jnp
 from flax.core import FrozenDict
 
+@dataclass(frozen=True)
+class ActionsConfig:
+    actions_num_buckets: List[int]
+
+
 class AlgoConfig:
     def name(self):
         raise NotImplementedError
@@ -41,10 +46,7 @@ class PBTConfig:
     team_size: int
     num_train_policies: int
     num_past_policies: int
-    train_policy_cull_interval: int
-    num_cull_policies: int
-    past_policy_update_interval: int
-    # Must add to 1 and cleanly subdivide total rollout batch size
+    # Must add to 1 and evenly subdivide total rollout batch size
     self_play_portion: float
     cross_play_portion: float
     past_play_portion: float
@@ -62,6 +64,7 @@ class TrainConfig:
     num_worlds: int
     num_agents_per_world: int
     num_updates: int
+    actions: ActionsConfig
     steps_per_update: int
     lr: Union[float, ParamExplore]
     algo: AlgoConfig
@@ -102,7 +105,24 @@ class TrainConfig:
                     rep += 'fp16'
                 elif v == jnp.bfloat16:
                     rep += 'bf16'
+            elif k == 'actions':
+                rep += '\n  actions: '
+                rep += str(self.actions)
             else:
                 rep += f"\n  {k}: {v}" 
 
         return rep
+
+
+@dataclass(frozen=True)
+class EvalConfig:
+    num_worlds: int
+    num_teams: int
+    team_size: int
+    num_eval_steps: int
+    actions: ActionsConfig
+    reward_gamma: float
+    policy_dtype: jnp.dtype
+    eval_competitive: bool
+    use_deterministic_policy: bool = True
+    clear_fitness: bool = True

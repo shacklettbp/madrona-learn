@@ -17,19 +17,7 @@ from .actor_critic import ActorCritic
 from .policy import Policy
 from .rollouts import RolloutConfig, RolloutState, rollout_loop
 from .train_state import PolicyState, TrainStateManager
-
-@dataclass(frozen=True)
-class EvalConfig:
-    num_worlds: int
-    num_teams: int
-    team_size: int
-    num_eval_steps: int
-    reward_gamma: float
-    policy_dtype: jnp.dtype
-    eval_competitive: bool
-    use_deterministic_policy: bool = True
-    clear_fitness: bool = True
-
+from .cfg import EvalConfig
 
 def eval_load_ckpt(
     policy: Policy,
@@ -120,6 +108,7 @@ def _eval_policies_impl(
             num_teams = 1,
             team_size = num_agents_per_world,
             sim_batch_size = sim_batch_size,
+            actions_cfg = eval_cfg.actions,
             self_play_portion = 1.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
@@ -136,6 +125,7 @@ def _eval_policies_impl(
             num_teams = eval_cfg.num_teams,
             team_size = eval_cfg.team_size,
             sim_batch_size = sim_batch_size,
+            actions_cfg = eval_cfg.actions,
             self_play_portion = 0.0,
             cross_play_portion = 0.0,
             past_play_portion = 0.0,
@@ -201,21 +191,28 @@ def _eval_policies_impl(
             'obs': obs,
         }))
 
-    def post_step_cb(step_idx, sim_state, dones, rewards, env_returns,
-                     reorder_state, cb_state):
+    def post_step_cb(step_idx, rollout_state, dones, rewards,
+                     episode_results, cb_state):
+        sim_state = rollout_state.sim_state
+        env_returns = rollout_state.env_returns
+
         step_data = cb_state.copy({
             'sim_state': sim_state,
             'dones': dones,
             'rewards': rewards,
             'returns': env_returns,
+            'episode_results': episode_results,
         })
 
         sim_state = step_cb(step_data)
 
-        return sim_state, None
+        rollout_state = rollout_state.update(
+            sim_state = sim_state,
+        )
+
+        return rollout_state, None
 
     rollout_loop_fn = partial(rollout_loop,
-        rollout_cfg = rollout_cfg,
         num_steps = eval_cfg.num_eval_steps,
         post_inference_cb = post_policy_cb,
         post_step_cb = post_step_cb,

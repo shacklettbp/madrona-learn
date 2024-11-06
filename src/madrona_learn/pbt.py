@@ -16,6 +16,7 @@ from .train_state import (
     PolicyState, PolicyTrainState, TrainStateManager,
     MMR, MovingEpisodeScore,
 )
+from .profile import profile
 
 @dataclass(frozen=True)
 class PBTMatchmakeConfig:
@@ -24,14 +25,22 @@ class PBTMatchmakeConfig:
     total_num_policies: int
     num_teams: int
     team_size: int
+
+    self_play_portion: float
+    cross_play_portion: float
+    past_play_portion: float
+    static_play_portion: float
+
     self_play_batch_size: int
     cross_play_batch_size: int
     past_play_batch_size: int
     static_play_batch_size: int
+
     num_cross_play_matches: int
     num_past_play_matches: int
     num_static_play_matches: int
     num_total_matches: int
+
     complex_matchmaking: bool 
     
     @staticmethod
@@ -85,14 +94,22 @@ class PBTMatchmakeConfig:
             total_num_policies = total_num_policies,
             num_teams = num_teams,
             team_size = team_size,
+
+            self_play_portion = self_play_portion,
+            cross_play_portion = cross_play_portion,
+            past_play_portion = past_play_portion,
+            static_play_portion = static_play_portion,
+
             self_play_batch_size = self_play_batch_size,
             cross_play_batch_size = cross_play_batch_size,
             past_play_batch_size = past_play_batch_size,
             static_play_batch_size = static_play_batch_size,
+
             num_cross_play_matches = num_cross_play_matches,
             num_past_play_matches = num_past_play_matches,
             num_static_play_matches = num_static_play_matches,
             num_total_matches = num_total_matches,
+
             complex_matchmaking = complex_matchmaking,
         )
 
@@ -188,7 +205,6 @@ def pbt_init_matchmaking(
 
 def _cross_play_matchmake(
     assignments,
-    policy_states,
     dones,
     assign_rnd,
     mm_cfg,
@@ -209,14 +225,11 @@ def _cross_play_matchmake(
     new_assignments = jnp.where(
         dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
 
-    return (
-        assignments.at[:, 1:, :].set(new_assignments).reshape(-1),
-        policy_states)
+    return assignments.at[:, 1:, :].set(new_assignments).reshape(-1)
 
 
 def _past_play_matchmake(
     assignments,
-    policy_states,
     dones,
     assign_rnd,
     mm_cfg,
@@ -235,9 +248,7 @@ def _past_play_matchmake(
     new_assignments = jnp.where(
         dones[:, 1:, :], new_assignments[:, :, None], assignments[:, 1:, :])
 
-    return (
-        assignments.at[:, 1:, :].set(new_assignments).reshape(-1),
-        policy_states)
+    return assignments.at[:, 1:, :].set(new_assignments).reshape(-1)
 
 
 def _elo_expected_result(
@@ -247,18 +258,15 @@ def _elo_expected_result(
     return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
 
 
-def _update_competitive_fitness(
+def pbt_update_elo(
+    get_episode_scores_fn,
     assignments,
-    policy_states,
     dones,
     episode_results,
+    policy_elos,
     mm_cfg,
 ):
-    assert mm_cfg.num_teams > 1
-
-    # FIXME
-    if mm_cfg.num_teams != 2:
-        return policy_states
+    assert mm_cfg.num_teams == 2
 
     assignments = assignments.reshape(
         mm_cfg.num_total_matches, mm_cfg.num_teams,
@@ -271,7 +279,7 @@ def _update_competitive_fitness(
     b_assignments = assignments[:, 1, 0, 0]
     dones = dones[:, 0, 0, :]
 
-    def update_mmr(policy_idx, cur_mmr):
+    def update_mmr(policy_idx, cur_elo):
         @jax.vmap
         def compute_differences(episode_result, a_assignment, b_assignment, done):
             is_a = a_assignment == policy_idx
@@ -286,11 +294,11 @@ def _update_competitive_fitness(
             ).squeeze(axis=0)
 
             def compute_diff():
-                a_score, b_score = policy_states.get_episode_scores_fn(
+                a_score, b_score = get_episode_scores_fn(
                     episode_result)
 
-                a_elo = policy_states.mmr.elo[a_assignment]
-                b_elo = policy_states.mmr.elo[b_assignment]
+                a_elo = policy_elos[a_assignment]
+                b_elo = policy_elos[b_assignment]
 
                 my_score = jnp.where(is_a, a_score, b_score)
 
@@ -310,20 +318,15 @@ def _update_competitive_fitness(
         diffs = compute_differences(episode_results, a_assignments,
                                     b_assignments, dones)
 
-        K = 8.0
-        new_elo = cur_mmr.elo + K * diffs.sum()
+        K = 1.0
+        new_elo = cur_elo + K * diffs.sum()
 
-        return cur_mmr.replace(elo=new_elo)
+        return new_elo
 
-    new_mmr = jax.vmap(update_mmr)(
-        jnp.arange(policy_states.mmr.elo.shape[0]),
-        policy_states.mmr)
+    new_elos = jax.vmap(update_mmr)(
+        jnp.arange(policy_elos.shape[0]), policy_elos)
 
-    policy_states = policy_states.update(
-        mmr = new_mmr,
-    )
-
-    return policy_states
+    return new_elos
 
 
 def pbt_update_matchmaking(
@@ -334,9 +337,6 @@ def pbt_update_matchmaking(
     assign_rnd,
     mm_cfg,
 ):
-    policy_states = _update_competitive_fitness(
-        assignments, policy_states, dones, episode_results, mm_cfg)
-
     cross_start = mm_cfg.self_play_batch_size
     cross_end = cross_start + mm_cfg.cross_play_batch_size
     
@@ -345,9 +345,8 @@ def pbt_update_matchmaking(
 
     if mm_cfg.cross_play_batch_size > 0:
         assign_rnd, cross_rnd = random.split(assign_rnd)
-
-        new_cross_assignments, policy_states = _cross_play_matchmake(
-            assignments[cross_start:cross_end], policy_states,
+        new_cross_assignments = _cross_play_matchmake(
+            assignments[cross_start:cross_end],
             dones[cross_start:cross_end], cross_rnd, mm_cfg)
 
         assignments = assignments.at[cross_start:cross_end].set(
@@ -356,14 +355,14 @@ def pbt_update_matchmaking(
     if mm_cfg.past_play_batch_size > 0:
         assign_rnd, past_rnd = random.split(assign_rnd)
 
-        new_past_assignments, policy_states = _past_play_matchmake(
-            assignments[past_start:past_end], policy_states,
+        new_past_assignments = _past_play_matchmake(
+            assignments[past_start:past_end],
             dones[past_start:past_end], past_rnd, mm_cfg)
 
         assignments = assignments.at[past_start:past_end].set(
             new_past_assignments)
 
-    return assignments, policy_states, assign_rnd
+    return assignments, assign_rnd
 
 
 def pbt_update_fitness(
@@ -757,5 +756,3 @@ def pbt_update(
             pbt_cull_update, pbt_update_noop, train_state_mgr)
 
     return train_state_mgr
-
-
