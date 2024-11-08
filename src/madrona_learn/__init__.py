@@ -1,5 +1,6 @@
 from madrona_learn.train import (
-    init_training, stop_training, eval_elo, TrainHooks
+    init_training, stop_training, eval_elo, update_population,
+    TrainHooks
 )
 from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (

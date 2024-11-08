@@ -25,7 +25,10 @@ from .algo_common import AlgoBase
 from .metrics import TrainingMetrics, Metric
 from .moving_avg import EMANormalizer
 from .train_state import PolicyState, PolicyTrainState, TrainStateManager
-from .pbt import pbt_explore_hyperparams, pbt_update_elo
+from .pbt import (
+    pbt_explore_hyperparams, pbt_update_elo,
+    pbt_past_update, pbt_cull_update,
+)
 from .policy import Policy
 from .profile import profile
 from .utils import aot_compile, get_checkify_errors
@@ -131,6 +134,7 @@ def init_training(
     cfg: TrainConfig,
     sim_fns: Dict[str, Callable],
     policy: Policy,
+    init_sim_ctrl: jax.Array,
     user_hooks: TrainHooks = TrainHooks(),
     restore_ckpt: str = None,
     profile_port: int = None,
@@ -140,7 +144,7 @@ def init_training(
 
     with jax.default_device(dev):
         return _init_training(dev.platform, cfg, sim_fns,
-            policy, user_hooks, restore_ckpt, profile_port)
+            policy, init_sim_ctrl, user_hooks, restore_ckpt, profile_port)
 
 def stop_training(
     training_mgr: TrainingManager, 
@@ -270,6 +274,7 @@ def _init_training(
     cfg,
     sim_fns,
     policy,
+    sim_ctrl,
     user_hooks,
     restore_ckpt,
     profile_port,
@@ -289,8 +294,8 @@ def _init_training(
 
     rollout_cfg = _setup_rollout_cfg(dev_type, cfg)
 
-    @jax.jit
-    def init_rollout_state():
+    @partial(jax.jit, donate_argnums=[0])
+    def init_rollout_state(sim_ctrl):
         rnn_states = policy.actor_critic.init_recurrent_state(
                 rollout_cfg.sim_batch_size)
 
@@ -299,10 +304,11 @@ def _init_training(
             sim_fns = sim_fns,
             prng_key = rollout_rng,
             rnn_states = rnn_states,
+            init_sim_ctrl = sim_ctrl,
             static_play_assignments = None,
         )
 
-    rollout_state = init_rollout_state()
+    rollout_state = init_rollout_state(sim_ctrl)
 
     train_state_mgr = TrainStateManager.create(
         policy = policy, 
@@ -393,6 +399,7 @@ class MatchmakeEvalState(flax.struct.PyTreeNode):
 
 def eval_elo(
     training_mgr: TrainingManager,
+    num_eval_steps: int,
 ):
     train_cfg = training_mgr.cfg
     policy_states = training_mgr.state.policy_states
@@ -426,7 +433,7 @@ def eval_elo(
     static_assignments_list = []
 
     for combo in itertools.product(
-            range(num_eval_policies),
+            range(num_eval_policies + 1),
             repeat=rollout_state.cfg.pbt.num_teams):
         for i in combo:
             static_assignments_list.append(i)
@@ -478,23 +485,27 @@ def eval_elo(
         policy_elos = jnp.full_like(policy_states.mmr.elo, 1500),
     )
 
-    rollout_state = rollouts_reset(rollout_state, policy_states)
+    rollout_state = rollouts_reset(rollout_state, policy_states, False)
 
     rollout_state, policy_states, matchmake_eval_state = rollout_loop(
         rollout_state, policy_states,
-        num_steps = 10000,
+        num_steps = num_eval_steps,
         post_inference_cb = post_policy_cb,
         post_step_cb = post_step_cb,
         cb_state = matchmake_eval_state,
         sample_actions = True,
     )
 
-    rollout_state = rollouts_reset(rollout_state, policy_states)
+    rollout_state = rollouts_reset(rollout_state, policy_states, True)
 
     rollout_state = rollout_state.update_matchmaking(
         train_self_play_portion, train_cross_play_portion,
         train_past_play_portion, train_static_play_portion,
         train_policy_assignments)
+
+    old_elos = policy_states.mmr.elo
+
+    elo_deltas = matchmake_eval_state.policy_elos - old_elos
 
     policy_states = policy_states.update(
         mmr = policy_states.mmr.replace(
@@ -503,8 +514,16 @@ def eval_elo(
     )
 
     return training_mgr.replace(
-        rollout = rollout_state,
-        state = training_mgr.state.replace(
-            policy_states = policy_states,
-        ),
-    )
+            rollout = rollout_state,
+            state = training_mgr.state.replace(
+                policy_states = policy_states,
+            ),
+        ), elo_deltas
+
+def update_population(training_mgr, elo_deltas):
+    state = training_mgr.state
+
+    state = pbt_cull_update(training_mgr.cfg, state, 1)
+    state = pbt_past_update(training_mgr.cfg, state)
+
+    return training_mgr.replace(state=state)

@@ -48,17 +48,19 @@ def eval_policies(
     eval_cfg: EvalConfig,
     sim_fns: Dict['str', Callable],
     policy: Policy,
+    init_sim_ctrl: jax.Array,
     policy_states: PolicyState,
     step_cb: Callable,
 ):
     with jax.default_device(dev):
-        return _eval_policies_impl(eval_cfg, sim_fns, policy,
+        return _eval_policies_impl(eval_cfg, sim_fns, policy, init_sim_ctrl,
                                    policy_states, step_cb)
 
 def _eval_policies_impl(
     eval_cfg: EvalConfig,
     sim_fns: Dict['str', Callable],
     policy: Policy,
+    init_sim_ctrl: jax.Array,
     policy_states: PolicyState,
     step_cb: Callable,
 ):
@@ -171,7 +173,7 @@ def _eval_policies_impl(
                 rollout_cfg.pbt.static_play_batch_size)
 
     @jax.jit
-    def init_rollout_state(static_play_assignments):
+    def init_rollout_state(sim_ctrl, static_play_assignments):
         rnn_states = policy.actor_critic.init_recurrent_state(
             rollout_cfg.sim_batch_size)
 
@@ -180,10 +182,11 @@ def _eval_policies_impl(
             sim_fns = sim_fns,
             prng_key = random.PRNGKey(0),
             rnn_states = rnn_states,
+            init_sim_ctrl = sim_ctrl,
             static_play_assignments = static_play_assignments
         )
 
-    rollout_state = init_rollout_state(static_play_assignments)
+    rollout_state = init_rollout_state(init_sim_ctrl, static_play_assignments)
 
     def post_policy_cb(step_idx, obs, preprocessed_obs, policy_out,
                        reorder_state, cb_state):
@@ -224,8 +227,8 @@ def _eval_policies_impl(
     rollout_loop_args = (rollout_state, policy_states)
 
     rollout_loop_fn = jax.jit(
-        checkify.checkify(rollout_loop_fn, errors=checkify_errors))
-        #donate_argnums=0)
+        checkify.checkify(rollout_loop_fn, errors=checkify_errors),
+        donate_argnums=[0, 1])
 
     lowered_rollout_loop = rollout_loop_fn.lower(*rollout_loop_args)
 

@@ -606,21 +606,22 @@ def _get_fitness_scores(policy_states):
         return policy_states.episode_score.mean
 
 
-def _pbt_cull_update(
+def pbt_cull_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
+    num_cull_policies: int,
 ):
     policy_states = train_state_mgr.policy_states
     train_states = train_state_mgr.train_states
     pbt_rng = train_state_mgr.pbt_rng
 
-    assert 2 * cfg.pbt.num_cull_policies < cfg.pbt.num_train_policies
+    assert 2 * num_cull_policies < cfg.pbt.num_train_policies
 
     fitness_scores = _get_fitness_scores(policy_states)
     sort_idxs = jnp.argsort(fitness_scores[0:cfg.pbt.num_train_policies])
     
-    bottom_idxs = sort_idxs[:cfg.pbt.num_cull_policies]
-    top_idxs = sort_idxs[-cfg.pbt.num_cull_policies:]
+    bottom_idxs = sort_idxs[:num_cull_policies]
+    top_idxs = sort_idxs[-num_cull_policies:]
 
     @partial(jax.vmap, in_axes=(None, None, 0, 0, 0))
     def cull_train_policy(policy_states, train_states,
@@ -661,7 +662,7 @@ def _pbt_cull_update(
 
     overwrite_policy_states, overwrite_train_states = cull_train_policy(
         policy_states, train_states,
-        random.split(mutate_base_rng, cfg.pbt.num_cull_policies),
+        random.split(mutate_base_rng, num_cull_policies),
         bottom_idxs, top_idxs)
 
     def overwrite_param(param, srcs):
@@ -682,7 +683,7 @@ def _pbt_cull_update(
     )
 
 
-def _pbt_past_update(
+def pbt_past_update(
     cfg: TrainConfig,
     train_state_mgr: TrainStateManager,
 ):
@@ -723,36 +724,3 @@ def _pbt_past_update(
         policy_states = policy_states,
         pbt_rng = pbt_rng,
     )
-
-
-def pbt_update(
-    cfg: TrainConfig,
-    train_state_mgr: TrainStateManager,
-    update_idx: jax.Array,
-):
-    if cfg.pbt == None:
-        return train_state_mgr
-
-    def pbt_update_noop(train_state_mgr):
-        return train_state_mgr
-
-    def pbt_past_update(train_state_mgr):
-        return _pbt_past_update(cfg, train_state_mgr)
-
-    def pbt_cull_update(train_state_mgr):
-        return _pbt_cull_update(cfg, train_state_mgr)
-
-    if cfg.pbt.past_policy_update_interval > 0:
-        should_update_past = jnp.logical_and(update_idx != 0,
-            update_idx % cfg.pbt.past_policy_update_interval == 0)
-
-        train_state_mgr = lax.cond(should_update_past,
-            pbt_past_update, pbt_update_noop, train_state_mgr)
-
-    if cfg.pbt.train_policy_cull_interval > 0:
-        should_cull_policy = jnp.logical_and(update_idx != 0,
-            update_idx % cfg.pbt.train_policy_cull_interval == 0)
-        train_state_mgr = lax.cond(should_cull_policy,
-            pbt_cull_update, pbt_update_noop, train_state_mgr)
-
-    return train_state_mgr

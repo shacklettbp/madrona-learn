@@ -175,6 +175,7 @@ class RolloutState(flax.struct.PyTreeNode):
     rnn_states: Any
     reorder_state: PolicyBatchReorderState
     policy_assignments: jax.Array
+    sim_ctrl: jax.Array
     env_returns: jax.Array
 
     @staticmethod
@@ -183,6 +184,7 @@ class RolloutState(flax.struct.PyTreeNode):
         sim_fns,
         prng_key,
         rnn_states,
+        init_sim_ctrl,
         static_play_assignments,
     ):
         if rollout_cfg.pbt.num_static_play_matches > 0.0:
@@ -223,6 +225,7 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
+            sim_ctrl = sim_ctrl,
             env_returns = init_env_returns,
         )
 
@@ -263,6 +266,7 @@ class RolloutState(flax.struct.PyTreeNode):
         rnn_states=None,
         reorder_state=None,
         policy_assignments=None,
+        sim_ctrl=None,
         env_returns=None,
     ):
         return RolloutState(
@@ -281,6 +285,9 @@ class RolloutState(flax.struct.PyTreeNode):
             policy_assignments = (
                 policy_assignments if policy_assignments != None else
                     self.policy_assignments),
+            sim_ctrl = (
+                sim_ctrl if sim_ctrl != None else
+                    self.sim_ctrl),
             env_returns = (env_returns if env_returns != None else
                 self.env_returns),
         )
@@ -877,6 +884,7 @@ def rollout_loop(
                      (rollout_state.cfg.pbt.team_size *
                       rollout_state.cfg.pbt.num_teams), 1), 
                     dtype=jnp.int32),
+                'sim_ctrl': rollout_state.sim_ctrl,
             })
 
             pbt_inputs = FrozenDict({})
@@ -961,6 +969,7 @@ def rollouts_reset(
                 (rollout_state.cfg.pbt.team_size *
                  rollout_state.cfg.pbt.num_teams), 1), 
             dtype=jnp.int32),
+        'sim_ctrl': rollout_state.sim_ctrl,
     })
 
     pbt_inputs = FrozenDict({})
