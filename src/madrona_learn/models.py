@@ -147,7 +147,7 @@ class DenseLayerCritic(nn.Module):
                 kernel_init=self.weight_init,
                 bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
-            )(features)
+            )(features).astype(jnp.float32)
 
 
 class DreamerV3Critic(nn.Module):

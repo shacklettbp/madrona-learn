@@ -400,6 +400,8 @@ class MatchmakeEvalState(flax.struct.PyTreeNode):
 def eval_elo(
     training_mgr: TrainingManager,
     num_eval_steps: int,
+    eval_sim_ctrl: jax.Array,
+    train_sim_ctrl: jax.Array,
 ):
     train_cfg = training_mgr.cfg
     policy_states = training_mgr.state.policy_states
@@ -433,7 +435,7 @@ def eval_elo(
     static_assignments_list = []
 
     for combo in itertools.product(
-            range(num_eval_policies + 1),
+            range(num_eval_policies),
             repeat=rollout_state.cfg.pbt.num_teams):
         for i in combo:
             static_assignments_list.append(i)
@@ -485,7 +487,11 @@ def eval_elo(
         policy_elos = jnp.full_like(policy_states.mmr.elo, 1500),
     )
 
-    rollout_state = rollouts_reset(rollout_state, policy_states, False)
+    rollout_state = rollout_state.update(
+        sim_ctrl = eval_sim_ctrl,
+    )
+
+    rollout_state = rollouts_reset(rollout_state, policy_states)
 
     rollout_state, policy_states, matchmake_eval_state = rollout_loop(
         rollout_state, policy_states,
@@ -496,7 +502,11 @@ def eval_elo(
         sample_actions = True,
     )
 
-    rollout_state = rollouts_reset(rollout_state, policy_states, True)
+    rollout_state = rollout_state.update(
+        sim_ctrl = train_sim_ctrl,
+    )
+
+    rollout_state = rollouts_reset(rollout_state, policy_states)
 
     rollout_state = rollout_state.update_matchmaking(
         train_self_play_portion, train_cross_play_portion,

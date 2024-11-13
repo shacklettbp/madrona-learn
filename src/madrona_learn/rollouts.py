@@ -225,7 +225,7 @@ class RolloutState(flax.struct.PyTreeNode):
             rnn_states = rnn_states,
             reorder_state = reorder_state,
             policy_assignments = policy_assignments,
-            sim_ctrl = sim_ctrl,
+            sim_ctrl = init_sim_ctrl,
             env_returns = init_env_returns,
         )
 

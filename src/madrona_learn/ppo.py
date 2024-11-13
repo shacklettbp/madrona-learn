@@ -166,7 +166,7 @@ def _ppo_update(
 
             new_value_norm_state = None
         else:
-            assert fwd_results['critic'].shape == 1
+            assert fwd_results['critic'].shape[-1] == 1
             new_values_normalized = fwd_results['critic']
 
             value_errs = (value_norm.invert(train_state.value_normalizer_state,
