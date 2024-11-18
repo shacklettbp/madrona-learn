@@ -42,6 +42,8 @@ class PBTMatchmakeConfig:
     num_total_matches: int
 
     complex_matchmaking: bool 
+
+    custom_policy_ids: List[int]
     
     @staticmethod
     def setup(
@@ -54,6 +56,7 @@ class PBTMatchmakeConfig:
         cross_play_portion: float,
         past_play_portion: float,
         static_play_portion: float,
+        custom_policy_ids: List[int],
     ):
         total_num_policies = num_current_policies + num_past_policies
 
@@ -84,7 +87,7 @@ class PBTMatchmakeConfig:
 
         assert num_cross_play_matches % num_current_policies == 0
         assert num_past_play_matches % num_current_policies == 0
-        assert num_static_play_matches % num_current_policies == 0
+        #assert num_static_play_matches % num_current_policies == 0
         
         complex_matchmaking = self_play_portion != 1.0
 
@@ -111,6 +114,7 @@ class PBTMatchmakeConfig:
             num_total_matches = num_total_matches,
 
             complex_matchmaking = complex_matchmaking,
+            custom_policy_ids = custom_policy_ids,
         )
 
 
@@ -257,6 +261,14 @@ def _elo_expected_result(
 ):
     return 1 / (1 + 10 ** ((opponent_elo - my_elo) / 400))
 
+def _convert_custom_policy_ids(assignments, mm_cfg):
+    for i, custom_id in enumerate(mm_cfg.custom_policy_ids):
+        assignments = jnp.where(
+            assignments == custom_id,
+            i + mm_cfg.total_num_policies,
+            assignments)
+
+    return assignments
 
 def pbt_update_elo(
     get_episode_scores_fn,
@@ -267,6 +279,8 @@ def pbt_update_elo(
     mm_cfg,
 ):
     assert mm_cfg.num_teams == 2
+
+    assignments = _convert_custom_policy_ids(assignments, mm_cfg)
 
     assignments = assignments.reshape(
         mm_cfg.num_total_matches, mm_cfg.num_teams,
@@ -548,20 +562,6 @@ def pbt_explore_hyperparams(
     return policy_state, train_state
 
 
-def _rebase_fitness(policy_states):
-    if policy_states.mmr == None:
-        return policy_states
-
-    mmrs = policy_states.mmr
-
-    # Rebase elo so average is 1500
-    elo_correction = jnp.mean(mmrs.elo) - 1500
-
-    mmrs = mmrs.replace(elo = mmrs.elo - elo_correction)
-
-    return policy_states.update(mmr=mmrs)
-
-
 def _check_overwrite(cfg, policy_states, src_idx, dst_idx):
     if policy_states.mmr != None:
         src_elo = policy_states.mmr.elo[src_idx]
@@ -674,8 +674,6 @@ def pbt_cull_update(
     train_states = jax.tree_map(
         overwrite_param, train_states, overwrite_train_states)
 
-    policy_states = _rebase_fitness(policy_states)
-
     return train_state_mgr.replace(
         policy_states = policy_states,
         train_states = train_states,
@@ -717,8 +715,6 @@ def pbt_past_update(
 
     policy_states = lax.cond(should_overwrite,
         overwrite_past_policy, noop, policy_states)
-
-    policy_states = _rebase_fitness(policy_states)
 
     return train_state_mgr.replace(
         policy_states = policy_states,

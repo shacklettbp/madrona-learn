@@ -116,6 +116,7 @@ def _eval_policies_impl(
             past_play_portion = 0.0,
             static_play_portion = 0.0,
             reward_gamma = eval_cfg.reward_gamma,
+            custom_policy_ids = eval_cfg.custom_policy_ids,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
@@ -133,10 +134,13 @@ def _eval_policies_impl(
             past_play_portion = 0.0,
             static_play_portion = 1.0,
             reward_gamma = eval_cfg.reward_gamma,
+            custom_policy_ids = eval_cfg.custom_policy_ids,
             policy_dtype = eval_cfg.policy_dtype,
         )
 
-        num_unique_static_assignments = num_eval_policies * num_eval_policies
+        total_num_policies = num_eval_policies + len(eval_cfg.custom_policy_ids)
+
+        num_unique_static_assignments = total_num_policies * total_num_policies 
 
         num_static_repeats = sim_batch_size // num_unique_static_assignments
 
@@ -144,11 +148,23 @@ def _eval_policies_impl(
 
         static_assignments_list = []
 
-        for combo in itertools.product(
-                range(num_eval_policies),
-                repeat=eval_cfg.num_teams):
-            for i in combo:
-                static_assignments_list.append(i)
+        for team_a_policy in range(num_eval_policies):
+            for team_b_policy in range(num_eval_policies):
+                static_assignments_list.append(team_a_policy)
+                static_assignments_list.append(team_b_policy)
+
+            for custom_id in eval_cfg.custom_policy_ids:
+                static_assignments_list.append(team_a_policy)
+                static_assignments_list.append(custom_id)
+
+        for custom_id in eval_cfg.custom_policy_ids:
+            for team_b_policy in range(num_eval_policies):
+                static_assignments_list.append(custom_id)
+                static_assignments_list.append(team_b_policy)
+
+            for other_custom_id in eval_cfg.custom_policy_ids:
+                static_assignments_list.append(custom_id)
+                static_assignments_list.append(other_custom_id)
 
         num_assignment_duplicates = (
             (sim_batch_size // eval_cfg.team_size) //

@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Dict, Union
 
@@ -72,6 +73,8 @@ class TrainConfig:
     gamma: float
     seed: int
     metrics_buffer_size: int
+    baseline_policy_id: int = 0
+    custom_policy_ids: List[int] = dataclasses.field(default_factory=lambda: [])
     gae_lambda: float = 1.0
     pbt: Optional[PBTConfig] = None
     dreamer_v3_critic: bool = True 
@@ -126,3 +129,4 @@ class EvalConfig:
     eval_competitive: bool
     use_deterministic_policy: bool = True
     clear_fitness: bool = True
+    custom_policy_ids: List[int] = dataclasses.field(default_factory=lambda: [])

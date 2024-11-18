@@ -249,6 +249,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             past_play_portion = cfg.pbt.past_play_portion,
             static_play_portion = 0.0,
             reward_gamma = cfg.gamma,
+            custom_policy_ids = cfg.custom_policy_ids,
             policy_dtype = cfg.compute_dtype,
             policy_chunk_size_override = \
                 cfg.pbt.rollout_policy_chunk_size_override,
@@ -266,6 +267,7 @@ def _setup_rollout_cfg(dev_type, cfg):
             past_play_portion = 0.0,
             static_play_portion = 0.0,
             reward_gamma = cfg.gamma,
+            custom_policy_ids = cfg.custom_policy_ids,
             policy_dtype = cfg.compute_dtype,
         )
 
@@ -426,19 +428,28 @@ def eval_elo(
         )
     train_policy_assignments = rollout_state.policy_assignments
 
-    num_unique_static_assignments = num_eval_policies * num_eval_policies
-
-    num_static_repeats = sim_batch_size // num_unique_static_assignments
-
-    assert sim_batch_size % num_unique_static_assignments == 0
-
     static_assignments_list = []
 
-    for combo in itertools.product(
-            range(num_eval_policies),
-            repeat=rollout_state.cfg.pbt.num_teams):
-        for i in combo:
-            static_assignments_list.append(i)
+    num_custom_policy_ids = len(train_cfg.custom_policy_ids)
+
+    for team_a_policy in range(num_eval_policies):
+        for team_b_policy in range(num_eval_policies):
+            static_assignments_list.append(team_a_policy)
+            static_assignments_list.append(team_b_policy)
+
+        for custom_id in train_cfg.custom_policy_ids:
+            static_assignments_list.append(team_a_policy)
+            static_assignments_list.append(custom_id)
+
+    for custom_id in train_cfg.custom_policy_ids:
+        for team_b_policy in range(num_eval_policies):
+            static_assignments_list.append(custom_id)
+            static_assignments_list.append(team_b_policy)
+
+        for other_custom_id in train_cfg.custom_policy_ids:
+            static_assignments_list.append(custom_id)
+            static_assignments_list.append(other_custom_id)
+
 
     num_assignment_duplicates = (
         (sim_batch_size // rollout_state.cfg.pbt.team_size) //
@@ -453,6 +464,16 @@ def eval_elo(
             assignments, num_assignment_duplicates, axis=0)
         assignments = jnp.repeat(
             assignments.reshape(-1), rollout_state.cfg.pbt.team_size)
+
+        if assignments.shape[0] < sim_batch_size:
+            assignments = jnp.pad(
+                assignments,
+                [(0, sim_batch_size - assignments.shape[0])],
+                mode='constant',
+                constant_values = 0)
+
+        elif assignments.shape[0] > sim_batch_size:
+            assert False
 
         return assignments
 
@@ -484,7 +505,8 @@ def eval_elo(
         return rollout_state, matchmake_eval_state
 
     matchmake_eval_state = MatchmakeEvalState(
-        policy_elos = jnp.full_like(policy_states.mmr.elo, 1500),
+        policy_elos = jnp.full((num_eval_policies + num_custom_policy_ids),
+                               1500, dtype=jnp.float32)
     )
 
     rollout_state = rollout_state.update(
@@ -513,13 +535,31 @@ def eval_elo(
         train_past_play_portion, train_static_play_portion,
         train_policy_assignments)
 
+    new_elos = matchmake_eval_state.policy_elos 
+
+    if (train_cfg.baseline_policy_id < num_eval_policies and
+        train_cfg.baseline_policy_id >= 0):
+        baseline_elo_idx = train_cfg.baseline_policy_id
+    else:
+        baseline_elo_idx = -1
+        for i, custom_id in enumerate(train_cfg.custom_policy_ids):
+            if custom_id == train_cfg.baseline_policy_id:
+                baseline_elo_idx = num_eval_policies + i
+                break
+        assert baseline_elo_idx != -1
+
+    baseline_elo = new_elos[baseline_elo_idx]
+
+    new_elos = new_elos - baseline_elo + 1500
+    new_elos = new_elos[0:num_eval_policies]
+
     old_elos = policy_states.mmr.elo
 
-    elo_deltas = matchmake_eval_state.policy_elos - old_elos
+    elo_deltas = new_elos - old_elos
 
     policy_states = policy_states.update(
         mmr = policy_states.mmr.replace(
-            elo = matchmake_eval_state.policy_elos,
+            elo = new_elos
         )
     )
 

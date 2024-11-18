@@ -51,6 +51,7 @@ class RolloutConfig:
         past_play_portion: float,
         static_play_portion: float,
         reward_gamma: float,
+        custom_policy_ids: List[int],
         policy_dtype: jnp.dtype,
         reward_dtype: jnp.dtype = jnp.float32,
         prob_dtype: jnp.dtype = jnp.float32,
@@ -66,6 +67,7 @@ class RolloutConfig:
             cross_play_portion = cross_play_portion,
             past_play_portion = past_play_portion,
             static_play_portion = static_play_portion,
+            custom_policy_ids = custom_policy_ids,
         )
 
         if pbt.complex_matchmaking:
@@ -247,6 +249,7 @@ class RolloutState(flax.struct.PyTreeNode):
             cross_play_portion,
             past_play_portion,
             static_play_portion,
+            self.cfg.pbt.custom_policy_ids,
         )
 
         new_cfg = dataclasses.replace(self.cfg, pbt=new_pbt_cfg)
