@@ -615,7 +615,7 @@ def pbt_cull_update(
     train_states = train_state_mgr.train_states
     pbt_rng = train_state_mgr.pbt_rng
 
-    assert 2 * num_cull_policies < cfg.pbt.num_train_policies
+    assert 2 * num_cull_policies <= cfg.pbt.num_train_policies
 
     fitness_scores = _get_fitness_scores(policy_states)
     sort_idxs = jnp.argsort(fitness_scores[0:cfg.pbt.num_train_policies])

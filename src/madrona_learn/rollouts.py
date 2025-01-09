@@ -736,6 +736,20 @@ class RolloutManager:
             rollouts, bootstrap_values, unnormalized_values,
             unnormalized_bootstrap_values, user_state)
 
+        modified_rewards = rollouts['rewards']
+
+        modify_rewards_based_on_filter_matches = False
+
+        if modify_rewards_based_on_filter_matches:
+            filters_state = rollouts['obs']['filters_state']
+            has_filters_active = jnp.any(
+                filters_state == 1.0, axis=1, keepdims=True)
+
+            bonus_rewards = jnp.where(has_filters_active, 1.0, 0.0)
+            modified_rewards = modified_rewards + bonus_rewards
+
+            rollouts = rollouts.copy({'rewards': modified_rewards})
+
         if self._use_advantages:
             advantages = self._compute_advantages_fn(
                 rollouts['rewards'],
