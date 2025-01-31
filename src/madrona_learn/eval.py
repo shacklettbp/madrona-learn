@@ -221,6 +221,7 @@ def _eval_policies_impl(
             'rewards': rewards,
             'returns': env_returns,
             'episode_results': episode_results,
+            'rnn_states': rollout_state.rnn_states
         })
 
         sim_state = step_cb(step_data)

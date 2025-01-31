@@ -745,7 +745,7 @@ class RolloutManager:
             has_filters_active = jnp.any(
                 filters_state == 1.0, axis=1, keepdims=True)
 
-            bonus_rewards = jnp.where(has_filters_active, 1.0, 0.0)
+            bonus_rewards = jnp.where(has_filters_active, 5.0, 0.0)
             modified_rewards = modified_rewards + bonus_rewards
 
             rollouts = rollouts.copy({'rewards': modified_rewards})
