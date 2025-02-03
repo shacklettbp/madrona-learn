@@ -86,7 +86,6 @@ class ActorCritic(nn.Module):
             actions = action_dists.best()
 
         results['actions'] = actions
-        jax.debug.print("{}", jax.tree.map(lambda x: jnp.any(jnp.isnan(x)), actions))
 
         results['critic'] = self.critic(critic_features, train=train)
 
