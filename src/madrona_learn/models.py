@@ -7,7 +7,7 @@ from flax.core import FrozenDict
 
 from typing import List, Callable, Any
 
-from .cfg import ActionsConfig
+from .cfg import DiscreteActionsConfig
 from .dists import DiscreteActionDistributions, SymExpTwoHotDistribution
 
 #from .pallas import monkeypatch as _pl_patch
@@ -116,7 +116,7 @@ class MLP(nn.Module):
 
 
 class DenseLayerDiscreteActor(nn.Module):
-    cfg: ActionsConfig
+    cfg: DiscreteActionsConfig
     dtype: jnp.dtype
     weight_init: Callable = jax.nn.initializers.orthogonal(scale=0.01)
 

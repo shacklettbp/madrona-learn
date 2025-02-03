@@ -7,9 +7,17 @@ from jax import lax, random, numpy as jnp
 from flax.core import FrozenDict
 
 @dataclass(frozen=True)
-class ActionsConfig:
+class DiscreteActionsConfig:
     actions_num_buckets: List[int]
 
+@dataclass(frozen=True)
+class ContinuousActionProps:
+    bounds_min: float
+    bounds_max: float
+
+@dataclass(frozen=True)
+class ContinuousActionsConfig:
+    props: List[ContinuousActionProps]
 
 class AlgoConfig:
     def name(self):
@@ -65,7 +73,7 @@ class TrainConfig:
     num_worlds: int
     num_agents_per_world: int
     num_updates: int
-    actions: ActionsConfig
+    actions: Dict[str, Union[DiscreteActionsConfig, ContinuousActionsConfig]]
     steps_per_update: int
     lr: Union[float, ParamExplore]
     algo: AlgoConfig
@@ -123,7 +131,7 @@ class EvalConfig:
     num_teams: int
     team_size: int
     num_eval_steps: int
-    actions: ActionsConfig
+    actions: Dict[str, Union[DiscreteActionsConfig, ContinuousActionsConfig]]
     reward_gamma: float
     policy_dtype: jnp.dtype
     eval_competitive: bool

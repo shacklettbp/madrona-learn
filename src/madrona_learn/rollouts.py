@@ -6,12 +6,12 @@ from flax.core import frozen_dict, FrozenDict
 
 import dataclasses
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Callable, Any
+from typing import List, Tuple, Dict, Optional, Callable, Any, Union
 from functools import partial
 import itertools
 import math
 
-from .cfg import TrainConfig, ActionsConfig
+from .cfg import TrainConfig, DiscreteActionsConfig, ContinuousActionsConfig
 from .actor_critic import ActorCritic
 from .algo_common import compute_advantages, compute_returns
 from .metrics import TrainingMetrics, Metric
@@ -28,7 +28,7 @@ from .observations import ObservationsPreprocess
 @dataclass(frozen = True)
 class RolloutConfig:
     sim_batch_size: int
-    actions_cfg: ActionsConfig
+    actions_cfg: Dict[str, Union[DiscreteActionsConfig, ContinuousActionsConfig]]
     policy_chunk_size: int
     num_policy_chunks: int
     total_policy_batch_size: int
@@ -45,7 +45,7 @@ class RolloutConfig:
         num_teams: int,
         team_size: int,
         sim_batch_size: int,
-        actions_cfg: ActionsConfig,
+        actions_cfg: Dict[str, Union[DiscreteActionsConfig, ContinuousActionsConfig]],
         self_play_portion: float,
         cross_play_portion: float,
         past_play_portion: float,
@@ -422,23 +422,23 @@ class RolloutManager:
                     'params': policy_state.params,
                     'batch_stats': policy_state.batch_stats,
                 },
+                random.key(0),
                 rnn_states,
                 preprocessed_obs,
                 train = False,
-                method='actor_only',
+                method='rollout',
             )
 
-            return policy_out['actions']
+            return policy_out['actions'], policy_out['log_probs']
 
-        actions_abstract = jax.eval_shape(
+        actions_abstract, log_probs_abstract = jax.eval_shape(
             get_actions_abstract, example_policy_state,
             init_rollout_state.rnn_states, preprocessed_obs_abstract)
 
         typed_shapes['obs'] = jax.tree_map(get_typed_shape, preprocessed_obs_abstract)
-        typed_shapes['actions'] = get_typed_shape(actions_abstract)
+        typed_shapes['actions'] = jax.tree.map(get_typed_shape, actions_abstract)
 
-        typed_shapes['log_probs'] = TypedShape(
-            typed_shapes['actions'].shape, self._cfg.prob_dtype)
+        typed_shapes['log_probs'] = jax.tree.map(lambda a: TypedShape(a.shape, self._cfg.prob_dtype), log_probs_abstract)
 
         typed_shapes['rewards'] = TypedShape(
           (self._cfg.sim_batch_size, 1), self._cfg.reward_dtype)
@@ -975,12 +975,23 @@ def rollouts_reset(
     rollout_state: RolloutState,
     policy_states: PolicyState,
 ):
+    def gen_zero_action(action_cfg):
+        if isinstance(action_cfg, DiscreteActionsConfig):
+            return jnp.zeros(
+                (rollout_state.cfg.sim_batch_size,
+                    len(action_cfg.actions_num_buckets)),
+                dtype=jnp.int32)
+        elif isinstance(action_cfg, ContinuousActionsConfig):
+            return jnp.zeros(
+                (rollout_state.cfg.sim_batch_size,
+                    len(action_cfg.props)),
+                dtype=jnp.float32)
+        else:
+            assert False
+
     step_input = frozen_dict.freeze({
         'state': rollout_state.sim_state,
-        'actions': jnp.zeros(
-            (rollout_state.cfg.sim_batch_size,
-             len(rollout_state.cfg.actions_cfg.actions_num_buckets)),
-            dtype=jnp.int32),
+        'actions': jax.tree.map(gen_zero_action, rollout_state.cfg.actions_cfg),
         'resets': jnp.ones(
             (rollout_state.cfg.sim_batch_size //
                 (rollout_state.cfg.pbt.team_size *

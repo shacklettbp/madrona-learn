@@ -4,12 +4,14 @@ from madrona_learn.train import (
 )
 from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (
-    ActionsConfig,
+    DiscreteActionsConfig,
+    ContinuousActionsConfig,
+    ContinuousActionProps,
     TrainConfig,
     PBTConfig,
     ParamExplore,
 )
-from madrona_learn.dists import DiscreteActionDistributions
+from madrona_learn.dists import DiscreteActionDistributions, ContinuousActionDistributions
 from madrona_learn.actor_critic import (
     ActorCritic, BackboneEncoder, RecurrentBackboneEncoder,
     Backbone, BackboneShared, BackboneSeparate,
@@ -30,7 +32,8 @@ from madrona_learn.tensorboard import TensorboardWriter
 
 __all__ = [
     "cfg_jax_mem", "init_training", "stop_training", "TrainHooks",
-    "ActionsConfig", "TrainConfig", "PBTConfig", "ParamExplore",
+    "DiscreteActionsConfig", "ContinuousActionsConfig", "ContinuousActionProps",
+    "TrainConfig", "PBTConfig", "ParamExplore",
     "TrainStateManager", "models", "rnn", 
     "eval_load_ckpt", "eval_policies", "EvalConfig",
     "Policy", "DiscreteActionDistributions",

@@ -6,6 +6,7 @@ import flax
 from dataclasses import dataclass
 from typing import List
 
+from .cfg import ContinuousActionsConfig, ContinuousActionProps
 from .utils import symlog, symexp
 
 class DiscreteActionDistributions(flax.struct.PyTreeNode):
@@ -207,3 +208,77 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
         return (targets_two_hot * log_probs).sum(-1, keepdims=True)
 
 
+class ContinuousActionDistributions(flax.struct.PyTreeNode):
+    props: List[ContinuousActionProps]
+    means: jax.Array
+    stds: jax.Array
+
+    def _iter_params(self):
+        for i in range(len(self.props)):
+            mean = self.means[..., i:i+1, :]
+            std = self.stds[..., i:i+1, :]
+
+            yield mean.astype(jnp.float32), std.astype(jnp.float32)
+
+    def sample(self, prng_key):
+        all_actions = []
+        all_log_probs = []
+
+        sample_keys = random.split(prng_key, len(self.props))
+
+        for sample_key, (mean, std), action_prop in zip(
+                sample_keys, self._iter_params(), self.props):
+            lo = action_prop.bounds_min
+            hi = action_prop.bounds_max
+
+            mean = mean.astype(jnp.float32)
+            std = std.astype(jnp.float32)
+
+            mean = jnp.tanh(mean)
+            std = (hi - lo) * jax.nn.sigmoid(std + 2.0) + lo
+
+            actions = jax.random.normal(sample_key, mean.shape, jnp.float32)
+            actions = actions * std + mean
+
+            log_prob = jax.scipy.stats.norm.logpdf(actions, mean, std)
+
+            all_actions.append(actions)
+            all_log_probs.append(log_prob)
+
+        return (jnp.concatenate(all_actions, axis=-2),
+                jnp.concatenate(all_log_probs, axis=-2))
+
+    def best(self):
+        all_actions = []
+
+        for mean, std in self._iter_params():
+            mean = jnp.tanh(mean.astype(jnp.float32))
+            all_actions.append(mean)
+
+        return jnp.concatenate(all_actions, axis=-2)
+
+    def action_stats(self, all_actions):
+        all_log_probs = []
+        all_entropies = []
+
+        for i, ((mean, std), action_prop) in enumerate(zip(
+                self._iter_params(), self.props)):
+            actions = jnp.expand_dims(all_actions[..., i, :], axis=-2)
+            lo = action_prop.bounds_min
+            hi = action_prop.bounds_max
+
+            mean = mean.astype(jnp.float32)
+            std = std.astype(jnp.float32)
+
+            mean = jnp.tanh(mean)
+            std = (hi - lo) * jax.nn.sigmoid(std + 2.0) + lo
+
+            log_probs = jax.scipy.stats.norm.logpdf(actions, mean, std)
+
+            entropies = 0.5 * jnp.log(2 * jnp.pi * jnp.square(std)) + 0.5
+
+            all_log_probs.append(log_probs)
+            all_entropies.append(entropies)
+
+        return (jnp.concatenate(all_log_probs, axis=-2),
+                jnp.concatenate(all_entropies, axis=-2))

@@ -77,7 +77,6 @@ class ActorCritic(nn.Module):
             rnn_states_in, obs_in, train=train)
 
         action_dists = self.actor(actor_features, train=train)
-
         results = {}
 
         if sample_actions:
@@ -87,11 +86,13 @@ class ActorCritic(nn.Module):
             actions = action_dists.best()
 
         results['actions'] = actions
+        jax.debug.print("{}", jax.tree.map(lambda x: jnp.any(jnp.isnan(x)), actions))
+
         results['critic'] = self.critic(critic_features, train=train)
 
-        if return_debug:
-            results['action_probs'] = action_dists.probs()
-            results['action_logits'] = action_dists.logits()
+        #if return_debug:
+        #    results['action_probs'] = action_dists.probs()
+        #    results['action_logits'] = action_dists.logits()
 
         return frozen_dict.freeze(results), rnn_states_out
 
@@ -109,14 +110,15 @@ class ActorCritic(nn.Module):
         action_dists = self.actor(actor_features, train=train)
         critic_out = self.critic(critic_features, train=train)
 
-        T, N = rollout_actions.shape[0:2]
-        flattened_actions = rollout_actions.reshape(
-            T * N, *rollout_actions.shape[2:])
+        T, N = sequence_breaks.shape[0:2]
+        flattened_actions = jax.tree.map(
+            lambda a:  a.reshape(T * N, *a.shape[2:]),
+            rollout_actions)
 
         log_probs, entropies = action_dists.action_stats(flattened_actions)
 
-        log_probs = log_probs.reshape(T, N, *log_probs.shape[1:])
-        entropies = entropies.reshape(T, N, *entropies.shape[1:])
+        log_probs = jax.tree.map(lambda x: x.reshape(T, N, *x.shape[1:]), log_probs)
+        entropies = jax.tree.map(lambda x: x.reshape(T, N, *x.shape[1:]), entropies)
         critic_out = jax.tree.map(
             lambda x: x.reshape(T, N, *x.shape[1:]), critic_out)
 

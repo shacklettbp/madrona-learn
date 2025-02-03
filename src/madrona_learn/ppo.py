@@ -4,6 +4,7 @@ import flax
 from flax import linen as nn
 from flax.core import FrozenDict
 import optax
+import operator
 
 from dataclasses import dataclass
 from functools import partial
@@ -139,22 +140,29 @@ def _ppo_update(
             if cfg.normalize_returns:
                 advantages = zscore_data(advantages)
 
-        old_log_probs = mb['log_probs'].astype(jnp.float32)
-        ratio = jnp.exp(new_log_probs - old_log_probs)
+        def compute_action_obj(new_log_probs, old_log_probs):
+            old_log_probs = old_log_probs.astype(jnp.float32)
+            ratio = jnp.exp(new_log_probs - old_log_probs)
 
-        num_action_dims = len(ratio.shape) - 2
+            num_action_dims = len(ratio.shape) - 2
 
-        if num_action_dims > 1:
-            advantages = advantages[..., None]
+            scores = advantages
+            if num_action_dims > 1:
+                scores = scores[..., None]
 
-        surr1 = advantages * ratio
+            surr1 = scores * ratio
 
-        clipped_ratio = jnp.clip(ratio,
-            1.0 - train_state.hyper_params.clip_coef.astype(ratio.dtype),
-            1.0 + train_state.hyper_params.clip_coef.astype(ratio.dtype))
-        surr2 = advantages * clipped_ratio
+            clipped_ratio = jnp.clip(ratio,
+                1.0 - train_state.hyper_params.clip_coef.astype(ratio.dtype),
+                1.0 + train_state.hyper_params.clip_coef.astype(ratio.dtype))
+            surr2 = scores * clipped_ratio
 
-        action_objs = jnp.minimum(surr1, surr2)
+            action_objs = jnp.minimum(surr1, surr2)
+
+            return action_objs
+
+        action_objs = jax.tree.map(
+            compute_action_obj, new_log_probs, mb['log_probs'])
 
         if cfg.dreamer_v3_critic:
             critic_distributions = fwd_results['critic']
@@ -192,9 +200,25 @@ def _ppo_update(
                 value_losses = optax.l2_loss(
                     new_values_normalized, normalized_returns)
 
-        action_obj_avg = jnp.mean(action_objs, dtype=jnp.float32)
+        def reduce_action_objs(action_objs):
+            leaves = jax.tree.leaves(action_objs)
+            action_obj_avg = jnp.mean(leaves[0], dtype=jnp.float32)
+            for leaf in leaves[1:]:
+                action_obj_avg = action_obj_avg + jnp.mean(leaf, dtype=jnp.float32)
+
+            return action_obj_avg
+
+        def reduce_entropies(entropies):
+            leaves = jax.tree.leaves(entropies)
+            entropy_avg = jnp.mean(leaves[0], dtype=jnp.float32)
+            for leaf in leaves[1:]:
+                entropy_avg = entropy_avg + jnp.mean(leaf, dtype=jnp.float32)
+
+            return entropy_avg
+
+        action_obj_avg = reduce_action_objs(action_objs)
         value_loss = jnp.mean(value_losses, dtype=jnp.float32)
-        entropy_avg = jnp.mean(entropies, dtype=jnp.float32)
+        entropy_avg = reduce_entropies(entropies)
 
         # Maximize the action objective function
         action_loss = -action_obj_avg
@@ -264,13 +288,19 @@ def _ppo_update(
             scaler = scaler,
         )
 
+    print(jax.tree.map(jnp.shape, action_objs))
+
     with profile('Record Metrics'):
         metrics = metrics.record({
             'Loss': combined_loss,
-            'Action Obj': action_objs,
+            'Action Obj': jnp.concatenate(
+                [x.reshape(-1, x.shape[-1]) for x in jax.tree.leaves(action_objs)],
+                axis=-1),
             'Value Loss': value_losses,
             'Value Errors': value_errs,
-            'Entropy': entropies,
+            'Entropy': jnp.concatenate(
+                [x.reshape(-1, x.shape[-1]) for x in jax.tree.leaves(entropies)],
+                axis=-1),
         })
 
     return policy_state, train_state, metrics
