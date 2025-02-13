@@ -288,8 +288,6 @@ def _ppo_update(
             scaler = scaler,
         )
 
-    print(jax.tree.map(jnp.shape, action_objs))
-
     with profile('Record Metrics'):
         metrics = metrics.record({
             'Loss': combined_loss,
