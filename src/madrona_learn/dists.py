@@ -228,8 +228,8 @@ class ContinuousActionDistributions(flax.struct.PyTreeNode):
 
         for sample_key, (mean, std), action_prop in zip(
                 sample_keys, self._iter_params(), self.props):
-            lo = action_prop.bounds_min
-            hi = action_prop.bounds_max
+            lo = action_prop.stddev_min
+            hi = action_prop.stddev_max
 
             mean = mean.astype(jnp.float32)
             std = std.astype(jnp.float32)
@@ -264,8 +264,8 @@ class ContinuousActionDistributions(flax.struct.PyTreeNode):
         for i, ((mean, std), action_prop) in enumerate(zip(
                 self._iter_params(), self.props)):
             actions = jnp.expand_dims(all_actions[..., i, :], axis=-2)
-            lo = action_prop.bounds_min
-            hi = action_prop.bounds_max
+            lo = action_prop.stddev_min
+            hi = action_prop.stddev_max
 
             mean = mean.astype(jnp.float32)
             std = std.astype(jnp.float32)

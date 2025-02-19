@@ -12,8 +12,8 @@ class DiscreteActionsConfig:
 
 @dataclass(frozen=True)
 class ContinuousActionProps:
-    bounds_min: float
-    bounds_max: float
+    stddev_min: float
+    stddev_max: float
 
 @dataclass(frozen=True)
 class ContinuousActionsConfig:
