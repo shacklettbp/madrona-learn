@@ -11,13 +11,10 @@ class DiscreteActionsConfig:
     actions_num_buckets: List[int]
 
 @dataclass(frozen=True)
-class ContinuousActionProps:
+class ContinuousActionsConfig:
     stddev_min: float
     stddev_max: float
-
-@dataclass(frozen=True)
-class ContinuousActionsConfig:
-    props: List[ContinuousActionProps]
+    num_dims: int
 
 class AlgoConfig:
     def name(self):

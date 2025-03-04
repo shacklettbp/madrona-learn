@@ -6,7 +6,7 @@ import flax
 from dataclasses import dataclass
 from typing import List
 
-from .cfg import ContinuousActionsConfig, ContinuousActionProps
+from .cfg import ContinuousActionsConfig
 from .utils import symlog, symexp
 
 class DiscreteActionDistributions(flax.struct.PyTreeNode):
@@ -209,12 +209,12 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
 
 
 class ContinuousActionDistributions(flax.struct.PyTreeNode):
-    props: List[ContinuousActionProps]
+    cfgs: List[ContinuousActionsConfig]
     means: jax.Array
     stds: jax.Array
 
     def _iter_params(self):
-        for i in range(len(self.props)):
+        for i in range(len(self.cfgs)):
             mean = self.means[..., i:i+1, :]
             std = self.stds[..., i:i+1, :]
 
@@ -224,12 +224,12 @@ class ContinuousActionDistributions(flax.struct.PyTreeNode):
         all_actions = []
         all_log_probs = []
 
-        sample_keys = random.split(prng_key, len(self.props))
+        sample_keys = random.split(prng_key, len(self.cfgs))
 
-        for sample_key, (mean, std), action_prop in zip(
-                sample_keys, self._iter_params(), self.props):
-            lo = action_prop.stddev_min
-            hi = action_prop.stddev_max
+        for sample_key, (mean, std), action_cfg in zip(
+                sample_keys, self._iter_params(), self.cfgs):
+            lo = action_cfg.stddev_min
+            hi = action_cfg.stddev_max
 
             mean = mean.astype(jnp.float32)
             std = std.astype(jnp.float32)
@@ -261,11 +261,11 @@ class ContinuousActionDistributions(flax.struct.PyTreeNode):
         all_log_probs = []
         all_entropies = []
 
-        for i, ((mean, std), action_prop) in enumerate(zip(
-                self._iter_params(), self.props)):
+        for i, ((mean, std), action_cfg) in enumerate(zip(
+                self._iter_params(), self.cfgs)):
             actions = jnp.expand_dims(all_actions[..., i, :], axis=-2)
-            lo = action_prop.stddev_min
-            hi = action_prop.stddev_max
+            lo = action_cfg.stddev_min
+            hi = action_cfg.stddev_max
 
             mean = mean.astype(jnp.float32)
             std = std.astype(jnp.float32)

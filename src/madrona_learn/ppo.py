@@ -209,10 +209,16 @@ def _ppo_update(
             return action_obj_avg
 
         def reduce_entropies(entropies):
-            leaves = jax.tree.leaves(entropies)
-            entropy_avg = jnp.mean(leaves[0], dtype=jnp.float32)
-            for leaf in leaves[1:]:
-                entropy_avg = entropy_avg + jnp.mean(leaf, dtype=jnp.float32)
+            keys = list(entropies.keys())
+            entropy_avg = (
+                    cfg.algo.entropy_coef[keys[0]] *
+                    jnp.mean(entropies[keys[0]], dtype=jnp.float32)
+                )
+            for k in keys[1:]:
+                entropy_avg = entropy_avg + (
+                        cfg.algo.entropy_coef[k] *
+                        jnp.mean(entropies[k], dtype=jnp.float32)
+                    )
 
             return entropy_avg
 
@@ -224,7 +230,8 @@ def _ppo_update(
         action_loss = -action_obj_avg
         value_loss = train_state.hyper_params.value_loss_coef * value_loss
         # Maximize entropy
-        entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
+        #entropy_loss = - train_state.hyper_params.entropy_coef * entropy_avg
+        entropy_loss = - entropy_avg
 
         loss = action_loss + value_loss + entropy_loss
 

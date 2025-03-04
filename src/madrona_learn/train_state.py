@@ -337,7 +337,11 @@ def _setup_policy_state(
     if cfg.pbt:
         num_reward_hyperparams = len(cfg.pbt.reward_hyper_params_explore)
 
-    reward_hyper_params = jnp.zeros((num_reward_hyperparams,), jnp.float32)
+
+    if num_reward_hyperparams > 0:
+        reward_hyper_params = jnp.zeros((num_reward_hyperparams,), jnp.float32)
+    else:
+        reward_hyper_params = None
 
     if not policy.get_episode_scores:
         get_episode_scores_fn = lambda x: 0.0

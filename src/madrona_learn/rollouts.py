@@ -28,6 +28,7 @@ from .observations import ObservationsPreprocess
 @dataclass(frozen = True)
 class RolloutConfig:
     sim_batch_size: int
+    num_worlds: int
     actions_cfg: Dict[str, Union[DiscreteActionsConfig, ContinuousActionsConfig]]
     policy_chunk_size: int
     num_policy_chunks: int
@@ -120,6 +121,7 @@ class RolloutConfig:
 
         return RolloutConfig(
             sim_batch_size = sim_batch_size,
+            num_worlds = (sim_batch_size // (pbt.team_size * pbt.num_teams)),
             actions_cfg = actions_cfg,
             policy_chunk_size = policy_chunk_size,
             num_policy_chunks = num_policy_chunks,
@@ -893,14 +895,11 @@ def rollout_loop(
             rnn_states = reorder_state.to_sim(rnn_states)
 
         with profile('Rollout Step'):
+
             step_input = frozen_dict.freeze({
                 'state': sim_state,
                 'actions': reorder_state.to_sim(policy_out['actions']),
-                'resets': jnp.zeros(
-                    (rollout_state.cfg.sim_batch_size //
-                     (rollout_state.cfg.pbt.team_size *
-                      rollout_state.cfg.pbt.num_teams), 1), 
-                    dtype=jnp.int32),
+                'resets': jnp.zeros((rollout_state.cfg.num_worlds, 1), dtype=jnp.int32),
                 'sim_ctrl': rollout_state.sim_ctrl,
             })
 
@@ -908,6 +907,8 @@ def rollout_loop(
 
             pbt_inputs = pbt_inputs.copy({
                 'policy_assignments': policy_assignments,
+                #'world_curriculum': jnp.ones(
+                #    (rollout_state.cfg.num_worlds, 1), dtype=jnp.int32),
             })
 
             if policy_states.reward_hyper_params != None:
@@ -984,7 +985,8 @@ def rollouts_reset(
         elif isinstance(action_cfg, ContinuousActionsConfig):
             return jnp.zeros(
                 (rollout_state.cfg.sim_batch_size,
-                    len(action_cfg.props)),
+                    1,
+                    action_cfg.num_dims),
                 dtype=jnp.float32)
         else:
             assert False
@@ -1005,6 +1007,8 @@ def rollouts_reset(
     pbt_inputs = pbt_inputs.copy({
         'policy_assignments': jnp.zeros(
             (rollout_state.cfg.sim_batch_size, 1), dtype=jnp.int32),
+        #'world_curriculum': jnp.ones(
+        #    (rollout_state.cfg.num_worlds, 1), dtype=jnp.int32),
     })
 
     if policy_states.reward_hyper_params != None:

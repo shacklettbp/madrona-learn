@@ -6,7 +6,6 @@ from madrona_learn.train_state import TrainStateManager
 from madrona_learn.cfg import (
     DiscreteActionsConfig,
     ContinuousActionsConfig,
-    ContinuousActionProps,
     TrainConfig,
     PBTConfig,
     ParamExplore,
