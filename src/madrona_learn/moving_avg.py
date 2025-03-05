@@ -4,6 +4,45 @@ import flax
 from flax.core import FrozenDict
 from dataclasses import dataclass
 
+@dataclass(frozen=True)
+class EMAEstimate:
+    decay: float
+    eps: float = 1e-5
+
+    def init_estimates(self, x):
+        dim = x.shape[-1]
+
+        return FrozenDict(
+            mu = jnp.zeros((dim,), jnp.float32),
+            mu_biased = jnp.zeros((dim,), jnp.float32),
+            N = jnp.zeros((), jnp.int32),
+        )
+
+    def update_estimates(self, est, x):
+        x_mean = jnp.mean(x, dtype=jnp.float32)
+
+        mean_delta = x_mean - est['mu']
+
+        one_minus_alpha = jnp.float32(self.decay)
+        alpha = jnp.float32(1) - one_minus_alpha
+
+        new_N = est['N'] + 1
+
+        new_mu_biased = (
+            one_minus_alpha * est['mu_biased'] + alpha * x_mean
+        )
+
+        bias_correction = -1 / jnp.expm1(
+            new_N.astype(jnp.float32) * jnp.log(one_minus_alpha))
+
+        new_mu = new_mu_biased * bias_correction
+
+        return FrozenDict(
+            mu = new_mu,
+            mu_biased = new_mu_biased,
+            N = new_N,
+        )
+
 # Exponential Moving Average mean and variance estimator for
 # values and observations
 @dataclass(frozen=True)

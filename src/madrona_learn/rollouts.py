@@ -328,6 +328,11 @@ class RolloutData(flax.struct.PyTreeNode):
             'rnn_start_states': rnn_start_states,
         })
 
+    def flatten_time(self):
+        flattened = jax.tree.map(lambda x: x.reshape(-1, 1, *x.shape[2:]), self.data)
+
+        return self.replace(data=flattened)
+
 
 class RolloutCollectState(flax.struct.PyTreeNode):
     store: FrozenDict[str, Any]

@@ -1,6 +1,5 @@
 import jax
 from jax import lax, random, numpy as jnp
-from jax.experimental import checkify
 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -39,22 +38,8 @@ def symlog(x):
 def symexp(x):
     return jnp.sign(x) * jnp.expm1(jnp.abs(x))
 
-def get_checkify_errors():
-    checkify_errors = checkify.user_checks
-    if 'MADRONA_LEARN_FULL_CHECKIFY' in env_vars and \
-            env_vars['MADRONA_LEARN_FULL_CHECKIFY'] == '1':
-        checkify_errors |= (
-            checkify.float_checks |
-            checkify.nan_checks |
-            checkify.div_checks |
-            checkify.index_checks
-        )
-
-    return checkify_errors
-
 def aot_compile(func, *args):
-    func = jax.jit(checkify.checkify(func, errors=get_checkify_errors()),
-                   donate_argnums=range(len(args)))
+    func = jax.jit(func, donate_argnums=range(len(args)))
 
     lowered = func.lower(*args)
 

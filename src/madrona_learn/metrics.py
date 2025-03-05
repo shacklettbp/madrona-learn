@@ -100,13 +100,14 @@ class Metric(flax.struct.PyTreeNode):
 
 class TrainingMetrics(flax.struct.PyTreeNode):
     metrics: FrozenDict[str, Metric]
-    update_idx: jnp.int32
-    cur_buffer_offset: jnp.int32
-    update_buffer_size: jnp.int32
+    update_idx: jax.Array
+    cur_buffer_offset: jax.Array
+    update_buffer_size: jax.Array
     print_names: FrozenDict[str, str] = flax.struct.field(pytree_node=False)
 
     @staticmethod
-    def create(cfg, metrics: FrozenDict[str, Metric], start_update_idx: int):
+    def create(cfg, metrics: FrozenDict[str, Metric], start_update_idx: int,
+               num_policies: int):
         max_keylen = 0
         for name in metrics.keys():
             max_keylen = max(max_keylen, len(name))
@@ -128,10 +129,10 @@ class TrainingMetrics(flax.struct.PyTreeNode):
             def expand_time_dim(x):
                 return x
 
+            x = expand_time_dim(x)
+
             if x.per_policy:
                 x = expand_policy_dim(x)
-
-            x = expand_time_dim(x)
 
             return x
 
@@ -139,10 +140,12 @@ class TrainingMetrics(flax.struct.PyTreeNode):
 
         return TrainingMetrics(
             metrics = metrics,
-            update_idx = jnp.asarray(start_update_idx, dtype=jnp.int32),
-            cur_buffer_offset = jnp.asarray(0, dtype=jnp.int32),
-            update_buffer_size = jnp.asarray(
-                cfg.metrics_buffer_size, dtype=jnp.int32),
+            update_idx = jnp.full(
+                (num_policies,), start_update_idx, dtype=jnp.int32),
+            cur_buffer_offset = jnp.full(
+                (num_policies,), 0, dtype=jnp.int32),
+            update_buffer_size = jnp.full(
+                (num_policies,), cfg.metrics_buffer_size, dtype=jnp.int32),
             print_names = print_names,
         )
 
@@ -150,7 +153,7 @@ class TrainingMetrics(flax.struct.PyTreeNode):
         updated_metrics = {}
         for k in metrics.keys():
             updated_metrics[k] = jax.tree.map(
-                lambda x, y: x.at[self.cur_buffer_offset].set(y),
+                lambda x, y: x.at[:, self.cur_buffer_offset].set(y),
                 self.metrics[k], metrics[k])
 
         return self.replace(metrics = self.metrics.copy(updated_metrics))
@@ -168,9 +171,12 @@ class TrainingMetrics(flax.struct.PyTreeNode):
             if per_policy and self.metrics[k].mean.ndim > 1:
                 init_metric = jax.vmap(init_metric)
 
+                update_metric = lambda x, y: x.at[:, self.cur_buffer_offset].set(y)
+            else:
+                update_metric = lambda x, y: x.at[self.cur_buffer_offset].set(y)
+
             updated_metrics[k] = jax.tree.map(
-                lambda x, y: x.at[self.cur_buffer_offset].set(y),
-                self.metrics[k], init_metric(data[k]))
+                update_metric, self.metrics[k], init_metric(data[k]))
 
         return self.replace(metrics = self.metrics.copy(updated_metrics))
     
@@ -210,7 +216,7 @@ class TrainingMetrics(flax.struct.PyTreeNode):
         print("\n".join(formatted))
 
     def tensorboard_log(self, base_update_idx, writer):
-        for buf_idx in range(self.update_buffer_size):
+        for buf_idx in range(self.update_buffer_size[0]):
             out_idx = base_update_idx + buf_idx
 
             for name, metric in self.metrics.items():
@@ -223,16 +229,16 @@ class TrainingMetrics(flax.struct.PyTreeNode):
                     writer.scalar(f"{name} Min", metric.min[buf_idx], out_idx)
                     writer.scalar(f"{name} Max", metric.max[buf_idx], out_idx)
                 else:
-                    num_policies = metric.mean.shape[1]
+                    num_policies = metric.mean.shape[0]
 
                     for i in range(num_policies):
                         stddev = np.sqrt(
-                            metric.m2[buf_idx, i] / metric.count[buf_idx, i])
+                            metric.m2[i, buf_idx] / metric.count[i, buf_idx])
 
                         writer.scalar(f"p{i}/{name} Mean",
-                                      metric.mean[buf_idx, i], out_idx)
+                                      metric.mean[i, buf_idx], out_idx)
                         writer.scalar(f"p{i}/{name} σ", stddev, out_idx)
                         writer.scalar(f"p{i}/{name} Min",
-                                      metric.min[buf_idx, i], out_idx)
+                                      metric.min[i, buf_idx], out_idx)
                         writer.scalar(f"p{i}/{name} Max",
-                                      metric.max[buf_idx, i], out_idx)
+                                      metric.max[i, buf_idx], out_idx)

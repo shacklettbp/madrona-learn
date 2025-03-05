@@ -18,6 +18,7 @@ class HyperParams(flax.struct.PyTreeNode):
     gae_lambda: float
     normalize_values: bool
     value_normalizer_decay: float
+    max_advantage_est_decay: float
 
 
 class AlgoBase:

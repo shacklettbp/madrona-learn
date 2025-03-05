@@ -24,7 +24,7 @@ __all__ = [ "PPOConfig" ]
 @dataclass(frozen=True)
 class PPOConfig(AlgoConfig):
     num_epochs: int
-    num_mini_batches: int
+    minibatch_size: int
     clip_coef: float
     value_loss_coef: float
     entropy_coef: Union[float, ParamExplore]
@@ -73,6 +73,7 @@ class PPO(AlgoBase):
             gae_lambda = cfg.gae_lambda,
             normalize_values = cfg.normalize_values,
             value_normalizer_decay = cfg.value_normalizer_decay,
+            max_advantage_est_decay = cfg.max_advantage_est_decay,
             # PPO
             clip_coef = cfg.algo.clip_coef,
             value_loss_coef = cfg.algo.value_loss_coef,
@@ -318,21 +319,66 @@ def _ppo(
     user_metrics_cb: Callable,
     init_metrics: TrainingMetrics,
 ):
+    if cfg.filter_advantages:
+        rollout_data = rollout_data.flatten_time()
+
+        advantages = rollout_data.all()['advantages']
+        advantages_abs = jnp.abs(advantages)
+        max_advantages = jnp.max(advantages_abs)
+
+        max_advantage_est_state = train_state.max_advantage_est_state
+        old_max_adv_mu = max_advantage_est_state['mu']
+        max_advantage_est_state = train_state.max_advantage_est.update_estimates(
+            max_advantage_est_state, max_advantages)
+
+        train_state = train_state.update(
+            max_advantage_est_state = max_advantage_est_state,
+        )
+
+        cur_max_advantage_est = max_advantage_est_state['mu']
+
+        advantages_abs_flat = advantages_abs.reshape(-1) 
+
+        advantage_indices_sort = jnp.argsort(advantages_abs_flat, descending=True)
+        num_above_threshold = jnp.sum(jnp.where(
+            advantages_abs_flat >= 0.01 * cur_max_advantage_est,
+            1, 0))
+
+        num_minibatches = jnp.minimum((num_above_threshold + (cfg.algo.minibatch_size - 1)) // cfg.algo.minibatch_size, advantages_abs_flat.size // cfg.algo.minibatch_size)
+
+        num_datapoints = num_minibatches * cfg.algo.minibatch_size
+        valid_inds = jnp.where(jnp.arange(advantages_abs_flat.size) < num_datapoints,
+                               advantage_indices_sort,
+                               -1)
+        jax.debug.print("{} {}", num_minibatches, num_above_threshold)
+
     def epoch_iter(epoch_i, inputs):
         policy_state, train_state, metrics = inputs
 
         mb_rnd, train_state = train_state.gen_update_rnd()
 
         with profile('Compute Minibatch Indices'):
-            all_inds = random.permutation(
-                mb_rnd, rollout_data.num_train_seqs_per_policy)
-            mb_inds = all_inds.reshape((cfg.algo.num_mini_batches, -1))
+            rnd_inds = random.permutation(mb_rnd, valid_inds)
+
+            def filter_valid_inds(x):
+                keys = jnp.where(x == -1, 1, 0)
+                valid = jnp.argsort(keys, stable=True)
+                return x[valid]
+
+            rnd_inds = filter_valid_inds(rnd_inds)
+
+            #jax.debug.print("{} {} {} {} {} {}", num_minibatches, num_above_threshold, advantages_abs_flat.size, rnd_inds, advantages_abs_flat[rnd_inds], 0.01 * cur_max_advantage_est)
+
 
         def mb_iter(mb_i, inputs):
             policy_state, train_state, metrics = inputs
 
             with profile('Gather Minibatch'):
-                mb = rollout_data.minibatch(mb_inds[mb_i])
+                mb_inds = lax.dynamic_slice(
+                    rnd_inds, (mb_i * cfg.algo.minibatch_size,), 
+                    (cfg.algo.minibatch_size,))
+                #jax.debug.print("Um {}", mb_inds)
+                mb = rollout_data.minibatch(mb_inds)
 
             policy_state, train_state, metrics = _ppo_update(
                 cfg, mb, policy_state, train_state, metrics)
@@ -344,7 +390,7 @@ def _ppo(
             return policy_state, train_state, metrics
 
         return lax.fori_loop(
-            0, cfg.algo.num_mini_batches, mb_iter,
+            0, num_minibatches, mb_iter,
             (policy_state, train_state, metrics))
 
     policy_state, train_state, metrics = lax.fori_loop(

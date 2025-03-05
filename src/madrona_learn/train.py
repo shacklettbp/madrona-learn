@@ -1,6 +1,5 @@
 import jax
 from jax import lax, random, numpy as jnp
-from jax.experimental import checkify
 import flax
 from flax import linen as nn
 from flax.core import frozen_dict, FrozenDict
@@ -31,7 +30,7 @@ from .pbt import (
 )
 from .policy import Policy
 from .profile import profile
-from .utils import aot_compile, get_checkify_errors
+from .utils import aot_compile
 
 class TrainingManager(flax.struct.PyTreeNode):
     state: TrainStateManager
@@ -163,12 +162,7 @@ def _update_impl(
     metrics: TrainingMetrics,
     update_idx: int,
 ):
-    metrics_vmap = jax.tree_util.tree_map_with_path(
-        lambda kp, x: 1 if kp[0].name == 'metrics' else None, metrics)
-
-    @partial(jax.vmap,
-             in_axes=(0, 0, 0, metrics_vmap),
-             out_axes=(0, 0, metrics_vmap))
+    @jax.vmap
     def algo_wrapper(policy_state, train_state, rollout_data, metrics):
         return algo.update(
             cfg, 
@@ -321,7 +315,6 @@ def _init_training(
         example_obs = rollout_state.cur_obs,
         example_rnn_states = rollout_state.rnn_states,
         use_competitive_mmr = rollout_cfg.pbt.complex_matchmaking,
-        checkify_errors = get_checkify_errors(),
     )
 
     @partial(jax.jit, donate_argnums=0)
@@ -371,7 +364,9 @@ def _init_training(
     metrics = algo.add_metrics(cfg, FrozenDict())
     metrics = rollout_mgr.add_metrics(cfg, metrics)
     metrics = user_hooks.add_metrics(metrics)
-    metrics = TrainingMetrics.create(cfg, metrics, start_update_idx)
+
+    metrics = TrainingMetrics.create(cfg, metrics, start_update_idx,
+                                     train_state_mgr.train_states.update_prng_key.shape[0])
 
     def update_wrapper(train_state_mgr, rollout_state, metrics, update_idx):
         return _update_impl(

@@ -1,6 +1,5 @@
 import jax
 from jax import lax, random, numpy as jnp
-from jax.experimental import checkify
 import numpy as np
 import flax
 from flax import linen as nn
@@ -18,7 +17,7 @@ from functools import partial
 from .actor_critic import ActorCritic
 from .algo_common import HyperParams, AlgoBase
 from .cfg import TrainConfig
-from .moving_avg import EMANormalizer
+from .moving_avg import EMAEstimate, EMANormalizer
 from .observations import ObservationsPreprocess, ObservationsPreprocessNoop
 from .policy import Policy
 
@@ -85,8 +84,10 @@ class PolicyState(flax.struct.PyTreeNode):
 
 class PolicyTrainState(flax.struct.PyTreeNode):
     value_normalizer: Optional[EMANormalizer] = flax.struct.field(pytree_node=False)
+    max_advantage_est: EMAEstimate = flax.struct.field(pytree_node=False)
     tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     value_normalizer_state: Optional[FrozenDict[str, Any]]
+    max_advantage_est_state: FrozenDict[str, jax.Array]
     hyper_params: HyperParams
     opt_state: optax.OptState
     scheduler: Optional[optax.Schedule]
@@ -97,6 +98,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
         self,
         tx=None,
         value_normalizer_state=None,
+        max_advantage_est_state=None,
         hyper_params=None,
         opt_state=None,
         scheduler=None,
@@ -105,10 +107,15 @@ class PolicyTrainState(flax.struct.PyTreeNode):
     ):
         return PolicyTrainState(
             value_normalizer = self.value_normalizer,
+            max_advantage_est = self.max_advantage_est,
             tx = tx if tx != None else self.tx,
             value_normalizer_state = (
                 value_normalizer_state if value_normalizer_state != None else
                     self.value_normalizer_state
+            ),
+            max_advantage_est_state = (
+                max_advantage_est_state if max_advantage_est_state != None else
+                    self.max_advantage_est_state
             ),
             hyper_params = (
                 hyper_params if hyper_params != None else self.hyper_params
@@ -275,7 +282,6 @@ class TrainStateManager(flax.struct.PyTreeNode):
         example_obs,
         example_rnn_states,
         use_competitive_mmr,
-        checkify_errors,
     ):
         base_init_rng, pbt_rng = random.split(base_rng)
 
@@ -283,12 +289,10 @@ class TrainStateManager(flax.struct.PyTreeNode):
             return _make_policies(policy, cfg, algo, rnd, obs,
                 rnn_states, use_competitive_mmr)
 
-        make_policies = jax.jit(checkify.checkify(
-            make_policies, errors=checkify_errors))
+        make_policies = jax.jit(make_policies)
 
-        err, (policy_states, train_states) = make_policies(
+        policy_states, train_states = make_policies(
             base_init_rng, example_obs, example_rnn_states)
-        err.throw()
 
         return TrainStateManager(
             policy_states = policy_states,
@@ -398,10 +402,18 @@ def _setup_train_state(
     else:
         scaler = None
 
+    max_advantage_est = EMAEstimate(
+        decay = hyper_params.max_advantage_est_decay,
+    )
+
+    max_advantage_est_state = max_advantage_est.init_estimates(jnp.zeros((1,)))
+
     return PolicyTrainState(
         value_normalizer = value_norm,
+        max_advantage_est = max_advantage_est,
         tx = optimizer,
         value_normalizer_state = value_norm_state,
+        max_advantage_est_state = max_advantage_est_state,
         hyper_params = hyper_params,
         opt_state = opt_state,
         scheduler = None,
