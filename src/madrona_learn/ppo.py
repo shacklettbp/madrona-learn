@@ -51,7 +51,7 @@ class PPO(AlgoBase):
         self,
         cfg: TrainConfig,
     ):
-        if cfg.dreamer_v3_critic:
+        if cfg.dreamer_v3_critic or cfg.hlgauss_critic:
             assert not cfg.algo.clip_value_loss
             assert not cfg.algo.huber_value_loss
             assert not cfg.normalize_values
@@ -168,8 +168,16 @@ def _ppo_update(
         if cfg.dreamer_v3_critic:
             critic_distributions = fwd_results['critic']
 
-            value_losses = - critic_distributions.two_hot_cross_entropy_loss(
+            value_losses = critic_distributions.two_hot_cross_entropy_loss(
                 mb['returns'])
+
+            value_errs = critic_distributions.mean() - mb['returns']
+
+            new_value_norm_state = None
+        elif cfg.hlgauss_critic:
+            critic_distributions = fwd_results['critic']
+
+            value_losses = critic_distributions.loss(mb['returns'])
 
             value_errs = critic_distributions.mean() - mb['returns']
 

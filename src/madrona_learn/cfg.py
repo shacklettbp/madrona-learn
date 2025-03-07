@@ -82,7 +82,8 @@ class TrainConfig:
     custom_policy_ids: List[int] = dataclasses.field(default_factory=lambda: [])
     gae_lambda: float = 1.0
     pbt: Optional[PBTConfig] = None
-    dreamer_v3_critic: bool = True 
+    dreamer_v3_critic: bool = True
+    hlgauss_critic: bool = False
     compute_advantages: bool = True
     normalize_advantages: bool = True # Only used if compute_advantages = True
     normalize_returns: bool = True # Only used if compute_advantages = False

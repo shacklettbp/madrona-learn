@@ -1,5 +1,6 @@
 import jax
 from jax import lax, random, numpy as jnp
+import numpy as np
 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable

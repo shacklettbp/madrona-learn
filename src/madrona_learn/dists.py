@@ -205,7 +205,7 @@ class SymExpTwoHotDistribution(flax.struct.PyTreeNode):
         log_probs = self.logits - jax.nn.logsumexp(
             self.logits, axis=-1, keepdims=True)
 
-        return (targets_two_hot * log_probs).sum(-1, keepdims=True)
+        return -(targets_two_hot * log_probs).sum(-1, keepdims=True)
 
 
 class ContinuousActionDistributions(flax.struct.PyTreeNode):

@@ -380,7 +380,8 @@ class RolloutManager:
         cpu_dev = jax.devices('cpu')[0]
 
         self._cfg = init_rollout_state.cfg
-        self._critic_outputs_distribution = train_cfg.dreamer_v3_critic
+        self._critic_outputs_distribution = (
+            train_cfg.dreamer_v3_critic or train_cfg.hlgauss_critic)
 
         self._num_bptt_chunks = train_cfg.num_bptt_chunks
         assert train_cfg.steps_per_update % train_cfg.num_bptt_chunks == 0

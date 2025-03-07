@@ -8,7 +8,12 @@ from flax.core import FrozenDict
 from typing import List, Callable, Any
 
 from .cfg import DiscreteActionsConfig
-from .dists import DiscreteActionDistributions, SymExpTwoHotDistribution
+from .dists import (
+    DiscreteActionDistributions,
+    SymExpTwoHotDistribution,
+)
+
+from .utils import symexp
 
 #from .pallas import monkeypatch as _pl_patch
 #from .pallas import layer_norm as pl_layer_norm
@@ -126,7 +131,7 @@ class DenseLayerDiscreteActor(nn.Module):
                 total_action_dim,
                 use_bias=True,
                 kernel_init=self.weight_init,
-                bias_init=jax.nn.initializers.constant(0),
+             bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )
 
@@ -169,6 +174,217 @@ class DreamerV3Critic(nn.Module):
 
         return SymExpTwoHotDistribution.create(logits)
 
+# Based on M3 / Stop Regressing papers
+class HLGaussTwoPartDist(flax.struct.PyTreeNode):
+    small_logits: jax.Array
+    large_logits: jax.Array
+
+    smoothness: float = flax.struct.field(pytree_node=False)
+
+    small_centers: jax.Array = flax.struct.field(pytree_node=False)
+    small_bounds: jax.Array = flax.struct.field(pytree_node=False)
+
+    large_centers: jax.Array = flax.struct.field(pytree_node=False)
+    large_bounds: jax.Array = flax.struct.field(pytree_node=False)
+
+    def mean(self):
+        def categorical_pred(logits, centers):
+            midpoint = (centers.size - 1) // 2
+
+            probs = jax.nn.softmax(logits)
+            
+            # JAX summations are not very accurate. Use symmetric sum for top
+            # and bottom of distribution to ensure they sum to 0 at initialization
+            # See DreamerV3 paper
+            p1 = probs[..., :midpoint]
+            p2 = probs[..., midpoint:midpoint + 1]
+            p3 = probs[..., midpoint + 1:]
+
+            c1 = centers[..., :midpoint]
+            c2 = centers[..., midpoint:midpoint + 1]
+            c3 = centers[..., midpoint + 1:]
+
+            weighted_avg = (
+                (p2 * c2).sum(axis=-1, keepdims=True) +
+                ((p1 * c1)[..., ::-1] +
+                 (p3 * c3)).sum(axis=-1, keepdims=True)
+            )
+
+            return weighted_avg
+
+        small_pred = categorical_pred(self.small_logits, self.small_centers)
+        large_pred = categorical_pred(self.large_logits, self.large_centers)
+
+        return small_pred + large_pred
+
+    def loss(self, targets):
+        targets = jnp.clip(
+            targets, self.large_centers[0], self.large_centers[-1])
+
+        small_large_boundary = 2
+        small_tgt = targets % (jnp.where(targets >= 0, 1, -1) * 2)
+        large_tgt = targets - small_tgt
+
+        erf = jax.scipy.special.erf
+
+        def compute_sigma(bounds, tgts):
+            lower_bin_idx = (
+                (bounds <= tgts).astype(jnp.int32).sum(axis=-1) - 1
+            )
+
+            upper_bin_idx = lower_bin_idx + 1
+
+            lower_bin_idx = jnp.clip(lower_bin_idx, 0, bounds.size - 2)
+            upper_bin_idx = jnp.clip(upper_bin_idx, 1, bounds.size - 1)
+            
+            width = bounds[upper_bin_idx] - bounds[lower_bin_idx]
+
+            return self.smoothness * width[..., None]
+
+
+        def hl_gauss(logits, bounds, tgts):
+            sigmas = compute_sigma(bounds, tgts)
+            print(sigmas.shape)
+
+            a = bounds[0]
+            b = bounds[1]
+
+            cdfs = erf((bounds - tgts) / (jnp.sqrt(2) * sigmas))
+
+            z = cdfs[..., -1] - cdfs[..., 0]
+            z = z[..., None]
+
+            c = 1 / z * (cdfs[..., 1:] - cdfs[..., :-1])
+
+            log_probs = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+
+            return -(c * log_probs).sum(-1, keepdims=True)
+
+        small_loss = hl_gauss(self.small_logits, self.small_bounds, small_tgt)
+        large_loss = hl_gauss(self.large_logits, self.large_bounds, large_tgt)
+
+        return small_loss + large_loss
+
+
+class HLGaussTwoPartCritic(nn.Module):
+    dtype: jnp.dtype
+
+    small_centers: jax.Array
+    small_bounds: jax.Array
+
+    large_centers: jax.Array
+    large_bounds: jax.Array
+
+    smoothness: float = 0.75
+
+    weight_init: Callable = jax.nn.initializers.constant(0)
+
+    @staticmethod
+    def create(
+        dtype: jnp.dtype,
+        num_small_bins: int = 127,
+        num_large_bins: int = 127,
+        smoothness: float = 0.75,
+    ):
+        def gen_floating_point_bins(
+            num_mantissa_bits: int,
+            num_exp_bits: int,
+            bias: int,
+            denorm: bool,
+        ):
+            half = []
+            widths = []
+            for exp in range(2 ** num_exp_bits):
+                if denorm and exp == 0:
+                    scale = (2 ** (1 - bias))
+                else:
+                    scale = (2 ** (exp - bias))
+
+                width = scale / (2 ** num_mantissa_bits)
+                for mantissa in range(2 ** num_mantissa_bits):
+                    frac = mantissa / (2 ** num_mantissa_bits)
+                    if denorm and exp == 0:
+                        half.append(frac * scale)
+                    elif exp == 0 and mantissa == 0:
+                        half.append(0)
+                    else:
+                        half.append((1 + frac) * scale)
+                    widths.append(width)
+
+            half = np.asarray(half, dtype=np.float32)
+            bins = np.concatenate([-half[:0:-1], half])
+
+            widths = np.asarray(widths, dtype=np.float32)
+            widths = np.concatenate([widths[:0:-1], widths])
+
+            bounds = bins - 0.5 * widths
+            bounds = np.concatenate([bounds, np.asarray([bounds[-1] + widths[-1]])])
+
+            return jnp.asarray(bins, dtype=jnp.float32), jnp.asarray(bounds, dtype=jnp.float32)
+
+        def gen_small_bins():
+            num_mantissa_bits = 3
+            num_exp_bits = 3
+            bias = 2**3 - 1
+
+            bins, bounds = gen_floating_point_bins(
+                num_mantissa_bits, num_exp_bits, bias, True)
+
+            assert bins.shape[0] == num_small_bins
+
+            return bins, bounds
+
+        def gen_large_bins():
+            num_mantissa_bits = 3
+            num_exp_bits = 3
+            bias = -3
+
+            bins, bounds = gen_floating_point_bins(
+                num_mantissa_bits, num_exp_bits, bias, True)
+
+            assert bins.shape[0] == num_large_bins
+
+            return bins, bounds
+
+        small_bins, small_bounds = gen_small_bins()
+        large_bins, large_bounds = gen_large_bins()
+
+        return HLGaussTwoPartCritic(
+            dtype=dtype,
+            small_centers=small_bins,
+            small_bounds=small_bounds,
+            large_centers=large_bins,
+            large_bounds=large_bounds,
+            smoothness=smoothness,
+        )
+
+    @nn.compact
+    def __call__(self, features, train=False):
+        small_logits = nn.Dense(
+                self.small_centers.shape[0],
+                use_bias=True,
+                kernel_init=self.weight_init,
+                bias_init=jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )(features)
+
+        large_logits = nn.Dense(
+                self.large_centers.shape[0],
+                use_bias=True,
+                kernel_init=self.weight_init,
+                bias_init=jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )(features)
+
+        return HLGaussTwoPartDist(
+            small_centers=self.small_centers,
+            small_bounds=self.small_bounds,
+            small_logits=small_logits.astype(jnp.float32),
+            large_centers=self.large_centers,
+            large_bounds=self.large_bounds,
+            large_logits=large_logits.astype(jnp.float32),
+            smoothness=self.smoothness,
+        )
 
 # Based on the Emergent Tool Use policy paper
 class EntitySelfAttentionNet(nn.Module):
