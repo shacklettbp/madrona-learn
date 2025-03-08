@@ -175,17 +175,13 @@ class DreamerV3Critic(nn.Module):
         return SymExpTwoHotDistribution.create(logits)
 
 # Based on M3 / Stop Regressing papers
-class HLGaussTwoPartDist(flax.struct.PyTreeNode):
-    small_logits: jax.Array
-    large_logits: jax.Array
+class HLGaussDist(flax.struct.PyTreeNode):
+    logits: jax.Array
 
     smoothness: float = flax.struct.field(pytree_node=False)
 
-    small_centers: jax.Array = flax.struct.field(pytree_node=False)
-    small_bounds: jax.Array = flax.struct.field(pytree_node=False)
-
-    large_centers: jax.Array = flax.struct.field(pytree_node=False)
-    large_bounds: jax.Array = flax.struct.field(pytree_node=False)
+    centers: jax.Array = flax.struct.field(pytree_node=False)
+    bounds: jax.Array = flax.struct.field(pytree_node=False)
 
     def mean(self):
         def categorical_pred(logits, centers):
@@ -212,18 +208,11 @@ class HLGaussTwoPartDist(flax.struct.PyTreeNode):
 
             return weighted_avg
 
-        small_pred = categorical_pred(self.small_logits, self.small_centers)
-        large_pred = categorical_pred(self.large_logits, self.large_centers)
-
-        return small_pred + large_pred
+        return categorical_pred(self.logits, self.centers)
 
     def loss(self, targets):
         targets = jnp.clip(
-            targets, self.large_centers[0], self.large_centers[-1])
-
-        small_large_boundary = 2
-        small_tgt = targets % (jnp.where(targets >= 0, 1, -1) * 2)
-        large_tgt = targets - small_tgt
+            targets, self.centers[0], self.centers[-1])
 
         erf = jax.scipy.special.erf
 
@@ -244,7 +233,6 @@ class HLGaussTwoPartDist(flax.struct.PyTreeNode):
 
         def hl_gauss(logits, bounds, tgts):
             sigmas = compute_sigma(bounds, tgts)
-            print(sigmas.shape)
 
             a = bounds[0]
             b = bounds[1]
@@ -260,10 +248,78 @@ class HLGaussTwoPartDist(flax.struct.PyTreeNode):
 
             return -(c * log_probs).sum(-1, keepdims=True)
 
-        small_loss = hl_gauss(self.small_logits, self.small_bounds, small_tgt)
-        large_loss = hl_gauss(self.large_logits, self.large_bounds, large_tgt)
+        return hl_gauss(self.logits, self.bounds, targets)
 
-        return small_loss + large_loss
+
+class HLGaussCritic(nn.Module):
+    dtype: jnp.dtype
+
+    centers: jax.Array
+    bounds: jax.Array
+
+    smoothness: float = 0.75
+
+    weight_init: Callable = jax.nn.initializers.constant(0)
+
+    @staticmethod
+    def create(
+        dtype: jnp.dtype,
+        num_bins: int = 127,
+        min_bound = -100,
+        max_bound = 100,
+        smoothness: float = 0.75,
+    ):
+        def gen_bins():
+            half = np.linspace(min_bound, 0, num_bins // 2 + 1)
+
+            bins = np.concatenate([half, -half[:-1][::-1]], axis=0)
+
+            width = bins[1] - bins[0]
+
+            bounds = bins - 0.5 * width
+            bounds = np.concatenate([bounds, np.asarray([bounds[-1] + width])], axis=0)
+
+            return jnp.asarray(bins, dtype=jnp.float32), jnp.asarray(bounds, dtype=jnp.float32)
+
+        bins, bounds = gen_bins()
+
+        return HLGaussCritic(
+            dtype=dtype,
+            centers=bins,
+            bounds=bounds,
+            smoothness=smoothness,
+        )
+
+    @nn.compact
+    def __call__(self, features, train=False):
+        logits = nn.Dense(
+                self.centers.shape[0],
+                use_bias=True,
+                kernel_init=self.weight_init,
+                bias_init=jax.nn.initializers.constant(0),
+                dtype=self.dtype,
+            )(features)
+
+        return HLGaussDist(
+            centers=self.centers,
+            bounds=self.bounds,
+            logits=logits.astype(jnp.float32),
+            smoothness=self.smoothness,
+        )
+
+class HLGaussTwoPartDist(flax.struct.PyTreeNode):
+    small_dist: HLGaussDist
+    large_dist: HLGaussDist
+
+    def mean(self):
+        return self.small_dist.mean() + self.large_dist.mean()
+
+    def loss(self, targets):
+        small_large_boundary = 2
+        small_tgt = targets % (jnp.where(targets >= 0, 1, -1) * 2)
+        large_tgt = targets - small_tgt
+
+        return self.small_dist.loss(small_tgt) + self.large_dist.loss(large_tgt)
 
 
 class HLGaussTwoPartCritic(nn.Module):
@@ -377,14 +433,20 @@ class HLGaussTwoPartCritic(nn.Module):
             )(features)
 
         return HLGaussTwoPartDist(
-            small_centers=self.small_centers,
-            small_bounds=self.small_bounds,
-            small_logits=small_logits.astype(jnp.float32),
-            large_centers=self.large_centers,
-            large_bounds=self.large_bounds,
-            large_logits=large_logits.astype(jnp.float32),
-            smoothness=self.smoothness,
+            small_dist = HLGaussDist(
+                centers=self.small_centers,
+                bounds=self.small_bounds,
+                logits=small_logits.astype(jnp.float32),
+                smoothness=self.smoothness,
+            ),
+            large_dist = HLGaussDist(
+                centers=self.large_centers,
+                bounds=self.large_bounds,
+                logits=large_logits.astype(jnp.float32),
+                smoothness=self.smoothness,
+            ),
         )
+
 
 # Based on the Emergent Tool Use policy paper
 class EntitySelfAttentionNet(nn.Module):
