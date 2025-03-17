@@ -434,13 +434,13 @@ def _ppo(
 
         valid_inds = sampled_traj_indices
     else:
-        advantages = rollout_data.all()['advantages']
-        num_minibatches = advantages.shape[0] // cfg.algo.minibatch_size
-        assert advantages.shape[0] % cfg.algo.minibatch_size == 0
+        num_trajectories = rollout_data.all()['dones'].shape[0]
+        num_minibatches = num_trajectories // cfg.algo.minibatch_size
+        assert num_trajectories % cfg.algo.minibatch_size == 0
 
-        valid_inds = jnp.arange(advantages.shape[0])
+        valid_inds = jnp.arange(num_trajectories)
 
-        traj_weights = jnp.ones((advantages.shape[0],1), dtype=jnp.float32)
+        traj_weights = jnp.ones((num_trajectories, 1), dtype=jnp.float32)
 
     def epoch_iter(epoch_i, inputs):
         policy_state, train_state, metrics = inputs
