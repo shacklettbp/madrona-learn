@@ -187,9 +187,12 @@ def _ppo_update(
             assert fwd_results['critic'].shape[-1] == 1
             new_values_normalized = fwd_results['critic']
 
-            value_errs = (value_norm.invert(train_state.value_normalizer_state,
-                                            new_values_normalized) - 
-                          mb['returns'])
+            if value_norm == None:
+                value_errs = new_values_normalized - mb['returns']
+            else:
+                value_errs = (value_norm.invert(train_state.value_normalizer_state,
+                                                new_values_normalized) - 
+                              mb['returns'])
 
             if cfg.algo.clip_value_loss:
                 old_values_normalized = mb['values']
@@ -199,9 +202,13 @@ def _ppo_update(
 
                 new_values_normalized = jnp.clip(new_values_normalized, low, high)
 
-            new_value_norm_state, normalized_returns = (
-                value_norm.normalize_and_update_estimates(
-                    train_state.value_normalizer_state, mb['returns']))
+            if value_norm == None:
+                normalized_returns = mb['returns']
+                new_value_norm_state = None
+            else:
+                new_value_norm_state, normalized_returns = (
+                    value_norm.normalize_and_update_estimates(
+                        train_state.value_normalizer_state, mb['returns']))
 
             if cfg.algo.huber_value_loss:
                 value_losses = optax.huber_loss(
