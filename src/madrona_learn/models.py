@@ -109,9 +109,8 @@ class MLP(nn.Module):
         for i in range(self.num_layers):
             x = nn.Dense(
                     self.num_channels,
-                    use_bias=True,
+                    use_bias=False,
                     kernel_init=self.weight_init,
-                    bias_init=jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                 )(x)
             x = LayerNorm(dtype=self.dtype)(x)
@@ -131,7 +130,7 @@ class DenseLayerDiscreteActor(nn.Module):
                 total_action_dim,
                 use_bias=True,
                 kernel_init=self.weight_init,
-             bias_init=jax.nn.initializers.constant(0),
+                bias_init=jax.nn.initializers.constant(0),
                 dtype=self.dtype,
             )
 
@@ -465,9 +464,8 @@ class EntitySelfAttentionNet(nn.Module):
             def embed(x):
                 o = nn.Dense(
                     self.num_embed_channels,
-                    use_bias = True,
+                    use_bias = False,
                     kernel_init = self.dense_init,
-                    bias_init = jax.nn.initializers.constant(0),
                     dtype=self.dtype,
                     name=name,
                 )(x)
@@ -518,10 +516,9 @@ class EntitySelfAttentionNet(nn.Module):
 
         ff_out = nn.Dense(
                 self.num_out_channels,
-                use_bias = True,
+                use_bias = False,
                 dtype=self.dtype,
                 kernel_init = self.dense_init,
-                bias_init = jax.nn.initializers.constant(0),
                 name='ff_0',
             )(attended_out)
 
@@ -529,10 +526,9 @@ class EntitySelfAttentionNet(nn.Module):
         ff_out = nn.leaky_relu(ff_out)
         ff_out = nn.Dense(
                 self.num_out_channels,
-                use_bias = True,
+                use_bias = False,
                 dtype=self.dtype,
                 kernel_init = self.dense_init,
-                bias_init = jax.nn.initializers.constant(0),
                 name='ff_1',
             )(ff_out)
 

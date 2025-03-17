@@ -85,6 +85,7 @@ class PolicyState(flax.struct.PyTreeNode):
 class PolicyTrainState(flax.struct.PyTreeNode):
     value_normalizer: Optional[EMANormalizer] = flax.struct.field(pytree_node=False)
     max_advantage_est: EMAEstimate = flax.struct.field(pytree_node=False)
+    initial_weight_norms: FrozenDict[str, jax.Array]
     tx: optax.GradientTransformation = flax.struct.field(pytree_node=False)
     value_normalizer_state: Optional[FrozenDict[str, Any]]
     max_advantage_est_state: FrozenDict[str, jax.Array]
@@ -108,6 +109,7 @@ class PolicyTrainState(flax.struct.PyTreeNode):
         return PolicyTrainState(
             value_normalizer = self.value_normalizer,
             max_advantage_est = self.max_advantage_est,
+            initial_weight_norms = self.initial_weight_norms,
             tx = tx if tx != None else self.tx,
             value_normalizer_state = (
                 value_normalizer_state if value_normalizer_state != None else
@@ -408,8 +410,21 @@ def _setup_train_state(
 
     max_advantage_est_state = max_advantage_est.init_estimates(jnp.zeros((1,)))
 
+    def compute_initial_norms(path, x):
+        if path[-1].key == 'kernel':
+            return jnp.linalg.vector_norm(x, ord=2)
+        else:
+            return None
+
+    initial_weight_norms = jax.tree.map_with_path(
+        compute_initial_norms, policy_state.params)
+
+    initial_weight_norms['critic'] = jax.tree.map(lambda x: None, initial_weight_norms['critic'])
+    initial_weight_norms['actor'] = jax.tree.map(lambda x: None, initial_weight_norms['actor'])
+
     return PolicyTrainState(
         value_normalizer = value_norm,
+        initial_weight_norms = initial_weight_norms,
         max_advantage_est = max_advantage_est,
         tx = optimizer,
         value_normalizer_state = value_norm_state,

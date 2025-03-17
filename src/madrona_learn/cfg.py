@@ -88,7 +88,9 @@ class TrainConfig:
     normalize_advantages: bool = True # Only used if compute_advantages = True
     normalize_returns: bool = True # Only used if compute_advantages = False
     normalize_values: bool = False
-    filter_advantages: bool = True
+    filter_advantages: bool = False
+    importance_sample_trajectories: bool = False
+    importance_sample_num_minibatches: int = 0
     value_normalizer_decay: float = 0.99999
     max_advantage_est_decay: float = 0.99999
     compute_dtype: jnp.dtype = jnp.float32

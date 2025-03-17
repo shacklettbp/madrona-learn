@@ -109,6 +109,7 @@ class PPO(AlgoBase):
 def _ppo_update(
     cfg: TrainConfig,
     mb: FrozenDict[str, Any],
+    mb_weights: jax.Array,
     policy_state: PolicyState,
     train_state: PolicyTrainState,
     metrics: TrainingMetrics,
@@ -210,29 +211,28 @@ def _ppo_update(
                     new_values_normalized, normalized_returns)
 
         def reduce_action_objs(action_objs):
-            leaves = jax.tree.leaves(action_objs)
-            action_obj_avg = jnp.mean(leaves[0], dtype=jnp.float32)
-            for leaf in leaves[1:]:
-                action_obj_avg = action_obj_avg + jnp.mean(leaf, dtype=jnp.float32)
+            def reduce_action_obj(action_obj):
+                return jnp.mean(mb_weights * action_obj.astype(jnp.float32))
 
-            return action_obj_avg
+            return sum(reduce_action_obj(action_obj) for action_obj in jax.tree_leaves(action_objs))
+
+
+        def reduce_values(values_losses):
+            return jnp.mean(mb_weights * value_losses, dtype=jnp.float32)
+
 
         def reduce_entropies(entropies):
-            keys = list(entropies.keys())
-            entropy_avg = (
-                    cfg.algo.entropy_coef[keys[0]] *
-                    jnp.mean(entropies[keys[0]], dtype=jnp.float32)
-                )
-            for k in keys[1:]:
-                entropy_avg = entropy_avg + (
-                        cfg.algo.entropy_coef[k] *
-                        jnp.mean(entropies[k], dtype=jnp.float32)
-                    )
+            def reduce_action_entropy(k):
+                entropy_coef = cfg.algo.entropy_coef[k]
+                action_entropy = entropies[k]
 
-            return entropy_avg
+                return entropy_coef * jnp.mean(
+                    mb_weights * action_entropy.astype(jnp.float32))
+
+            return sum(reduce_action_entropy(k) for k in entropies.keys())
 
         action_obj_avg = reduce_action_objs(action_objs)
-        value_loss = jnp.mean(value_losses, dtype=jnp.float32)
+        value_loss = reduce_values(value_losses)
         entropy_avg = reduce_entropies(entropies)
 
         # Maximize the action objective function
@@ -293,6 +293,43 @@ def _ppo_update(
             value_errs,
         ) = aux[1]
 
+        def normalize_params(param, init_norm):
+            if init_norm == None:
+                return param
+
+            return init_norm * param / jnp.linalg.vector_norm(param, ord=2)
+
+        new_params = jax.tree.map(
+            normalize_params, new_params, train_state.initial_weight_norms)
+        
+        def normalize_layernorms(d):
+            if not isinstance(d, dict):
+                return d
+
+            new = {}
+            for k, v in d.items():
+                if "LayerNorm" in k:
+                    cur_bias = v['impl']['bias']
+                    cur_scale = v['impl']['scale']
+                    
+                    num_features = cur_scale.shape[-1]
+
+                    normalize_factor = jnp.sqrt(num_features / (
+                        jnp.dot(cur_bias, cur_bias) + jnp.dot(cur_scale, cur_scale)))
+
+                    new[k] = {
+                        'impl': {
+                            'bias': normalize_factor * cur_bias,
+                            'scale': normalize_factor * cur_scale,
+                        },
+                    }
+                else:
+                    new[k] = normalize_layernorms(v)
+
+            return new
+
+        new_params = normalize_layernorms(new_params)
+
         policy_state = policy_state.update(
             params = new_params,
             batch_stats = new_ac_batch_stats,
@@ -311,7 +348,7 @@ def _ppo_update(
                 [x.reshape(-1, x.shape[-1]) for x in jax.tree.leaves(action_objs)],
                 axis=-1),
             'Value Loss': value_losses,
-            'Value Errors': value_errs,
+            'Value Errors': jnp.abs(value_errs),
             'Entropy': jnp.concatenate(
                 [x.reshape(-1, x.shape[-1]) for x in jax.tree.leaves(entropies)],
                 axis=-1),
@@ -358,7 +395,45 @@ def _ppo(
         valid_inds = jnp.where(jnp.arange(advantages_abs_flat.size) < num_datapoints,
                                advantage_indices_sort,
                                -1)
-        jax.debug.print("{} {}", num_minibatches, num_above_threshold)
+
+        traj_weights = jnp.ones((advantages.shape[0],), dtype=jnp.float32)
+    elif cfg.importance_sample_trajectories:
+        advantages = rollout_data.all()['advantages'].astype(jnp.float32)
+        values = rollout_data.all()['values'].astype(jnp.float32)
+        returns = rollout_data.all()['returns'].astype(jnp.float32)
+
+        num_total_trajectories = advantages.shape[0]
+
+        num_minibatches = cfg.importance_sample_num_minibatches
+        num_sampled_trajectories = num_minibatches * cfg.algo.minibatch_size
+        assert num_sampled_trajectories < num_total_trajectories
+        assert num_minibatches > 0
+
+        advantages_abs = jnp.abs(advantages)
+        traj_avg_advantage_magnitude = jnp.mean(advantages_abs, axis=1)
+
+        value_errs = jnp.abs(values - returns)
+        traj_avg_value_err = jnp.mean(value_errs, axis=1)
+
+        traj_scores = traj_avg_advantage_magnitude + traj_avg_value_err
+        traj_probs = jax.nn.softmax(traj_scores, axis=0)
+        traj_weights = (1.0 / num_total_trajectories) / traj_probs
+
+        sample_rnd, train_state = train_state.gen_update_rnd()
+
+        sampled_traj_indices = random.choice(
+            sample_rnd, num_total_trajectories,
+            shape=(num_sampled_trajectories,), replace=False, p=traj_probs.reshape(-1))
+
+        valid_inds = sampled_traj_indices
+    else:
+        advantages = rollout_data.all()['advantages']
+        num_minibatches = advantages.shape[0] // cfg.algo.minibatch_size
+        assert advantages.shape[0] % cfg.algo.minibatch_size == 0
+
+        valid_inds = jnp.arange(advantages.shape[0])
+
+        traj_weights = jnp.ones((advantages.shape[0],1), dtype=jnp.float32)
 
     def epoch_iter(epoch_i, inputs):
         policy_state, train_state, metrics = inputs
@@ -375,9 +450,6 @@ def _ppo(
 
             rnd_inds = filter_valid_inds(rnd_inds)
 
-            #jax.debug.print("{} {} {} {} {} {}", num_minibatches, num_above_threshold, advantages_abs_flat.size, rnd_inds, advantages_abs_flat[rnd_inds], 0.01 * cur_max_advantage_est)
-
-
         def mb_iter(mb_i, inputs):
             policy_state, train_state, metrics = inputs
 
@@ -387,9 +459,10 @@ def _ppo(
                     (cfg.algo.minibatch_size,))
                 #jax.debug.print("Um {}", mb_inds)
                 mb = rollout_data.minibatch(mb_inds)
+                mb_weights = traj_weights[mb_inds]
 
             policy_state, train_state, metrics = _ppo_update(
-                cfg, mb, policy_state, train_state, metrics)
+                cfg, mb, mb_weights, policy_state, train_state, metrics)
 
             with profile('Metrics Callback'):
                 metrics = user_metrics_cb(
